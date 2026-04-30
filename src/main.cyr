@@ -24,17 +24,17 @@ fn main() {
     var maj = (v >> 16) & 0xFF;
     var min = (v >> 8)  & 0xFF;
     var pat =  v        & 0xFF;
-    syscall(1, 1, "samvada_version = ", 18);
-    print_num(maj); syscall(1, 1, ".", 1);
-    print_num(min); syscall(1, 1, ".", 1);
-    print_num(pat); syscall(1, 1, "\n", 1);
+    print("samvada_version = ", 18);
+    print_num(maj); print(".", 1);
+    print_num(min); print(".", 1);
+    print_num(pat); print("\n", 1);
 
     # Confirm the FFI surface is wired (slot offsets pinned).
-    syscall(1, 1, "ffi slots = ", 12);
+    print("ffi slots = ", 12);
     print_num(samvada_ffi_size() / 8);
-    syscall(1, 1, " (", 2);
+    print(" (", 2);
     print_num(samvada_ffi_size());
-    syscall(1, 1, " bytes)\n", 8);
+    print(" bytes)\n", 8);
 
     return 0;
 }
