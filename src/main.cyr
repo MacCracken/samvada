@@ -1,9 +1,41 @@
-# samvada — main entry point
-# Stdlib auto-included via cyrius.cyml
+# samvada — standalone smoke entry point
+# Stdlib auto-included via cyrius.cyml.
+#
+# This is the `cyrius build src/main.cyr` path — a no-shim,
+# no-libsystemd binary used to verify the bundle compiles cleanly
+# end-to-end. Real consumers DON'T go through this entry: they
+# link `deps/samvada_main.c` (which provides its own `main()`)
+# and that calls into `samvada_main(table)` defined in
+# src/samvada.cyr.
+#
+# The lib bundle (`dist/samvada.cyr`) only includes
+# samvada_ffi.cyr + samvada.cyr; main.cyr is intentionally
+# excluded so consumer projects don't pick up our `main()` and
+# collide with the C shim's.
+
+include "src/lib.cyr"
 
 fn main() {
     alloc_init();
-    println("hello from samvada");
+    println("samvada — Cyrius dbus client for AGNOS");
+    println("standalone smoke build (no libsystemd shim linked)");
+
+    var v = samvada_version();
+    var maj = (v >> 16) & 0xFF;
+    var min = (v >> 8)  & 0xFF;
+    var pat =  v        & 0xFF;
+    syscall(1, 1, "samvada_version = ", 18);
+    print_num(maj); syscall(1, 1, ".", 1);
+    print_num(min); syscall(1, 1, ".", 1);
+    print_num(pat); syscall(1, 1, "\n", 1);
+
+    # Confirm the FFI surface is wired (slot offsets pinned).
+    syscall(1, 1, "ffi slots = ", 12);
+    print_num(samvada_ffi_size() / 8);
+    syscall(1, 1, " (", 2);
+    print_num(samvada_ffi_size());
+    syscall(1, 1, " bytes)\n", 8);
+
     return 0;
 }
 
