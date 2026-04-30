@@ -19,6 +19,7 @@ output = "samvada"
 # the bundle is intentionally trivial.
 [lib]
 modules = [
+    "src/samvada_ffi.cyr",
     "src/samvada.cyr",
 ]
 

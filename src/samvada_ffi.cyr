@@ -1,0 +1,86 @@
+# @internal — samvada FFI fn-table layout
+# samvada_ffi.cyr — slot offsets and helpers for the C-shim
+# function table.
+#
+# The C side (`deps/samvada_main.c`) builds a 72-byte fn-table on
+# its own stack, populates each slot with an `sd_bus_*`-backed
+# wrapper, then calls `samvada_main(fn_table_ptr)`. The Cyrius
+# side reaches into the table via `samvada_ffi_get_slot` and
+# dispatches with `fncallN` from `lib/fnptr.cyr`.
+#
+# Layout (v1) — same shape pattern as mabda's Backend struct.
+# Append-after-kind invariant: every future v(N+1) slot lands at
+# offset 72 + 8*K. `kind` stays at 64 forever so a v0 caller
+# scanning a v(N+1) table never misreads a fnptr as the kind word.
+#
+# Wire-level:
+#   [+0]   sb_open_system_bus(bus_out_ptr)                                    -> 0|err
+#   [+8]   sb_get_session_path(bus, pid, out_buf, out_buf_len)                -> 0|err
+#   [+16]  sb_take_device(bus, sess_cstr, major, minor, fd_out, active_out)   -> 0|err
+#   [+24]  sb_release_device(bus, sess_cstr, major, minor)                    -> 0|err
+#   [+32]  sb_pump_signals(bus)                                               -> events|negative_err
+#   [+40]  sb_close_bus(bus)                                                  -> 0
+#   [+48]  sb_subscribe_pause_resume(bus, sess_cstr, callback, userdata)      -> slot|err
+#   [+56]  sb_unsubscribe(slot)                                               -> 0
+#   [+64]  kind  (NULL=0, LIBSYSTEMD=1, PURE_CYRIUS=2)
+#   [+72+] reserved for v0.3.0 (properties, introspection, session bus...)
+#
+# Every C wrapper takes <=6 args so the table is fncall6-safe on
+# both x86_64 SysV and aarch64 (cyrius's 6-arg fncall convention,
+# see lib/fnptr.cyr docstring). Helpers that need more state pack
+# it into a side struct addressed by pointer.
+
+# Slot offsets — keep these as fns rather than globals so a
+# downstream module can include this file in any order without
+# tripping the global-init-order silent-zero gotcha.
+fn samvada_slot_open_system_bus()        { return 0; }
+fn samvada_slot_get_session_path()       { return 8; }
+fn samvada_slot_take_device()            { return 16; }
+fn samvada_slot_release_device()         { return 24; }
+fn samvada_slot_pump_signals()           { return 32; }
+fn samvada_slot_close_bus()              { return 40; }
+fn samvada_slot_subscribe_pause_resume() { return 48; }
+fn samvada_slot_unsubscribe()            { return 56; }
+fn samvada_slot_kind()                   { return 64; }
+fn samvada_ffi_size()                    { return 72; }
+
+# Backend kinds. NULL = mock / unbound table (CPU tests). LIBSYSTEMD
+# is the v0.x C-shim. PURE_CYRIUS is the v1.0 retirement target.
+fn samvada_backend_kind_null()         { return 0; }
+fn samvada_backend_kind_libsystemd()   { return 1; }
+fn samvada_backend_kind_pure_cyrius()  { return 2; }
+
+# Allocate a zero-filled fn-table on the heap. Used by Cyrius-side
+# consumers (e.g. mock backends in tests). The C shim builds its
+# table on the C stack and never calls this.
+fn samvada_ffi_alloc() {
+    var t = alloc(samvada_ffi_size());
+    if (t == 0) { return 0; }
+    var i = 0;
+    var sz = samvada_ffi_size();
+    while (i < sz) {
+        store64(t + i, 0);
+        i = i + 8;
+    }
+    return t;
+}
+
+# Read the fnptr (or kind word) at `off` from table `t`. Returns
+# 0 if `t` is null — caller checks before dispatching.
+fn samvada_ffi_get_slot(t, off) {
+    if (t == 0) { return 0; }
+    return load64(t + off);
+}
+
+# Install a fnptr at `off`. Used by mock backends + C shim's Cyrius-
+# side bindings (when the table is built by Cyrius rather than C).
+fn samvada_ffi_set_slot(t, off, fp) {
+    if (t == 0) { return 0; }
+    store64(t + off, fp);
+    return 0;
+}
+
+# Convenience: read kind without exposing the offset constant.
+fn samvada_ffi_kind(t) {
+    return samvada_ffi_get_slot(t, samvada_slot_kind());
+}

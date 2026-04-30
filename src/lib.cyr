@@ -7,4 +7,5 @@
 # (samvada_ffi.cyr), logind helpers (samvada_logind.cyr), and
 # whatever submodules the protocol implementation needs.
 
+include "src/samvada_ffi.cyr"
 include "src/samvada.cyr"
