@@ -1,0 +1,38 @@
+# samvada test suite
+# Stdlib auto-included via cyrius.cyml
+
+include "src/lib.cyr"
+
+fn test_smoke() {
+    test_group("smoke");
+    assert(1, "true is true");
+    assert_eq(1 + 1, 2, "math works");
+    return 0;
+}
+
+fn test_samvada_version() {
+    test_group("v0.1.0 placeholder API");
+    # Pin the version triple. When v0.2.0 lands, this assertion
+    # bumps and `samvada_version` gains real structured-version
+    # accessors. Until then, the constant return value is the
+    # signal that the module exists + the bundle is wired.
+    assert_eq(samvada_version(), (0 << 16) | (1 << 8) | 0,
+              "v0.1.0 packed triple");
+    # Component extraction sanity (catches a future bug where
+    # someone reorders the bit-shifts in samvada_version).
+    var v = samvada_version();
+    assert_eq((v >> 16) & 0xFF, 0, "major");
+    assert_eq((v >> 8)  & 0xFF, 1, "minor");
+    assert_eq(v         & 0xFF, 0, "patch");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_smoke();
+    test_samvada_version();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

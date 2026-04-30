@@ -1,0 +1,25 @@
+# @public — samvada API surface (stable across v0.x)
+# samvada.cyr — entry point for the dbus / logind subset
+#
+# v0.1.0 (this commit): scaffold only — a placeholder fn so the
+# `[lib]` bundle has something to ship and downstream consumers
+# can `[deps.samvada]` against the package shape.
+#
+# v0.2.0 (planned): real Cyrius wrappers around the libsystemd
+# C shim (`deps/samvada_main.c`). Expected public surface:
+#   samvada_init(fn_table_ptr) — bind the C-shim fn table
+#   samvada_session_take_device(major, minor) → fd | err
+#   samvada_session_release_device(major, minor)
+#   samvada_pump_signals() — drain Pause/ResumeDevice events
+#   samvada_release()
+#
+# The mabda `_backend_native_surface_configure_logind` slot will
+# call into this surface once it's filled.
+
+# Placeholder fn — exists so the [lib] bundle has a real symbol
+# until the C shim lands in v0.2.0. Returns the version triple
+# packed as a u32 (major << 16 | minor << 8 | patch) — useful for
+# downstream version-gate checks once the API stabilizes.
+fn samvada_version() {
+    return (0 << 16) | (1 << 8) | 0;
+}

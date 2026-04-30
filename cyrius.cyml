@@ -1,0 +1,26 @@
+[package]
+name = "samvada"
+version = "${file:VERSION}"
+description = "samvada — Cyrius dbus client for the AGNOS suite (logind / system-bus / message marshalling)"
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/samvada"
+language = "cyrius"
+cyrius = "5.7.48"
+
+# v0.x ships a smoke entry point only; the API surface (lib.cyr +
+# samvada.cyr) gets populated when the C shim lands in v0.2.0.
+[build]
+entry = "src/main.cyr"
+test = "src/test.cyr"
+output = "samvada"
+
+# `[lib]` feeds `cyrius distlib` — module order matters when
+# samvada grows real modules. v0.1.0 has only a placeholder fn so
+# the bundle is intentionally trivial.
+[lib]
+modules = [
+    "src/samvada.cyr",
+]
+
+[deps]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "tagged", "fnptr"]

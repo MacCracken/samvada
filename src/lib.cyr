@@ -1,0 +1,10 @@
+# @internal — samvada include chain
+# lib.cyr — single source of truth for what `cyrius distlib`
+# bundles into `dist/samvada.cyr`. Order matters when modules
+# reference each other.
+#
+# v0.1.0: only samvada.cyr. v0.2.0+: add C-shim FFI bindings
+# (samvada_ffi.cyr), logind helpers (samvada_logind.cyr), and
+# whatever submodules the protocol implementation needs.
+
+include "src/samvada.cyr"
