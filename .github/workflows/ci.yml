@@ -5,13 +5,14 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_call:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build-and-test:
+  build:
     name: Build & Test
     runs-on: ubuntu-latest
     steps:
@@ -19,9 +20,11 @@ jobs:
 
       - name: Install Cyrius toolchain
         run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep 'cyrius *= *"' cyrius.cyml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')}"
+          # Precise PCRE — only matches `cyrius = "..."` at line start.
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          # `-fL`: fail on 4xx/5xx so we don't tar an HTML 404 page.
+          curl -sfLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
           mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
@@ -32,17 +35,185 @@ jobs:
           echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
 
       - name: Resolve dependencies
-        run: cyrius deps
+        # `cyrius deps` reads [deps].stdlib from cyrius.cyml and
+        # populates lib/. Wipe-and-recreate to defeat any stale
+        # state in the runner cache.
+        run: |
+          rm -rf lib
+          mkdir lib
+          cyrius deps
+
+      - name: Lint
+        # Auto-discover so new modules are covered without editing CI.
+        # nullglob: empty globs expand to nothing rather than the literal pattern.
+        run: |
+          shopt -s nullglob
+          fail=0
+          for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr; do
+            out=$(cyrius lint "$f" 2>&1)
+            echo "$out"
+            if echo "$out" | grep -qE '^\s*warn '; then
+              fail=1
+            fi
+          done
+          [ $fail -eq 0 ] || { echo "lint: warnings present"; exit 1; }
+
+      - name: Format check
+        # `cyrius fmt --check` emits the formatted source; diff
+        # against the committed file to enforce no drift.
+        run: |
+          shopt -s nullglob
+          fail=0
+          for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr; do
+            if ! diff -q <(cyrius fmt "$f" --check 2>/dev/null) "$f" > /dev/null; then
+              echo "needs fmt: $f"
+              fail=1
+            fi
+          done
+          [ $fail -eq 0 ] || { echo "fmt: drift detected"; exit 1; }
+
+      - name: Vet
+        run: cyrius vet src/main.cyr
+
+      - name: Verify dist bundle is in sync with src/
+        # The bundle (dist/samvada.cyr) is what [deps.samvada]
+        # consumers fetch. Stale dist == consumers see the wrong
+        # API surface. This catches the "forgot to rerun
+        # cyrius distlib" mistake before tagging.
+        run: |
+          cyrius distlib
+          if ! git diff --quiet dist/samvada.cyr; then
+            echo "ERROR: dist/samvada.cyr is stale. Run 'cyrius distlib' and commit the result."
+            git --no-pager diff dist/samvada.cyr | head -40
+            exit 1
+          fi
+          echo "dist/samvada.cyr matches src/"
 
       - name: Build
         run: |
           mkdir -p build
-          cyrius build src/main.cyr build/${{ github.event.repository.name }}
+          cyrius build src/main.cyr build/samvada
+          echo "samvada: $(wc -c < build/samvada) bytes"
+
+      - name: Verify ELF
+        run: xxd -l 4 build/samvada | grep -q "7f45 4c46"
+
+      - name: Smoke run
+        # Standalone build (no C shim, no libsystemd link) — must
+        # print version + ffi shape and exit 0.
+        run: |
+          out=$(./build/samvada)
+          echo "$out"
+          echo "$out" | grep -q "samvada_version = " || { echo "smoke: missing version line"; exit 1; }
+          echo "$out" | grep -q "ffi slots = 9 (72 bytes)" || { echo "smoke: ffi shape drift"; exit 1; }
 
       - name: Test
-        # v5.6.28: bare `cyrius test` picks up the [build].test entry
-        # AND auto-discovers tests/*.tcyr — avoids the previous
-        # `cyrius test src/test.cyr` form that hard-failed when the
-        # stub didn't exist (Issue 1) and also wouldn't ever exercise
-        # tests/${proj}.tcyr.
+        # v5.6.28: bare `cyrius test` picks up [build].test AND
+        # auto-discovers tests/*.tcyr — covers tests/samvada.tcyr
+        # without us having to spell it out.
         run: cyrius test
+
+  c-shim:
+    name: C Shim Compile-Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libsystemd headers
+        run: sudo apt-get install -y --no-install-recommends libsystemd-dev pkg-config
+
+      - name: Compile-check deps/samvada_main.c
+        # samvada itself doesn't link libsystemd — the consumer
+        # builds the shim and links. CI ensures the shim never
+        # rots: -Wall -Wextra -Werror clean against whatever
+        # libsystemd version ships with the runner.
+        run: |
+          mkdir -p build
+          cc -Wall -Wextra -Werror -c deps/samvada_main.c \
+             $(pkg-config --cflags libsystemd) \
+             -o build/samvada_main.o
+          echo "samvada_main.o: $(wc -c < build/samvada_main.o) bytes"
+
+      - name: Verify libsystemd link
+        # Stub _cyrius_init / alloc_init / samvada_main so the C
+        # side can link against -lsystemd cleanly. Catches missing
+        # libsystemd symbols or signature drift.
+        run: |
+          cat > build/samvada_link_stubs.c <<'EOF'
+          #include <stdint.h>
+          void _cyrius_init(void) {}
+          long alloc_init(void) { return 0; }
+          long samvada_main(int64_t t) { (void)t; return 0; }
+          EOF
+          cc -c build/samvada_link_stubs.c -o build/samvada_link_stubs.o
+          cc build/samvada_main.o build/samvada_link_stubs.o \
+             $(pkg-config --libs libsystemd) \
+             -o build/samvada-shim-link-test
+          file build/samvada-shim-link-test
+          rm -f build/samvada-shim-link-test
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for dangerous patterns
+        # Matches code lines only — rejects patterns inside #
+        # comments. Use awk instead of `grep -v '# '` which would
+        # eat any line with an inline comment and hide real hits.
+        run: |
+          FAIL=0
+          scan() {
+            local label="$1"; shift
+            local pat="$1"; shift
+            local hits
+            hits=$(grep -rn "$pat" src/ 2>/dev/null | awk -F: '
+              { line=$3; for(i=4;i<=NF;i++) line=line":"$i;
+                sub(/^[[:space:]]+/,"",line);
+                if (substr(line,1,1) != "#") print $1":"$2":"line }')
+            if [ -n "$hits" ]; then
+              echo "FAIL: $label"
+              echo "$hits"
+              FAIL=1
+            fi
+          }
+          # samvada is a dbus client — no business spawning, exec'ing,
+          # or writing to system paths.
+          scan "raw execve"      'syscall( *59'
+          scan "raw fork"        'syscall( *57'
+          scan "sys_system"      '\bsys_system\s*('
+          scan "writes to /etc"  '"/etc/'
+          scan "writes to /bin"  '"/bin/'
+          scan "writes to /sbin" '"/sbin/'
+          # Unbounded stack buffers (>=64KB — force heap review).
+          # var buf[N] in a fn is STATIC data, not stack — large
+          # ones bloat the binary and surface as a code-review smell.
+          awk -F: '
+            /var [A-Za-z_][A-Za-z0-9_]*\[[0-9]+\]/ {
+              match($0, /\[[0-9]+\]/); s=substr($0,RSTART+1,RLENGTH-2); n=s+0;
+              if (n >= 65536) print FILENAME":"NR": large buffer ("n" bytes): "$0
+            }' src/*.cyr | tee /tmp/bigbuf.txt
+          [ -s /tmp/bigbuf.txt ] && FAIL=1
+          echo "security scan complete (fail: $FAIL)"
+          exit $FAIL
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check required files
+        run: |
+          MISSING=0
+          for f in README.md CHANGELOG.md VERSION CONTRIBUTING.md SECURITY.md LICENSE cyrius.cyml; do
+            if [ -f "$f" ]; then echo "  OK: $f"
+            else echo "  MISSING: $f"; MISSING=1; fi
+          done
+          exit $MISSING
+
+      - name: Verify version consistency
+        run: |
+          VERSION=$(tr -d '[:space:]' < VERSION)
+          echo "VERSION file: $VERSION"
+          grep -q "^## \[$VERSION\]" CHANGELOG.md || { echo "FAIL: version not in CHANGELOG.md"; exit 1; }
+          echo "Version consistent (manifest pulls VERSION via \${file:VERSION})"
