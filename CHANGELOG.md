@@ -4,6 +4,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-04-30
+
+### Added
+- `src/samvada_ffi.cyr` — FFI fn-table layout (9 slots, 72 bytes,
+  kind pinned at offset 64 forever per the append-after-kind
+  invariant). Slot offsets exposed as fns to dodge the
+  global-init-order silent-zero gotcha.
+- `deps/samvada_main.c` — libsystemd C-shim entry point.
+  `_cyrius_init` + `alloc_init` preamble, then populates the
+  fn-table with `sd_bus_*`-backed wrappers and calls
+  `samvada_main(table)`. Compiles clean under
+  `cc -Wall -Wextra -Werror` against libsystemd 260. Coverage:
+  open_system_bus, get_session_path (login1 GetSessionByPID),
+  take_device (TakeDevice + dup'd fd), release_device,
+  pump_signals (sd_bus_process loop), close_bus,
+  subscribe_pause_resume (sd_bus_match_signal), unsubscribe.
+- `src/samvada.cyr` graduated from placeholder to real public
+  surface: `samvada_init` / `samvada_session_take_device` /
+  `samvada_session_release_device` / `samvada_pump_signals` /
+  `samvada_release` / `samvada_main`. All errors are negative
+  sd-bus errnos so the C convention passes through unchanged.
+- 7 new test groups (32 asserts) in `tests/samvada.tcyr`:
+  slot-offset pin (freezes the C-shim contract), backend-kind
+  pins, alloc/get/set round-trip, null-safety, init rejection
+  paths, release idempotency, v0.2.0 version triple.
+- `samvada_version()` bumped 0.1.0 -> 0.2.0 packed triple.
+
+### Notes
+- Live `sd_bus` calls are NOT exercised by `cyrius test` — they
+  need a running system dbus + logind. CPU coverage is the
+  structural contract + null-safety paths. The end-to-end
+  validation gate is mabda's
+  `_backend_native_surface_configure_logind` once that fills.
+- samvada itself does not link libsystemd — the consumer builds
+  `deps/samvada_main.c` and links libsystemd. See
+  `docs/guides/consumer-link.md` for the build recipe.
+
 ## [0.1.0] — 2026-04-30
 
 ### Added
