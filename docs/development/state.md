@@ -11,9 +11,8 @@ commit; no protocol code yet.
 ## Toolchain
 
 - **Cyrius pin**: `5.7.48` (in `cyrius.cyml [package].cyrius`)
-- Local cyrius bin: `5.7.42` (older — pin will floor on the
-  latest available; bump to local version on first real
-  development cycle).
+- Local cyrius bin: `5.7.48` — pin and local match; toolchain
+  is current as of the v0.2.0 development cycle.
 
 ## Source
 
