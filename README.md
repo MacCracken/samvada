@@ -1,6 +1,8 @@
 # samvada
 
-**Status:** v0.1.0 — scaffold only. No protocol code yet.
+**Status:** v0.2.0 — C-shim + minimum-viable logind subset
+landed. Public API stable; live-bus end-to-end validation
+pending a consumer (mabda).
 
 `samvada` (Sanskrit *saṃvāda* "dialogue") is the dbus client for
 the AGNOS Cyrius suite. Its first consumer is
@@ -20,11 +22,11 @@ both C-shim deps retire together** — mabda's `wgpu-native` for AMD
 or removed if a kernel-level path makes the dbus dance
 unnecessary.
 
-| Version | What ships | Cost |
+| Version | What ships | Status |
 |---|---|---|
-| v0.1.0 | Scaffold only — no protocol code | This commit |
-| v0.2.0 | C-shim binding to `sd_bus`, minimal logind subset | ~3–5 sessions |
-| v0.3+ | Generalize beyond logind (polkit, NetworkManager, generic dbus) | as needed |
+| v0.1.0 | Scaffold only — no protocol code | ✅ shipped 2026-04-30 |
+| v0.2.0 | C-shim binding to `sd_bus`, minimal logind subset | 🟡 code-complete 2026-04-30, awaiting consumer e2e |
+| v0.3+ | Generalize beyond logind (polkit, NetworkManager, generic dbus) | unscoped — files itself when a 2nd consumer hits a wall |
 | **v1.0** | **Pure-Cyrius dbus marshaller OR removal** — coordinated with mabda v4.0's wgpu-native retirement | TBD; multi-week if pure-Cyrius |
 
 The mabda public API surface stays stable across all of these:

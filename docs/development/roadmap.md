@@ -73,11 +73,40 @@ scaffold itself is the baseline-of-work commit.
 
 ---
 
-### M1 — libsystemd C shim + minimum-viable logind (v0.2.0)
+### M1 — libsystemd C shim + minimum-viable logind (v0.2.0) — 🟡 code-complete 2026-04-30, awaiting consumer e2e
 
-**Estimated effort:** 3–5 sessions.
+**Estimated effort:** 3–5 sessions (actual: 1 session for the
+buildable scaffold; consumer e2e closes M1).
 **Gate:** mabda's `_backend_native_surface_configure_logind`
 needs real bytes flowing through.
+
+What landed today (tag `0.2.0`):
+
+- `src/samvada_ffi.cyr` — 9-slot fn-table (72 bytes,
+  append-after-kind invariant; kind pinned at +64 forever).
+- `deps/samvada_main.c` — libsystemd C shim, compiles
+  `-Wall -Wextra -Werror` clean against libsystemd 260.
+  Wrappers: open_system_bus, get_session_path, take_device
+  (with `dup`'d fd), release_device, pump_signals, close_bus,
+  subscribe_pause_resume, unsubscribe.
+- `src/samvada.cyr` — public API filled
+  (`samvada_init` / `samvada_session_take_device` /
+  `samvada_session_release_device` / `samvada_pump_signals` /
+  `samvada_release` / `samvada_main`). Errors are negative
+  sd-bus errnos; null-table + null-kind init paths reject cleanly.
+- `tests/samvada.tcyr` — 32 CPU asserts across 8 groups,
+  including the slot-offset pin that freezes the C-shim contract.
+- `dist/samvada.cyr` — bundled lib (259 lines) for
+  `[deps.samvada]` consumers.
+- `docs/architecture/dbus-marshalling.md` — wire-format reference.
+- `docs/guides/consumer-link.md` — two-stage build recipe.
+
+What still has to happen for M1 to be "shipped":
+
+- Live `sd_bus` calls exercised against a real desktop session
+  via mabda's `_backend_native_surface_configure_logind` body.
+- A passing run of mabda's own e2e against samvada `0.2.0`.
+- A short note in `state.md` confirming the consumer gate cleared.
 
 #### `deps/samvada_main.c` (new)
 
