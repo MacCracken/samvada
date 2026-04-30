@@ -192,7 +192,7 @@ fn samvada_init(table) {
     if (sp_slot == 0) { return -38; }
     var pid = sys_getpid();
     rc = fncall4(sp_slot, _samvada_bus, pid, _samvada_sess,
-                 _SAMVADA_SESS_BUFLEN);
+    _SAMVADA_SESS_BUFLEN);
     if (rc < 0) { return rc; }
     return 0;
 }
@@ -214,8 +214,8 @@ fn samvada_session_take_device(major, minor) {
     store64(_samvada_outs + 8, 0);
 
     var rc = fncall6(slot, _samvada_bus, _samvada_sess,
-                     major, minor,
-                     _samvada_outs + 0, _samvada_outs + 8);
+    major, minor,
+    _samvada_outs + 0, _samvada_outs + 8);
     if (rc < 0) { return rc; }
     var fd = load64(_samvada_outs + 0) & 0xFFFFFFFF;
     # Sign-extend the i32 fd back to a Cyrius-native int. Any

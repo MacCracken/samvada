@@ -38,15 +38,15 @@ fn test_ffi_alloc_and_set_get() {
     assert(t != 0, "alloc returns non-null");
     # All slots zero on alloc.
     assert_eq(samvada_ffi_get_slot(t, samvada_slot_open_system_bus()), 0,
-              "fresh slot is 0");
+    "fresh slot is 0");
     assert_eq(samvada_ffi_kind(t), 0, "fresh kind is 0");
     # Set / get round-trips.
     samvada_ffi_set_slot(t, samvada_slot_kind(),
-                         samvada_backend_kind_libsystemd());
+    samvada_backend_kind_libsystemd());
     assert_eq(samvada_ffi_kind(t), 1, "kind round-trips");
     samvada_ffi_set_slot(t, samvada_slot_take_device(), 0xCAFEBABE);
     assert_eq(samvada_ffi_get_slot(t, samvada_slot_take_device()),
-              0xCAFEBABE, "fnptr round-trips");
+    0xCAFEBABE, "fnptr round-trips");
     return 0;
 }
 
@@ -91,7 +91,7 @@ fn test_samvada_version() {
     # Bumps lock-step with VERSION. Component asserts catch the
     # bit-shift reorder bug.
     assert_eq(samvada_version(), (0 << 16) | (2 << 8) | 0,
-              "v0.2.0 packed triple");
+    "v0.2.0 packed triple");
     var v = samvada_version();
     assert_eq((v >> 16) & 0xFF, 0, "major");
     assert_eq((v >> 8)  & 0xFF, 2, "minor");
