@@ -3,6 +3,102 @@
 
 include "src/lib.cyr"
 
+# ---- structural pins for the FFI fn-table ----
+# The C shim (deps/samvada_main.c) hard-codes the slot offsets
+# below. Reordering the fns in src/samvada_ffi.cyr without bumping
+# the C side would silently misroute every dispatch. These pins
+# turn that into a CPU-test failure rather than a runtime crash
+# inside libsystemd.
+fn test_ffi_slot_offsets() {
+    test_group("ffi: slot offsets pin C shim contract");
+    assert_eq(samvada_slot_open_system_bus(),         0,  "slot 0");
+    assert_eq(samvada_slot_get_session_path(),        8,  "slot 1");
+    assert_eq(samvada_slot_take_device(),             16, "slot 2");
+    assert_eq(samvada_slot_release_device(),          24, "slot 3");
+    assert_eq(samvada_slot_pump_signals(),            32, "slot 4");
+    assert_eq(samvada_slot_close_bus(),               40, "slot 5");
+    assert_eq(samvada_slot_subscribe_pause_resume(),  48, "slot 6");
+    assert_eq(samvada_slot_unsubscribe(),             56, "slot 7");
+    assert_eq(samvada_slot_kind(),                    64, "kind @ +64 (FIXED)");
+    assert_eq(samvada_ffi_size(),                     72, "ffi size = 9 * 8");
+    return 0;
+}
+
+fn test_ffi_backend_kinds() {
+    test_group("ffi: backend kinds");
+    assert_eq(samvada_backend_kind_null(),       0, "null kind");
+    assert_eq(samvada_backend_kind_libsystemd(), 1, "libsystemd kind");
+    assert_eq(samvada_backend_kind_pure_cyrius(),2, "pure-cyrius kind");
+    return 0;
+}
+
+fn test_ffi_alloc_and_set_get() {
+    test_group("ffi: alloc/get/set round-trip");
+    var t = samvada_ffi_alloc();
+    assert(t != 0, "alloc returns non-null");
+    # All slots zero on alloc.
+    assert_eq(samvada_ffi_get_slot(t, samvada_slot_open_system_bus()), 0,
+              "fresh slot is 0");
+    assert_eq(samvada_ffi_kind(t), 0, "fresh kind is 0");
+    # Set / get round-trips.
+    samvada_ffi_set_slot(t, samvada_slot_kind(),
+                         samvada_backend_kind_libsystemd());
+    assert_eq(samvada_ffi_kind(t), 1, "kind round-trips");
+    samvada_ffi_set_slot(t, samvada_slot_take_device(), 0xCAFEBABE);
+    assert_eq(samvada_ffi_get_slot(t, samvada_slot_take_device()),
+              0xCAFEBABE, "fnptr round-trips");
+    return 0;
+}
+
+fn test_ffi_get_slot_null_safe() {
+    test_group("ffi: get_slot is null-safe");
+    assert_eq(samvada_ffi_get_slot(0, 0),    0, "null table -> 0");
+    assert_eq(samvada_ffi_get_slot(0, 64),   0, "null table at any off");
+    assert_eq(samvada_ffi_kind(0),           0, "null table kind");
+    return 0;
+}
+
+# ---- public-API smoke (no C shim, no live bus) ----
+# samvada_init with a null / NULL-kind table must reject without
+# touching the heap-side state. samvada_release on a never-init'd
+# instance must be a no-op.
+
+fn test_init_rejects_null_table() {
+    test_group("init rejects null table");
+    assert_eq(samvada_init(0), -22, "EINVAL on null table");
+    return 0;
+}
+
+fn test_init_rejects_null_kind() {
+    test_group("init rejects NULL-kind table");
+    var t = samvada_ffi_alloc();
+    assert(t != 0, "table alloc OK");
+    # Don't set kind; default 0 == NULL kind. Should reject.
+    assert_eq(samvada_init(t), -22, "EINVAL on NULL-kind table");
+    return 0;
+}
+
+fn test_release_idempotent() {
+    test_group("release is idempotent");
+    assert_eq(samvada_release(), 0, "release on uninit OK");
+    assert_eq(samvada_release(), 0, "release again OK");
+    return 0;
+}
+
+# ---- version triple ----
+fn test_samvada_version() {
+    test_group("v0.2.0 packed triple");
+    # Bumps lock-step with VERSION. Component asserts catch the
+    # bit-shift reorder bug.
+    assert_eq(samvada_version(), (0 << 16) | (2 << 8) | 0,
+              "v0.2.0 packed triple");
+    var v = samvada_version();
+    assert_eq((v >> 16) & 0xFF, 0, "major");
+    assert_eq((v >> 8)  & 0xFF, 2, "minor");
+    assert_eq(v         & 0xFF, 0, "patch");
+    return 0;
+}
+
 fn test_smoke() {
     test_group("smoke");
     assert(1, "true is true");
@@ -10,26 +106,16 @@ fn test_smoke() {
     return 0;
 }
 
-fn test_samvada_version() {
-    test_group("v0.1.0 placeholder API");
-    # Pin the version triple. When v0.2.0 lands, this assertion
-    # bumps and `samvada_version` gains real structured-version
-    # accessors. Until then, the constant return value is the
-    # signal that the module exists + the bundle is wired.
-    assert_eq(samvada_version(), (0 << 16) | (1 << 8) | 0,
-              "v0.1.0 packed triple");
-    # Component extraction sanity (catches a future bug where
-    # someone reorders the bit-shifts in samvada_version).
-    var v = samvada_version();
-    assert_eq((v >> 16) & 0xFF, 0, "major");
-    assert_eq((v >> 8)  & 0xFF, 1, "minor");
-    assert_eq(v         & 0xFF, 0, "patch");
-    return 0;
-}
-
 fn main() {
     alloc_init();
     test_smoke();
+    test_ffi_slot_offsets();
+    test_ffi_backend_kinds();
+    test_ffi_alloc_and_set_get();
+    test_ffi_get_slot_null_safe();
+    test_init_rejects_null_table();
+    test_init_rejects_null_kind();
+    test_release_idempotent();
     test_samvada_version();
     return assert_summary();
 }

@@ -1,25 +1,173 @@
 # @public — samvada API surface (stable across v0.x)
-# samvada.cyr — entry point for the dbus / logind subset
+# samvada.cyr — entry point for the dbus / logind subset.
 #
-# v0.1.0 (this commit): scaffold only — a placeholder fn so the
-# `[lib]` bundle has something to ship and downstream consumers
-# can `[deps.samvada]` against the package shape.
+# Consumer-facing surface:
+#   samvada_init(fn_table_ptr)                 -> 0|err
+#   samvada_session_take_device(major, minor)  -> fd | -err
+#   samvada_session_release_device(major, minor) -> 0|err
+#   samvada_pump_signals()                     -> events_drained|negative_err
+#   samvada_release()                          -> 0
+#   samvada_version()                          -> packed u32
 #
-# v0.2.0 (planned): real Cyrius wrappers around the libsystemd
-# C shim (`deps/samvada_main.c`). Expected public surface:
-#   samvada_init(fn_table_ptr) — bind the C-shim fn table
-#   samvada_session_take_device(major, minor) → fd | err
-#   samvada_session_release_device(major, minor)
-#   samvada_pump_signals() — drain Pause/ResumeDevice events
-#   samvada_release()
+# `samvada_main(table)` is the C-shim entry point. It calls
+# `samvada_init(table)` and then returns immediately — consumers
+# (mabda's _backend_native_surface_configure_logind) drive the
+# rest from their own code paths. The "consume samvada" half of
+# the contract is invoked synchronously below the public API.
 #
-# The mabda `_backend_native_surface_configure_logind` slot will
-# call into this surface once it's filled.
+# Implementation: every public fn dispatches through the fn-table
+# stashed by samvada_init() via fncallN from lib/fnptr.cyr. The
+# table lives in C static memory (the C shim's main()) so we hold
+# the pointer rather than copy.
 
-# Placeholder fn — exists so the [lib] bundle has a real symbol
-# until the C shim lands in v0.2.0. Returns the version triple
-# packed as a u32 (major << 16 | minor << 8 | patch) — useful for
-# downstream version-gate checks once the API stabilizes.
+# ---- module-scope state ----
+# Set by samvada_init; read by the rest of the API. Declared with
+# explicit zero to dodge the global-init-order silent-zero gotcha
+# AND the uninitialized-var rejection.
+var _samvada_table = 0;
+var _samvada_bus   = 0;
+var _samvada_sess  = 0;     # heap ptr to NUL-terminated session path
+var _samvada_outs  = 0;     # heap ptr to 16-byte (fd_out, active_out) scratch
+
+# Sized to fit any logind session path (`/org/freedesktop/login1/session/_NN`
+# is ~46 chars; 512 leaves headroom for any future scheme).
+var _SAMVADA_SESS_BUFLEN = 512;
+var _SAMVADA_OUTS_BUFLEN = 16;
+
+# Version triple packed into a u32 (major << 16 | minor << 8 | patch).
+# Bumps lock-step with VERSION; consumers can do
+# `if (samvada_version() < ((0<<16)|(2<<8)|0)) { ... }` for gates.
 fn samvada_version() {
-    return (0 << 16) | (1 << 8) | 0;
+    return (0 << 16) | (2 << 8) | 0;
+}
+
+# ---- private helpers ----
+
+fn _samvada_have_table() {
+    if (_samvada_table == 0) { return 0; }
+    return 1;
+}
+
+fn _samvada_slot(off) {
+    return samvada_ffi_get_slot(_samvada_table, off);
+}
+
+# ---- public API ----
+
+# Stash the fn-table, open the system bus, look up the session
+# object path for our own pid. Returns 0 on success or a negative
+# sd-bus errno on failure (-EINVAL if table is null or its kind
+# doesn't match a known backend).
+fn samvada_init(table) {
+    if (table == 0) { return -22; }   # -EINVAL
+    var k = samvada_ffi_kind(table);
+    if (k == samvada_backend_kind_null()) { return -22; }
+    _samvada_table = table;
+
+    # Allocate scratch buffers up front so the per-call paths stay
+    # alloc-free. Both buffers live for the process lifetime —
+    # samvada_release does not free them (bump allocator).
+    _samvada_sess = alloc(_SAMVADA_SESS_BUFLEN);
+    if (_samvada_sess == 0) { return -12; }   # -ENOMEM
+    _samvada_outs = alloc(_SAMVADA_OUTS_BUFLEN);
+    if (_samvada_outs == 0) { return -12; }
+    # Zero the scratch so partial reads from C are detectable.
+    var i = 0;
+    while (i < _SAMVADA_SESS_BUFLEN) { store64(_samvada_sess + i, 0); i = i + 8; }
+    store64(_samvada_outs + 0, 0);
+    store64(_samvada_outs + 8, 0);
+
+    # Open the system bus. The C wrapper writes the bus pointer
+    # into the address we hand it.
+    var bus_slot = _samvada_slot(samvada_slot_open_system_bus());
+    if (bus_slot == 0) { return -38; }   # -ENOSYS
+    var bus_out = _samvada_outs;          # reuse 8 bytes of scratch
+    store64(bus_out, 0);
+    var rc = fncall1(bus_slot, bus_out);
+    if (rc < 0) { return rc; }
+    _samvada_bus = load64(bus_out);
+    if (_samvada_bus == 0) { return -107; }   # -ENOTCONN
+
+    # Look up the session path for our PID. logind speaks
+    # GetSessionByPID(uint32) -> object_path; the C wrapper writes
+    # the cstr into _samvada_sess.
+    var sp_slot = _samvada_slot(samvada_slot_get_session_path());
+    if (sp_slot == 0) { return -38; }
+    var pid = sys_getpid();
+    rc = fncall4(sp_slot, _samvada_bus, pid, _samvada_sess,
+                 _SAMVADA_SESS_BUFLEN);
+    if (rc < 0) { return rc; }
+    return 0;
+}
+
+# Ask logind for DRM-master delegation on /dev/dri/card<N>. Returns
+# the dup'd unix_fd on success, or a negative sd-bus errno on
+# failure. The fd's lifetime is the caller's; close() it (or pass
+# it to ReleaseDevice + close) on teardown.
+fn samvada_session_take_device(major, minor) {
+    if (_samvada_have_table() == 0) { return -22; }
+    if (_samvada_bus == 0)          { return -107; }
+    var slot = _samvada_slot(samvada_slot_take_device());
+    if (slot == 0) { return -38; }
+
+    # 16-byte scratch: [+0] fd_out (i32), [+8] active_out (i32).
+    # store64 the whole word; the C side writes only the low 32
+    # bits, so high half stays zero.
+    store64(_samvada_outs + 0, 0);
+    store64(_samvada_outs + 8, 0);
+
+    var rc = fncall6(slot, _samvada_bus, _samvada_sess,
+                     major, minor,
+                     _samvada_outs + 0, _samvada_outs + 8);
+    if (rc < 0) { return rc; }
+    var fd = load64(_samvada_outs + 0) & 0xFFFFFFFF;
+    # Sign-extend the i32 fd back to a Cyrius-native int. Any
+    # negative-fd path was already handled by the rc < 0 branch
+    # in C, so the high bit shouldn't be set here, but be defensive.
+    if ((fd & 0x80000000) != 0) { fd = fd - 0x100000000; }
+    return fd;
+}
+
+# Tell logind we're done with the device. Pairs with TakeDevice
+# at teardown (and on PauseDevice if the consumer chooses to drop).
+fn samvada_session_release_device(major, minor) {
+    if (_samvada_have_table() == 0) { return -22; }
+    if (_samvada_bus == 0)          { return -107; }
+    var slot = _samvada_slot(samvada_slot_release_device());
+    if (slot == 0) { return -38; }
+    return fncall4(slot, _samvada_bus, _samvada_sess, major, minor);
+}
+
+# Drain any pending bus messages. Returns the number of events
+# processed (>=0) or a negative sd-bus errno on failure. Consumers
+# typically call this once per frame / event-loop tick.
+fn samvada_pump_signals() {
+    if (_samvada_have_table() == 0) { return -22; }
+    if (_samvada_bus == 0)          { return -107; }
+    var slot = _samvada_slot(samvada_slot_pump_signals());
+    if (slot == 0) { return -38; }
+    return fncall1(slot, _samvada_bus);
+}
+
+# Close the bus and clear module state. Idempotent — safe to call
+# on a partially-initialized samvada (e.g. after samvada_init returned
+# an error). Buffers are not freed (bump allocator).
+fn samvada_release() {
+    if (_samvada_bus != 0) {
+        var slot = _samvada_slot(samvada_slot_close_bus());
+        if (slot != 0) { fncall1(slot, _samvada_bus); }
+        _samvada_bus = 0;
+    }
+    _samvada_table = 0;
+    return 0;
+}
+
+# C-shim entry point. The libsystemd shim's `main()` calls into
+# this with the fn-table pointer. We init samvada and return —
+# the consumer drives all subsequent calls. Smoke build (no shim)
+# never reaches this; `src/main.cyr` keeps its own pure-Cyrius
+# entry for `cyrius build`.
+fn samvada_main(table) {
+    var r = samvada_init(table);
+    return r;
 }
