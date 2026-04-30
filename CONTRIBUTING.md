@@ -52,7 +52,8 @@ cyrius fmt --check src/*.cyr tests/*.tcyr      # no drift
 cyrius vet src/main.cyr                        # static checks
 cyrius distlib                                 # dist/samvada.cyr stays fresh
 cyrius build src/main.cyr build/samvada        # smoke build
-cyrius test                                    # 32 asserts as of v0.2.0
+cyrius test                                    # 32 asserts as of v0.2.1
+cyrius bench tests/samvada.bcyr                # 4 CPU baselines
 # C shim compile-check (consumer-side build):
 cc -Wall -Wextra -Werror -c deps/samvada_main.c \
    $(pkg-config --cflags libsystemd) -o /tmp/samvada_main.o

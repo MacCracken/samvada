@@ -152,7 +152,7 @@ Run as the last patch of the current minor (e.g. `0.2.5` before
 `0.3.0`).
 
 1. **Full test suite** — `cyrius test` zero failures
-2. **Benchmark baseline** — `cyrius bench tests/samvada.bcyr` (when populated; bench harness is currently a no-op)
+2. **Benchmark baseline** — `cyrius bench tests/samvada.bcyr` (4 CPU baselines wired in v0.2.1: ffi_alloc, ffi_get_slot, init_reject_null, release_idempotent). Real perf-history tracking arrives with `docs/benchmarks.md` at the v1.0 gate.
 3. **Dead code audit** — remove unused fns; record remaining floor in CHANGELOG
 4. **Refactor pass** — consolidate the minor's additions where parallel paths accreted
 5. **Code review pass** — walk diffs end-to-end for missed guards, ABI leaks, off-by-ones, silently-ignored errors

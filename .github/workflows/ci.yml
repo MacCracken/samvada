@@ -100,18 +100,32 @@ jobs:
 
       - name: Smoke run
         # Standalone build (no C shim, no libsystemd link) — must
-        # print version + ffi shape and exit 0.
+        # print version + ffi shape and exit 0. Match the ffi-shape
+        # line as a regex (slots = N, N*8 bytes) so adding slots in
+        # v0.3+ doesn't silently break this gate.
         run: |
           out=$(./build/samvada)
           echo "$out"
-          echo "$out" | grep -q "samvada_version = " || { echo "smoke: missing version line"; exit 1; }
-          echo "$out" | grep -q "ffi slots = 9 (72 bytes)" || { echo "smoke: ffi shape drift"; exit 1; }
+          echo "$out" | grep -qE "samvada_version = [0-9]+\.[0-9]+\.[0-9]+" || { echo "smoke: missing/malformed version line"; exit 1; }
+          echo "$out" | grep -qE "ffi slots = [0-9]+ \([0-9]+ bytes\)" || { echo "smoke: ffi shape line missing"; exit 1; }
+          # Cross-check N * 8 == bytes to catch a stale samvada_ffi_size.
+          slots=$(echo "$out" | sed -nE 's/^ffi slots = ([0-9]+) \(([0-9]+) bytes\)$/\1/p')
+          bytes=$(echo "$out" | sed -nE 's/^ffi slots = ([0-9]+) \(([0-9]+) bytes\)$/\2/p')
+          [ $((slots * 8)) -eq "$bytes" ] || { echo "smoke: slot/byte mismatch ($slots * 8 != $bytes)"; exit 1; }
 
       - name: Test
         # v5.6.28: bare `cyrius test` picks up [build].test AND
         # auto-discovers tests/*.tcyr — covers tests/samvada.tcyr
         # without us having to spell it out.
         run: cyrius test
+
+      - name: Bench
+        # Smoke-runs the bench harness — catches regressions in
+        # bench wiring or in the API surface the benches touch.
+        # The numbers are noisy on shared CI runners; we don't
+        # gate on them. Real perf history lives in
+        # docs/benchmarks.md (v1.0 gate, not yet earned).
+        run: cyrius bench tests/samvada.bcyr
 
   c-shim:
     name: C Shim Compile-Check

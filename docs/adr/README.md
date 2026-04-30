@@ -19,4 +19,7 @@ Decisions about samvada — what we chose, the context, and the consequences we 
 
 ## Index
 
-_No ADRs yet. Add the first as `0001-kebab-case-title.md`._
+| ADR | Title | Status |
+|---|---|---|
+| [0001](0001-c-shim-then-pivot.md) | C-shim-then-pivot for v0.x dbus integration | Accepted |
+| [0002](0002-append-after-kind-ffi-invariant.md) | Append-after-kind FFI table invariant | Accepted |

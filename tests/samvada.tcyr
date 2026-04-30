@@ -87,15 +87,15 @@ fn test_release_idempotent() {
 
 # ---- version triple ----
 fn test_samvada_version() {
-    test_group("v0.2.0 packed triple");
+    test_group("v0.2.1 packed triple");
     # Bumps lock-step with VERSION. Component asserts catch the
     # bit-shift reorder bug.
-    assert_eq(samvada_version(), (0 << 16) | (2 << 8) | 0,
-    "v0.2.0 packed triple");
+    assert_eq(samvada_version(), (0 << 16) | (2 << 8) | 1,
+    "v0.2.1 packed triple");
     var v = samvada_version();
     assert_eq((v >> 16) & 0xFF, 0, "major");
     assert_eq((v >> 8)  & 0xFF, 2, "minor");
-    assert_eq(v         & 0xFF, 0, "patch");
+    assert_eq(v         & 0xFF, 1, "patch");
     return 0;
 }
 

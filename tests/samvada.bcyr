@@ -1,11 +1,76 @@
-# samvada benchmarks
-# Stdlib auto-included via cyrius.cyml
+# samvada benchmarks — CPU-only
+# tests/samvada.bcyr — measures dispatch overhead, init reject
+# paths, and idempotent release. No live dbus required; runs
+# the same on CI runners as on a developer's box.
+#
+# Stdlib auto-included via cyrius.cyml.
 
-fn bench_noop() { return 0; }
+include "src/lib.cyr"
+include "lib/bench.cyr"
+
+# ---- bench targets ----
+# Each target is invoked many times by bench_run / bench_run_batch1.
+# Keep them tight — overhead per call is what we're measuring.
+
+fn _bench_alloc_table() {
+    samvada_ffi_alloc();
+    return 0;
+}
+
+fn _bench_get_slot(t) {
+    samvada_ffi_get_slot(t, samvada_slot_take_device());
+    return 0;
+}
+
+fn _bench_init_reject_null() {
+    # samvada_init(0) early-returns -EINVAL — the consumer-
+    # misconfiguration path. Cheap; a comparison + return.
+    samvada_init(0);
+    return 0;
+}
+
+fn _bench_release_idempotent() {
+    # samvada_release on uninit'd state is the no-op path:
+    # `if (_samvada_bus != 0) {}` short-circuits, _samvada_table
+    # is already 0, returns 0. The cheapest public fn we expose.
+    samvada_release();
+    return 0;
+}
 
 fn main() {
     alloc_init();
-    bench("noop", &bench_noop, 1000000);
+
+    # Bench 1 — FFI table allocation. Exercises alloc(72) + 9
+    # store64 zero-fills. Batched to measure the alloc path, not
+    # the per-iteration clock_gettime overhead.
+    var b1 = bench_new("ffi_alloc");
+    bench_run_batch(b1, &_bench_alloc_table, 1000, 1000);
+    bench_report(b1);
+
+    # Bench 2 — slot lookup. The hot path: every public API
+    # call does samvada_ffi_get_slot before fncallN. Sub-1us;
+    # batched to amortize clock overhead per the lib/bench.cyr
+    # docstring guidance.
+    var t = samvada_ffi_alloc();
+    var b2 = bench_new("ffi_get_slot");
+    bench_run_batch1(b2, &_bench_get_slot, t, 1000, 1000);
+    bench_report(b2);
+
+    # Bench 3 — samvada_init reject path. Measures the null-
+    # table early-return — what consumers hit on misconfigured
+    # FFI tables. Pinned so a regression in the early-exit
+    # ordering (e.g. doing alloc work before validating table)
+    # would show up as an order-of-magnitude bench drift.
+    var b3 = bench_new("init_reject_null");
+    bench_run_batch(b3, &_bench_init_reject_null, 1000, 1000);
+    bench_report(b3);
+
+    # Bench 4 — samvada_release idempotency. The teardown path
+    # consumers hit on every clean shutdown. Sub-1us; batched.
+    var b4 = bench_new("release_idempotent");
+    bench_run_batch(b4, &_bench_release_idempotent, 1000, 1000);
+    bench_report(b4);
+
     return 0;
 }
 

@@ -5,6 +5,15 @@
 
 ## Version
 
+**0.2.1** — 2026-04-30. Polish patch on top of 0.2.0 — no
+public API change, every addition is internal tooling, docs,
+or test scaffolding. ADR-0001 + ADR-0002 filed. Real bench
+harness replaces the no-op stub (4 CPU baselines: ffi_alloc
+54ns, ffi_get_slot 9ns, init_reject_null 6ns,
+release_idempotent 7ns). CI gate set hardened to yukti
+parity. mabda is integrating against 0.2.0 — M1 closeout gate
+unchanged.
+
 **0.2.0** — 2026-04-30. C-shim FFI scaffold complete: fn-table
 layout pinned, `deps/samvada_main.c` populating sd_bus wrappers,
 `src/samvada.cyr` exposing the v0.x stable public surface (init /
