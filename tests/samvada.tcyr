@@ -85,17 +85,45 @@ fn test_release_idempotent() {
     return 0;
 }
 
+# HIGH-1 in 2026-05-01-hardening-review: samvada_init must reject
+# re-init without an intervening release. Pin via a NULL-backed
+# table that init can't fully consume — _samvada_table gets set
+# before any slot dispatch, so the second init must hit the EBUSY
+# guard, and a release must clear it.
+fn test_init_rejects_double_init() {
+    test_group("init rejects double-init without release");
+    var t = samvada_ffi_alloc();
+    assert(t != 0, "table alloc OK");
+    samvada_ffi_set_slot(t, samvada_slot_kind(),
+    samvada_backend_kind_libsystemd());
+    # First init: kind passes, but every slot is null, so it fails
+    # at the open_system_bus dispatch with -ENOSYS. _samvada_table
+    # is set before that point (the EBUSY guard).
+    var rc1 = samvada_init(t);
+    assert_eq(rc1, -38, "first init fails at null open_system_bus slot");
+    # Second init without release must hit the EBUSY guard.
+    assert_eq(samvada_init(t), -16, "EBUSY on double-init");
+    # Release clears the guard; init can be called again (still
+    # fails at the slot dispatch, but NOT at the EBUSY check).
+    assert_eq(samvada_release(), 0, "release after partial init");
+    var rc2 = samvada_init(t);
+    assert_eq(rc2, -38, "post-release init reaches slot dispatch");
+    assert(rc2 != -16, "post-release init not EBUSY");
+    samvada_release();
+    return 0;
+}
+
 # ---- version triple ----
 fn test_samvada_version() {
-    test_group("v0.2.1 packed triple");
+    test_group("v0.2.2 packed triple");
     # Bumps lock-step with VERSION. Component asserts catch the
     # bit-shift reorder bug.
-    assert_eq(samvada_version(), (0 << 16) | (2 << 8) | 1,
-    "v0.2.1 packed triple");
+    assert_eq(samvada_version(), (0 << 16) | (2 << 8) | 2,
+    "v0.2.2 packed triple");
     var v = samvada_version();
     assert_eq((v >> 16) & 0xFF, 0, "major");
     assert_eq((v >> 8)  & 0xFF, 2, "minor");
-    assert_eq(v         & 0xFF, 1, "patch");
+    assert_eq(v         & 0xFF, 2, "patch");
     return 0;
 }
 
@@ -116,6 +144,7 @@ fn main() {
     test_init_rejects_null_table();
     test_init_rejects_null_kind();
     test_release_idempotent();
+    test_init_rejects_double_init();
     test_samvada_version();
     return assert_summary();
 }

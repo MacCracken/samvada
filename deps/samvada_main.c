@@ -144,14 +144,31 @@ sb_take_device(int64_t bus_, int64_t sess_cstr, int64_t major, int64_t minor,
     }
 
     /* sd_bus owns the fd until the message is unref'd; dup so the
-     * caller has a stable handle independent of message lifetime. */
-    int dup_fd = (fd >= 0) ? dup(fd) : -1;
+     * caller has a stable handle independent of message lifetime.
+     *
+     * Two defensive checks per 2026-05-01 hardening review:
+     *  - MED-1: if the message read succeeded but delivered fd<0
+     *    (peer-bus contract violation), explicit -EBADF rather
+     *    than reading stale errno from a syscall we never made.
+     *  - errno is captured before the cleanup calls so a future
+     *    libsystemd that touches errno on unref/free can't clobber
+     *    the dup() failure code.
+     */
+    if (fd < 0) {
+        sd_bus_message_unref(reply);
+        sd_bus_error_free(&err);
+        *(int32_t *)(uintptr_t)fd_out     = -1;
+        *(int32_t *)(uintptr_t)active_out = (int32_t)inactive;
+        return -EBADF;
+    }
+    int dup_fd = dup(fd);
+    int dup_errno = (dup_fd < 0) ? errno : 0;
     *(int32_t *)(uintptr_t)fd_out     = (int32_t)dup_fd;
     *(int32_t *)(uintptr_t)active_out = (int32_t)inactive;
 
     sd_bus_message_unref(reply);
     sd_bus_error_free(&err);
-    return (dup_fd < 0) ? -errno : 0;
+    return (dup_fd < 0) ? -dup_errno : 0;
 }
 
 static long

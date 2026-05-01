@@ -38,7 +38,7 @@ var _SAMVADA_OUTS_BUFLEN = 16;
 # Bumps lock-step with VERSION; consumers can do
 # `if (samvada_version() < ((0<<16)|(2<<8)|0)) { ... }` for gates.
 fn samvada_version() {
-    return (0 << 16) | (2 << 8) | 1;
+    return (0 << 16) | (2 << 8) | 2;
 }
 
 # ---- private helpers ----
@@ -60,18 +60,28 @@ fn _samvada_slot(off) {
 # doesn't match a known backend).
 fn samvada_init(table) {
     if (table == 0) { return -22; }   # -EINVAL
+    # Reject re-init without an intervening release (HIGH-1 in
+    # 2026-05-01 hardening review). _samvada_table != 0 catches
+    # both successful prior init and partial-init-fail states;
+    # samvada_release() clears it back to 0.
+    if (_samvada_table != 0) { return -16; }   # -EBUSY
     var k = samvada_ffi_kind(table);
     if (k == samvada_backend_kind_null()) { return -22; }
     _samvada_table = table;
 
-    # Allocate scratch buffers up front so the per-call paths stay
-    # alloc-free. Both buffers live for the process lifetime —
-    # samvada_release does not free them (bump allocator).
-    _samvada_sess = alloc(_SAMVADA_SESS_BUFLEN);
-    if (_samvada_sess == 0) { return -12; }   # -ENOMEM
-    _samvada_outs = alloc(_SAMVADA_OUTS_BUFLEN);
-    if (_samvada_outs == 0) { return -12; }
-    # Zero the scratch so partial reads from C are detectable.
+    # Allocate scratch buffers on first init only; subsequent
+    # init-after-release reuses them (the bump allocator never
+    # frees, so re-allocating would leak the previous bytes).
+    if (_samvada_sess == 0) {
+        _samvada_sess = alloc(_SAMVADA_SESS_BUFLEN);
+        if (_samvada_sess == 0) { return -12; }   # -ENOMEM
+    }
+    if (_samvada_outs == 0) {
+        _samvada_outs = alloc(_SAMVADA_OUTS_BUFLEN);
+        if (_samvada_outs == 0) { return -12; }
+    }
+    # Zero the scratch on every init so stale data from a previous
+    # cycle never leaks into a successful read.
     var i = 0;
     while (i < _SAMVADA_SESS_BUFLEN) { store64(_samvada_sess + i, 0); i = i + 8; }
     store64(_samvada_outs + 0, 0);

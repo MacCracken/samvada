@@ -4,6 +4,87 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-05-01
+
+P(-1) hardening pass on top of 0.2.1. One HIGH and one MEDIUM
+correctness defect fixed, three new docs file the v1.0
+preparatory references, audit doc lands the methodology used.
+No public API change — `samvada_version()` packed triple bumps
+`(0,2,2)` and the new `-EBUSY` (`-16`) return code is an
+*addition* to the negative-errno catalog, not a behavior change
+on any existing path.
+
+### Added
+- `docs/architecture/public-api.md` — canonical map of every
+  exported symbol: signature, pre/post-conditions, full
+  error-code table per fn, test-coverage map, and the v0.x
+  stability contract. Closes one of the six open v1.0 criteria
+  in `docs/development/roadmap.md` ("public API frozen — every
+  exported symbol documented + tested").
+- `docs/sources.md` — consolidated protocol citations [S-1]
+  through [S-16]: D-Bus spec, logind interface,
+  `sd_bus_*(3)` man pages, `unix(7)` /
+  `recvmsg(2)` / `cmsg(3)` / `dup(2)` for fd-passing, DRM
+  major number, errno header refs, cyrius `lib/fnptr.cyr` /
+  `lib/syscalls_x86_64_linux.cyr`. The v1.0 pure-Cyrius
+  marshaller has every reference in one place.
+- `docs/benchmarks.md` — perf-history seed. Run 1 captured at
+  commit `4c7ada9` against samvada 0.2.1: `ffi_alloc` 56 ns,
+  `ffi_get_slot` 9 ns, `init_reject_null` 6 ns,
+  `release_idempotent` 6 ns. Method, variance, and graduation
+  criteria documented inline; each release appends a column.
+  Live-bus rows (handshake latency, `TakeDevice` round-trip,
+  signal-pump throughput) are the v1.0 gate work.
+- `docs/audit/2026-05-01-hardening-review.md` — internal
+  hardening review (NOT the formal v1.0 audit, which
+  `SECURITY.md` §"Audit History" gates). Methodology, four
+  findings (1 HIGH / 1 MED / 2 LOW), disposition for each, and
+  scope notes on what the audit explicitly does *not* cover
+  (live-bus behavior, signal callback safety, multi-thread,
+  bus-pump DoS).
+- `tests/samvada.tcyr` — new `test_init_rejects_double_init`
+  group (6 asserts) pinning HIGH-1's fix: re-init without
+  release returns `-EBUSY`; release clears the guard.
+
+### Fixed
+- **HIGH-1** — `samvada_init` is now double-init safe.
+  Previously a second `samvada_init` without an intervening
+  `samvada_release` overwrote `_samvada_table` / `_samvada_bus` /
+  `_samvada_sess` / `_samvada_outs` without releasing the
+  previous values, leaking the dbus connection + scratch bytes
+  on every retry. Now: returns `-16` (`-EBUSY`) when
+  `_samvada_table != 0`. The legitimate re-init-after-release
+  path reuses the already-allocated scratch buffers (they
+  survive `samvada_release` per the bump-allocator contract)
+  rather than re-allocating, which would leak under any
+  allocator that doesn't bump-pack identically.
+- **MEDIUM-1** — `sb_take_device` now returns `-EBADF`
+  explicitly when the message read succeeded but delivered a
+  negative fd, instead of returning `-errno` from a syscall
+  that was never made. Also captures `errno` *before*
+  `sd_bus_message_unref` / `sd_bus_error_free` so a future
+  libsystemd that touches errno on cleanup paths cannot clobber
+  the dup-failure code. Reachability is narrow (libsystemd's
+  `sd_bus_message_read("hb")` is documented to return `fd >= 0`
+  on success), but the C-side defensive contract was wrong.
+
+### Changed
+- `CLAUDE.md` work-loop step 2 now points at
+  `docs/benchmarks.md` for per-release row appends, replacing
+  the placeholder note that history "arrives at the v1.0 gate."
+
+### Notes
+- The new `-EBUSY` return code joins the error catalog in
+  `docs/architecture/public-api.md`. Consumers that ignored
+  unknown negative returns (the documented "branch on `< 0`,
+  log, abort" pattern) need no migration. Consumers that
+  retried `samvada_init` on failure now hit a deterministic
+  reject instead of silently leaking.
+- The C-shim recompile passed strict-flag rebuild
+  (`-Wall -Wextra -Werror -Wshadow -Wconversion -Wcast-qual
+  -Wformat=2`) clean against libsystemd 260; the audit's
+  posture check did not require code changes.
+
 ## [0.2.1] — 2026-04-30
 
 Polish patch on top of 0.2.0. No public API change — every
