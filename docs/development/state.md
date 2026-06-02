@@ -5,6 +5,21 @@
 
 ## Version
 
+**0.4.0** — 2026-06-02. Road-to-v1.0 batch. No public API
+change (`samvada_version()` → `(0,4,0)`; `dist/samvada.cyr`
+shape unchanged). Added the HW-gated live-bus bench harness
+scaffold (`tests/samvada_live.bcyr` — handshake / TakeDevice /
+signal-pump, SKIPs without a libsystemd backend; CI runs it as
+a skip-path smoke). Closed two v1.0 criteria: **Public API
+frozen** (certification audit fixed the missing `-EBUSY`
+documentation in `public-api.md` + the double-init test-map
+row) and **CHANGELOG complete from v0.1.0**. Scoped the v1.0
+pivot in `docs/proposals/0001-v1-dbus-backend-pivot.md` (module
+map, LoC, no-hardware test strategy, risks, de-risking spike) —
+decision still deferred to mabda v4.0. 38 tcyr asserts
+unchanged; the live-bus scaffold is exercised as a separate CI
+skip-path smoke (`cyrius bench tests/samvada_live.bcyr`).
+
 **0.3.0** — 2026-06-02. Toolchain/language update release.
 Pinned Cyrius toolchain bumped `5.7.48` → `6.0.40` (a 5.7.x →
 6.0.x major-line jump). Full local gate sweep (lint, fmt
@@ -73,7 +88,7 @@ Live-bus end-to-end validation pending mabda's
   append-after-kind invariant) + alloc/get/set helpers.
 - `src/samvada.cyr` — public API surface (v0.x stable). Full
   surface map in `docs/architecture/public-api.md`.
-  - `samvada_version()` → packed u32 (0.3.0).
+  - `samvada_version()` → packed u32 (0.4.0).
   - `samvada_init(table)` → 0 | -err (opens bus, looks up
     session). Returns `-EBUSY` (`-16`) on re-init without
     release as of 0.2.2.
@@ -94,11 +109,15 @@ Live-bus end-to-end validation pending mabda's
   kinds, alloc/get/set round-trip, get_slot null-safety, init
   null-table rejection, init NULL-kind rejection, release
   idempotency, init double-init rejection (added 0.2.2 for
-  HIGH-1), v0.3.0 version triple. All pass via `cyrius test`.
+  HIGH-1), v0.4.0 version triple. All pass via `cyrius test`.
   Live sd_bus calls are HW-gated and not in this suite.
 - `tests/samvada.bcyr` — 4 CPU baselines (`ffi_alloc`,
   `ffi_get_slot`, `init_reject_null`, `release_idempotent`).
   History tracked in `docs/benchmarks.md`.
+- `tests/samvada_live.bcyr` — live-bus bench harness scaffold
+  (0.4.0): handshake / TakeDevice / signal-pump. HW-gated —
+  SKIPs without a libsystemd-backed table. CI runs it as a
+  skip-path smoke; real numbers need a consumer C-shim build.
 - `tests/samvada.fcyr` — fuzz stub.
 
 ## Dependencies
@@ -132,13 +151,22 @@ session. mabda's rc.2 pulls 0.2.2 but does not schedule the
 e2e validation. M2 generalization is unscoped pending a
 second AGNOS consumer.
 
-The v1.0 criteria checklist now has one item closed and one
-seeded:
+The v1.0 criteria checklist after 0.4.0 — two closed, two
+advanced:
 - ✅ Public API frozen — every exported symbol documented +
-  tested (closed by `docs/architecture/public-api.md`).
-- 🟡 Benchmarks captured in `docs/benchmarks.md` — seeded
-  with two runs of CPU baselines; live-bus rows still
-  pending.
-- ⏳ Six-consumer regression sweep, downstream consumer
-  green, architectural pivot decided, security audit pass —
-  unchanged, gated on M1 closeout / mabda v4.0 design.
+  tested (closed by `docs/architecture/public-api.md`; the
+  0.4.0 audit fixed the `-EBUSY` doc gap + double-init test-map
+  row).
+- ✅ CHANGELOG complete from v0.1.0 onward (verified 0.4.0 —
+  every released version parses under the CI docs-gate and the
+  release body extractor).
+- 🟡 Architectural pivot decided — **scoped** in
+  `docs/proposals/0001-v1-dbus-backend-pivot.md` (Path A.1 vs
+  A.2, LoC, no-hardware test strategy, risks, spike); decision
+  deferred to mabda v4.0.
+- 🟡 Benchmarks captured in `docs/benchmarks.md` — CPU
+  baselines seeded (3 runs); live-bus rows pending, but the
+  harness now exists (`tests/samvada_live.bcyr`, HW-gated).
+- ⏳ Six-consumer regression sweep, downstream consumer green,
+  security audit pass — unchanged, gated on M1 closeout / a
+  second consumer / mabda v4.0 design.

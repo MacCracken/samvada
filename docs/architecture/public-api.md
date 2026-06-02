@@ -63,7 +63,12 @@ fn samvada_init(table) -> 0 | -err
 Stash the FFI fn-table, open the system bus, look up the
 caller's session object path via `GetSessionByPID`. Idempotent
 *on error* — if init fails partway, internal state is
-consistent and `samvada_release()` is safe.
+consistent and `samvada_release()` is safe. Calling
+`samvada_init` again **without** an intervening
+`samvada_release` returns `-16` (`-EBUSY`) rather than
+overwriting (and leaking) the live bus + scratch — the 0.2.2
+HIGH-1 fix. The legitimate re-init-after-release path reuses the
+already-allocated scratch buffers.
 
 - **Pre**: `table` is a heap or stack pointer to a 72-byte
   fn-table populated by the C shim (or a Cyrius mock with
@@ -80,6 +85,7 @@ consistent and `samvada_release()` is safe.
 |---|---|---|
 | `0` | success | bus opened + session resolved |
 | `-22` (`-EINVAL`) | bad table | `table == 0` OR kind word at +64 is `0` (NULL backend) |
+| `-16` (`-EBUSY`) | already initialized | called again without an intervening `samvada_release` (`_samvada_table != 0`); guards the double-init bus+scratch leak fixed in 0.2.2 (HIGH-1) |
 | `-12` (`-ENOMEM`) | alloc failure | scratch buffers couldn't be allocated |
 | `-38` (`-ENOSYS`) | slot unwired | `open_system_bus` or `get_session_path` slot is null in the table |
 | `-107` (`-ENOTCONN`) | bus open returned NULL | C wrapper succeeded but didn't write a bus handle |
@@ -273,6 +279,7 @@ are `-errno` semantics inherited from sd-bus — magnitudes match
 | 2 | `ENOENT` | sd-bus | logind not running, or session has no caller pid |
 | 12 | `ENOMEM` | samvada | scratch buffer alloc failed |
 | 13 | `EACCES` | sd-bus | logind denied (e.g. no DRM master available) |
+| 16 | `EBUSY` | samvada | `samvada_init` called again before `samvada_release` |
 | 22 | `EINVAL` | samvada | bad table / NULL kind / missing init |
 | 38 | `ENOSYS` | samvada | requested slot is null (backend doesn't implement that fn) |
 | 105 | `ENOBUFS` | C shim | session path didn't fit in the 512-byte scratch |
@@ -289,9 +296,10 @@ Each public symbol's structural pin in `tests/samvada.tcyr`:
 
 | Fn | Test group | Asserts |
 |---|---|---|
-| `samvada_version` | `v0.2.x packed triple` | 4 (packed + 3 lanes) |
+| `samvada_version` | `v0.4.0 packed triple` | 4 (packed + 3 lanes) |
 | `samvada_init` (null) | `init rejects null table` | 1 |
 | `samvada_init` (NULL kind) | `init rejects NULL-kind table` | 2 (alloc + reject) |
+| `samvada_init` (double-init) | `init rejects double-init without release` | 6 (re-init `-EBUSY` + release clears the guard) |
 | `samvada_release` | `release is idempotent` | 2 (two consecutive calls) |
 | FFI plumbing | `ffi: slot offsets pin C shim contract` | 10 (8 slots + kind + size) |
 | FFI plumbing | `ffi: backend kinds` | 3 |
@@ -301,9 +309,15 @@ Each public symbol's structural pin in `tests/samvada.tcyr`:
 Live-bus paths (`samvada_session_take_device`,
 `samvada_session_release_device`, `samvada_pump_signals`) have
 **no `tcyr` coverage** — they need a running system dbus +
-logind + a real device node. That gap closes when mabda's
-`gpu_surface_configure_native_logind` runs end-to-end on a real
-desktop session (the M1 closeout gate in `roadmap.md`).
+logind + a real device node. Their dispatch wiring is pinned
+structurally (slot offsets 16 / 24 / 32 in
+`test_ffi_slot_offsets`), and the HW exercise path now has a
+harness: `tests/samvada_live.bcyr` (the live-bus bench
+scaffold, 0.4.0) drives all three through a real table, gated
+to SKIP without a backend. The behavioral gap closes when
+mabda's `gpu_surface_configure_native_logind` runs end-to-end
+on a real desktop session (the M1 closeout gate in
+`roadmap.md`).
 
 ## Cross-references
 

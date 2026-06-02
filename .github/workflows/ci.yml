@@ -131,6 +131,17 @@ jobs:
         # docs/benchmarks.md (v1.0 gate, not yet earned).
         run: cyrius bench tests/samvada.bcyr
 
+      - name: Bench (live-bus scaffold, skip-path smoke)
+        # The live-bus harness is HW-gated: standalone/CI builds a
+        # NULL-kind table, so the runner SKIPs and exits 0. This step
+        # only proves the harness compiles and the skip path holds —
+        # real numbers come from a consumer C-shim build with a running
+        # dbus/logind (see tests/samvada_live.bcyr header).
+        run: |
+          out=$(cyrius bench tests/samvada_live.bcyr)
+          echo "$out"
+          echo "$out" | grep -q "SKIP" || { echo "live-bench: expected skip path on CI"; exit 1; }
+
   c-shim:
     name: C Shim Compile-Check
     runs-on: ubuntu-latest

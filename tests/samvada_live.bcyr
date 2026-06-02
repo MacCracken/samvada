@@ -1,0 +1,137 @@
+# samvada live-bus benchmarks — HW-gated scaffold
+# tests/samvada_live.bcyr — the three v1.0-gate live-bus
+# measurements that docs/benchmarks.md reserves rows for:
+#
+#   1. live_handshake     — samvada_init round-trip (open system
+#                           bus + login1 GetSessionByPID) + teardown.
+#   2. live_take_device   — TakeDevice + ReleaseDevice round-trip
+#                           against a DRM card node (major 226).
+#   3. live_pump_signals  — sd_bus_process drain-call cost (the
+#                           signal-pump path). A true throughput
+#                           number needs a synthetic PauseDevice /
+#                           ResumeDevice flood generator (separate
+#                           process); this scaffold measures the
+#                           drain-call cost with whatever events are
+#                           pending. The flood generator is future
+#                           work — see docs/benchmarks.md.
+#
+# WHY THIS IS A SCAFFOLD: samvada's standalone build links no
+# libsystemd and has no FFI backend, so the only table it can build
+# is a NULL-kind mock. `samvada_live_bench_run` detects that and
+# SKIPs — which makes this file safe to compile + run on CI as a
+# smoke (it exercises the skip path and proves the harness builds).
+#
+# HOW A CONSUMER GETS REAL NUMBERS: build with the libsystemd C
+# shim (deps/samvada_main.c) so the FFI table's kind is LIBSYSTEMD,
+# and have the shim entry call `samvada_live_bench_run(table)`
+# instead of the consumer's `samvada_main(table)`. With a running
+# system dbus + logind and a desktop session holding the device,
+# the kind-gate + init-probe pass and the three benches report.
+#
+# Stdlib auto-included via cyrius.cyml.
+
+include "src/lib.cyr"
+include "lib/bench.cyr"
+
+# Bench state shared with the zero-arg bench targets. The runner
+# stores the live table here once; targets read it. DRM master
+# delegation is card0 on the drm subsystem (major 226).
+var _live_table = 0;
+var _live_major = 226;
+var _live_minor = 0;
+
+# ---- bench targets ----
+# Each is invoked many times by bench_run; keep the body to the
+# single round-trip we want to measure.
+
+fn _bench_live_handshake() {
+    # Full connect + session-lookup + teardown each iteration.
+    # init re-uses the bump-allocated scratch after release, so the
+    # round-trip measures bus connect + GetSessionByPID, not alloc.
+    samvada_init(_live_table);
+    samvada_release();
+    return 0;
+}
+
+fn _bench_live_take_device() {
+    # TakeDevice returns a dup'd fd; ReleaseDevice tells logind, then
+    # we close our fd so the loop doesn't leak descriptors.
+    var fd = samvada_session_take_device(_live_major, _live_minor);
+    samvada_session_release_device(_live_major, _live_minor);
+    var have_fd = fd >= 0;
+    if (have_fd) { sys_close(fd); }
+    return 0;
+}
+
+fn _bench_live_pump() {
+    samvada_pump_signals();
+    return 0;
+}
+
+# ---- runner ----
+# Gate on the FFI backend kind, then probe the bus once. Either gate
+# failing prints a clear SKIP and returns 0 (never an error) so the
+# standalone/CI smoke stays green.
+fn samvada_live_bench_run(table) {
+    var kind = samvada_ffi_kind(table);
+    var libsd = samvada_backend_kind_libsystemd();
+    if (kind != libsd) {
+        println("live-bus benches: SKIP — no libsystemd-backed table");
+        println("  (standalone/CI build is kind=NULL; real numbers need a");
+        println("   consumer C-shim build + running dbus/logind. See");
+        println("   docs/benchmarks.md \"When this doc graduates\".)");
+        return 0;
+    }
+
+    # Backend is live — probe the bus before committing to a run.
+    _live_table = table;
+    var rc = samvada_init(table);
+    var unreachable = rc < 0;
+    if (unreachable) {
+        println("live-bus benches: SKIP (libsystemd table present, bus unreachable)");
+        print("  init rc=", 10);
+        print_num(rc);
+        println("");
+        samvada_release();
+        return 0;
+    }
+    samvada_release();
+
+    println("live-bus benches: backend ready — measuring");
+
+    # 1 — handshake latency. Per-iteration timing (round-trip is
+    # microseconds-to-milliseconds, so clock overhead is noise).
+    var b1 = bench_new("live_handshake");
+    bench_run(b1, &_bench_live_handshake, 200);
+    bench_report(b1);
+
+    # 2 — TakeDevice round-trip on a persistent bus.
+    samvada_init(table);
+    var b2 = bench_new("live_take_device");
+    bench_run(b2, &_bench_live_take_device, 200);
+    bench_report(b2);
+    samvada_release();
+
+    # 3 — signal-pump drain-call cost on a persistent bus.
+    samvada_init(table);
+    var b3 = bench_new("live_pump_signals");
+    bench_run(b3, &_bench_live_pump, 1000);
+    bench_report(b3);
+    samvada_release();
+
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    println("samvada live-bus bench harness");
+    # Standalone can only build a NULL-kind mock table — the runner
+    # SKIPs on it. This keeps the file a safe compile + skip-path
+    # smoke; consumers call samvada_live_bench_run with a real table.
+    var t = samvada_ffi_alloc();
+    samvada_live_bench_run(t);
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

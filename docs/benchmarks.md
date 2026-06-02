@@ -5,9 +5,13 @@
 >
 > This is a **seed** doc — the v1.0 gate criterion in
 > [`docs/development/roadmap.md`](development/roadmap.md) calls
-> for *handshake latency* and *signal pump throughput*; both
-> require a live-bus bench harness that does not yet exist.
-> When it lands, those rows append below the current four.
+> for *handshake latency* and *signal pump throughput*. The
+> live-bus bench **harness scaffold** now exists
+> (`tests/samvada_live.bcyr`, added 0.4.0) but is HW-gated: it
+> SKIPs on any build without a libsystemd-backed table + a
+> running dbus/logind. The numbers themselves still need a
+> consumer C-shim build on real hardware. When those land, the
+> rows append below the current four.
 
 ## What's measured today
 
@@ -106,7 +110,19 @@ The v1.0 gate fills three items below:
 3. **Signal-pump throughput** — events drained per second
    under a synthetic `PauseDevice` / `ResumeDevice` flood.
 
-When any of those land, this doc gets a new section with the
-run shape and the numbers. The CPU-baseline columns stay in
-their current place — they are the lower bound, not the
-headline.
+The harness for all three is wired in `tests/samvada_live.bcyr`
+(0.4.0). It is HW-gated by design: `samvada_live_bench_run`
+checks the FFI table's `kind` and probes the bus, then SKIPs
+(exit 0) on any build that can't reach a real backend — so CI
+runs it as a compile + skip-path smoke. To capture real
+numbers, build the file's logic with the libsystemd C shim
+(`deps/samvada_main.c`) and have the shim entry call
+`samvada_live_bench_run(table)` with the live, `kind=LIBSYSTEMD`
+table, from a desktop session that holds the device. The
+signal-pump row additionally needs a synthetic `PauseDevice` /
+`ResumeDevice` flood generator for a true throughput figure;
+the scaffold measures the drain-call cost in the meantime.
+
+When those runs land, this doc gets a new section with the run
+shape and the numbers. The CPU-baseline columns stay in their
+current place — they are the lower bound, not the headline.

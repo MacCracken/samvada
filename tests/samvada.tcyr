@@ -115,14 +115,14 @@ fn test_init_rejects_double_init() {
 
 # ---- version triple ----
 fn test_samvada_version() {
-    test_group("v0.3.0 packed triple");
+    test_group("v0.4.0 packed triple");
     # Bumps lock-step with VERSION. Component asserts catch the
     # bit-shift reorder bug.
-    assert_eq(samvada_version(), (0 << 16) | (3 << 8) | 0,
-    "v0.3.0 packed triple");
+    assert_eq(samvada_version(), (0 << 16) | (4 << 8) | 0,
+    "v0.4.0 packed triple");
     var v = samvada_version();
     assert_eq((v >> 16) & 0xFF, 0, "major");
-    assert_eq((v >> 8)  & 0xFF, 3, "minor");
+    assert_eq((v >> 8)  & 0xFF, 4, "minor");
     assert_eq(v         & 0xFF, 0, "patch");
     return 0;
 }

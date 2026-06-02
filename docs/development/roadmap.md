@@ -25,16 +25,36 @@ ships, in what order, against what dependency gates.
 
 ## v1.0 criteria
 
-- [ ] Public API frozen — every exported symbol documented +
-  tested
+- [x] Public API frozen — every exported symbol documented +
+  tested. Closed 0.4.0: `docs/architecture/public-api.md` maps
+  all 7 public fns + the internal FFI layer; the 0.4.0
+  certification audit fixed the missing `-EBUSY` (`-16`)
+  documentation and the double-init test-map row. CPU-path
+  symbols are unit-tested; the three HW-gated symbols have
+  structural dispatch pins plus the live-bus bench scaffold
+  (`tests/samvada_live.bcyr`). Behavioral live coverage stays
+  tracked under the downstream-consumer-green criterion below.
 - [ ] At least one downstream consumer green on `samvada` ≥ 0.2.0
   (mabda's `_backend_native_surface_configure_logind` body
   filled, e2e program runs from a desktop session)
 - [ ] Architectural pivot decided: pure-Cyrius dbus marshaller
-  OR removal (coordinated with mabda v4.0)
+  OR removal (coordinated with mabda v4.0). **Decision deferred**
+  (it's downstream-demand-driven), but the options are now fully
+  scoped in
+  [proposal 0001](../proposals/0001-v1-dbus-backend-pivot.md) —
+  Path A.1 has a module map, ~650–1010 LoC estimate, a
+  no-hardware test strategy, a risk register, and a 1-session
+  de-risking spike. The checkbox closes when mabda v4.0 picks a
+  path and it lands as ADR-0003.
 - [ ] Benchmarks captured in `docs/benchmarks.md` (handshake
   latency, signal pump throughput)
-- [ ] CHANGELOG complete from v0.1.0 onward
+- [x] CHANGELOG complete from v0.1.0 onward. Verified 0.4.0:
+  every released version (0.1.0 scaffold + 0.2.0 / 0.2.1 /
+  0.2.2 / 0.3.0 tags) has a Keep-a-Changelog entry with a
+  consistent `## [X.Y.Z] — YYYY-MM-DD` (em-dash) header that
+  both the CI docs-gate (`grep -q "^## \[$VERSION\]"`) and the
+  release body extractor (`awk`) parse cleanly. Kept current
+  per the work-loop version-sync step.
 - [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`)
 - [ ] Six-consumer regression sweep — any AGNOS consumer
   depending on samvada builds + tests cleanly
@@ -199,6 +219,10 @@ hits a wall.
 **Coordinated with:** mabda v4.0 (the wgpu-native retirement).
 **Estimated effort:** multi-week if pure-Cyrius; trivial if
 removal.
+**Scoping:** [proposal 0001](../proposals/0001-v1-dbus-backend-pivot.md)
+turns both exits below into a concrete plan (module map, LoC,
+no-hardware test strategy, risks, de-risking spike). The
+*decision* between them is still mabda-v4.0-driven.
 
 Two possible exits:
 

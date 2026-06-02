@@ -4,6 +4,71 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-02
+
+Road-to-v1.0 batch. No public API change — `samvada_version()`
+bumps `(0,4,0)` and the consumer-facing surface
+(`dist/samvada.cyr`) is byte-for-byte unchanged in shape. The
+work advances three v1.0 criteria: a live-bus bench harness
+scaffold lands, the public-API-freeze and CHANGELOG-complete
+criteria are certified + closed, and the v1.0 pivot is fully
+scoped in a proposal.
+
+### Added
+- `tests/samvada_live.bcyr` — HW-gated live-bus bench harness
+  scaffold for the three v1.0-gate measurements (handshake
+  latency, `TakeDevice` round-trip, signal-pump drain cost).
+  `samvada_live_bench_run(table)` gates on the FFI backend
+  `kind` and probes the bus, then SKIPs (exit 0) on any build
+  without a libsystemd-backed table — so it runs on CI as a
+  compile + skip-path smoke and is ready for a consumer C-shim
+  build to capture real numbers. Not part of the public bundle
+  (`[lib]` modules unchanged).
+- `docs/proposals/0001-v1-dbus-backend-pivot.md` (+ proposals
+  index) — scopes the v1.0 pivot named in ADR-0001 into a
+  concrete plan: Path A.1 (pure-Cyrius marshaller) module map,
+  ~650–1010 LoC estimate grounded in the wire format
+  `dbus-marshalling.md` documents, a test strategy where codec
+  round-trips / SASL / `SCM_RIGHTS` are all CI-green over
+  `socketpair` (no dbus hardware), a risk register, and a
+  1-session de-risking spike. Path A.2 (removal) scoped for
+  comparison. The decision stays deferred to mabda v4.0; this
+  makes it a short one.
+- New CI step — runs the live-bus scaffold as a skip-path smoke
+  (asserts the SKIP path holds on CI).
+
+### Fixed
+- `docs/architecture/public-api.md` documented the `-EBUSY`
+  (`-16`) double-init reject that 0.2.2 actually shipped but the
+  page never recorded (the 0.2.2 CHANGELOG claimed it "joins the
+  error catalog" but the edit was never applied). Added to the
+  `samvada_init` rc table, the error-code catalog, and the
+  prose; added the `init rejects double-init without release`
+  row to the test-coverage map. Surfaced by the 0.4.0
+  public-API-freeze certification audit.
+
+### Changed
+- `samvada_version()` packed triple `(0,3,0)` → `(0,4,0)`;
+  version-triple pin in `tests/samvada.tcyr` updated lock-step.
+- `docs/development/roadmap.md` — two v1.0 criteria closed:
+  **Public API frozen** (`[x]`, after the public-api.md audit
+  above) and **CHANGELOG complete from v0.1.0 onward** (`[x]`,
+  verified every released version parses under both the CI
+  docs-gate and the release body extractor). The architectural-
+  pivot criterion stays open but now links the scoping proposal.
+- `docs/benchmarks.md` — the "harness does not yet exist" note
+  replaced; the scaffold (`tests/samvada_live.bcyr`) now exists
+  and the consumer-invocation recipe is documented.
+
+### Notes
+- No new runtime code on the public path — the live bench fns
+  live in `tests/` and never enter `dist/samvada.cyr`, so the
+  v0.x stability contract and the FFI slot offsets are
+  untouched.
+- The live-bus *numbers* (and the signal-pump synthetic flood
+  generator) remain the v1.0/M1 gate work — gated on a consumer
+  C-shim build with running dbus/logind on real hardware.
+
 ## [0.3.0] — 2026-06-02
 
 Toolchain/language update release. The pinned Cyrius toolchain
