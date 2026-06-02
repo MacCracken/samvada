@@ -59,13 +59,15 @@ jobs:
           [ $fail -eq 0 ] || { echo "lint: warnings present"; exit 1; }
 
       - name: Format check
-        # `cyrius fmt --check` emits the formatted source; diff
-        # against the committed file to enforce no drift.
+        # `cyrius fmt <file> --check` (6.0.x: file before flag) is a
+        # pure check — exits 0 when the file is already formatted,
+        # non-zero on drift, and emits nothing to stdout. Branch on
+        # the exit code rather than diffing output.
         run: |
           shopt -s nullglob
           fail=0
           for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr; do
-            if ! diff -q <(cyrius fmt "$f" --check 2>/dev/null) "$f" > /dev/null; then
+            if ! cyrius fmt "$f" --check > /dev/null 2>&1; then
               echo "needs fmt: $f"
               fail=1
             fi

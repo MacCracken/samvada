@@ -4,6 +4,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-02
+
+Toolchain/language update release. The pinned Cyrius toolchain
+moves from `5.7.48` to `6.0.40` — a major-line bump (5.7.x →
+6.0.x) that the full local gate sweep (lint, fmt --check, vet,
+distlib, build, C-shim compile-check, test, bench) passes
+clean against with no source-logic change. The minor bump
+(0.2.x → 0.3.0) reflects the toolchain major-line jump, not new
+protocol surface; M2 ("generalize beyond logind") feature scope
+in `docs/development/roadmap.md` stays unscoped pending a second
+AGNOS consumer. `samvada_version()` packed triple bumps
+`(0,3,0)`. No public API change — every exported symbol's
+signature and error-code contract is unchanged from 0.2.2.
+
+### Changed
+- **Toolchain pin** `cyrius.cyml [package].cyrius` bumped
+  `5.7.48` → `6.0.40`. CI and release both read this pin; no
+  hardcoded version strings in YAML, so no workflow edits were
+  needed. The 6.0.x codegen produces no measurable regression
+  on the dispatch hot path (`ffi_get_slot` flat at 11 ns; see
+  `docs/benchmarks.md` Run 3).
+- `dist/samvada.cyr` regenerated under 6.0.40's `cyrius distlib`
+  emitter, which collapses a duplicate blank line in the
+  generated header (269 lines, was 270). Generated artifact
+  only — no API or symbol change.
+- `samvada_version()` packed triple `(0,2,2)` → `(0,3,0)` in
+  `src/samvada.cyr`; the version-triple pin in
+  `tests/samvada.tcyr` (`test_samvada_version`) updated
+  lock-step.
+- `CONTRIBUTING.md` prerequisite note now reads `6.0.40`.
+- `docs/benchmarks.md` Run 3 appended (CPU baselines under
+  6.0.40: `ffi_alloc` 63 ns, `ffi_get_slot` 11 ns,
+  `init_reject_null` 7 ns, `release_idempotent` 7 ns). Deltas
+  are within the documented per-iteration jitter floor.
+
+### Notes
+- Consumers pinning `[deps.samvada]` need no migration — the
+  bundled API surface (`dist/samvada.cyr`) is unchanged in shape
+  and the FFI slot offsets are frozen by the slot-offset pin.
+- The C shim (`deps/samvada_main.c`) is unchanged and still
+  compiles `-Wall -Wextra -Werror` clean against libsystemd 260;
+  samvada itself does not link libsystemd, so the toolchain bump
+  does not touch the consumer's link step.
+- 38 tests pass (unchanged count); the only test edit is the
+  version-triple value.
+
 ## [0.2.2] — 2026-05-01
 
 P(-1) hardening pass on top of 0.2.1. One HIGH and one MEDIUM

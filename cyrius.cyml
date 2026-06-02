@@ -5,7 +5,7 @@ description = "samvada — Cyrius dbus client for the AGNOS suite (logind / syst
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/samvada"
 language = "cyrius"
-cyrius = "5.7.48"
+cyrius = "6.0.40"
 
 # v0.x ships a smoke entry point only; the API surface (lib.cyr +
 # samvada.cyr) gets populated when the C shim lands in v0.2.0.

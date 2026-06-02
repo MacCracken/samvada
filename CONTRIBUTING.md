@@ -6,7 +6,7 @@ Cyrius dbus client for the AGNOS suite.
 ## Prerequisites
 
 - [Cyrius](https://github.com/MacCracken/cyrius) — version
-  pinned in `cyrius.cyml [package].cyrius` (currently 5.7.48).
+  pinned in `cyrius.cyml [package].cyrius` (currently 6.0.40).
   Ships `cc5`, the `cyrius` CLI, and the stdlib samvada depends on.
 - `gcc` / `clang` (for the libsystemd C shim only —
   `deps/samvada_main.c` is built by consumers, not by samvada

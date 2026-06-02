@@ -36,9 +36,9 @@ var _SAMVADA_OUTS_BUFLEN = 16;
 
 # Version triple packed into a u32 (major << 16 | minor << 8 | patch).
 # Bumps lock-step with VERSION; consumers can do
-# `if (samvada_version() < ((0<<16)|(2<<8)|0)) { ... }` for gates.
+# `if (samvada_version() < ((0<<16)|(3<<8)|0)) { ... }` for gates.
 fn samvada_version() {
-    return (0 << 16) | (2 << 8) | 2;
+    return (0 << 16) | (3 << 8) | 0;
 }
 
 # ---- private helpers ----

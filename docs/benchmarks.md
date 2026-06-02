@@ -55,22 +55,22 @@ stdlib); see `tests/samvada.bcyr` for the four call sites.
 
 ## Run history
 
-| | Run 1 | Run 2 |
-|---|---|---|
-| **Date (UTC)** | `2026-05-01T21:47:19Z` | `2026-05-01T21:58:21Z` |
-| **Commit** | `4c7ada9` | (`0.2.2` release commit) |
-| **samvada** | `0.2.1` | `0.2.2` |
-| **Toolchain** | `cyrius 5.7.48` | `cyrius 5.7.48` |
-| **Host** | `Linux 7.0.2-arch1-1 x86_64`, AMD Ryzen 7 5800H (16T) | same |
+| | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| **Date (UTC)** | `2026-05-01T21:47:19Z` | `2026-05-01T21:58:21Z` | `2026-06-02T22:52:43Z` |
+| **Commit** | `4c7ada9` | (`0.2.2` release commit) | (`0.3.0` release commit) |
+| **samvada** | `0.2.1` | `0.2.2` | `0.3.0` |
+| **Toolchain** | `cyrius 5.7.48` | `cyrius 5.7.48` | `cyrius 6.0.40` |
+| **Host** | `Linux 7.0.2-arch1-1 x86_64`, AMD Ryzen 7 5800H (16T) | same | `Linux 7.0.10-arch1-1 x86_64`, same CPU |
 
 ### Results
 
-| Benchmark | `0.2.1` | `0.2.2` | Δ |
-|---|---|---|---|
-| `ffi_alloc` | 56 ns | 59 ns | +5.4% |
-| `ffi_get_slot` | 9 ns | 11 ns | +22% |
-| `init_reject_null` | 6 ns | 7 ns | +17% |
-| `release_idempotent` | 6 ns | 6 ns | 0% |
+| Benchmark | `0.2.1` | `0.2.2` | `0.3.0` | Δ (0.2.2→0.3.0) |
+|---|---|---|---|---|
+| `ffi_alloc` | 56 ns | 59 ns | 63 ns | +6.8% |
+| `ffi_get_slot` | 9 ns | 11 ns | 11 ns | 0% |
+| `init_reject_null` | 6 ns | 7 ns | 7 ns | 0% |
+| `release_idempotent` | 6 ns | 6 ns | 7 ns | +17% |
 
 Notes:
 
@@ -86,6 +86,12 @@ Notes:
 - `release_idempotent` is unchanged (0 ns delta) because the
   fix only touches `samvada_init`; the release path is
   identical in 0.2.2.
+- Run 3 (`0.3.0`) is a **toolchain-only** release — cyrius
+  `5.7.48` → `6.0.40`, no source-logic change to any benched
+  path. The `ffi_alloc` +6.8% and `release_idempotent` +1 ns
+  are within the documented per-iteration jitter floor on this
+  host; the 6.0.x codegen produces no measurable regression on
+  the dispatch hot path (`ffi_get_slot` flat at 11 ns).
 
 ## When this doc graduates
 
