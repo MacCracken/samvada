@@ -35,18 +35,17 @@ jobs:
           echo "Version verified: $TAG (cyrius.cyml pulls from VERSION via \${file:VERSION})"
 
       - name: Install Cyrius toolchain
+        # Single source of truth is the cyrius.cyml pin; hand it to the
+        # canonical upstream installer (same as ci.yml). The installer
+        # builds the version-aware ~/.cyrius tree the 6.0.x toolchain
+        # resolves the pin against — see ci.yml for the full rationale.
         run: |
+          set -e
           CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sfLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
-          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
-          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
-          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
-          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Resolve deps
         run: |

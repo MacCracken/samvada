@@ -19,20 +19,22 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Cyrius toolchain
+        # The cyrius.cyml `[package].cyrius` pin is the single source of
+        # truth (CLAUDE.md § CI/Release) — no version hardcoded in YAML.
+        # Hand the pin to the canonical upstream installer, which lays out
+        # the version-aware ~/.cyrius tree (versions/<pin>/{bin,lib} +
+        # bin/lib symlinks + a `current` file) that the 6.0.x toolchain
+        # resolves the pin against. The old manual tarball-fetch + flat
+        # `cp` into ~/.cyrius/{bin,lib} predated that layout and no longer
+        # satisfies `cyrius deps` (which checks versions/<pin>/lib).
         run: |
+          set -e
           # Precise PCRE — only matches `cyrius = "..."` at line start.
           CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          # `-fL`: fail on 4xx/5xx so we don't tar an HTML 404 page.
-          curl -sfLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
-          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
-          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
-          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
-          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Resolve dependencies
         # `cyrius deps` reads [deps].stdlib from cyrius.cyml and

@@ -20,7 +20,12 @@ blank line in the generated header, artifact-only). No public
 API change. 38 tests pass (unchanged count). Note: 6.0.40's
 `cyrius fmt` takes the file before the `--check` flag
 (`cyrius fmt <file> --check`) — arg order changed from the
-5.7.x line.
+5.7.x line. CI/release toolchain install modernized to the
+canonical upstream `scripts/install.sh` (the 6.0.x toolchain is
+version-aware — resolves the pin against
+`~/.cyrius/versions/<pin>/lib`, which the old flat-`cp` install
+never produced); CI fmt gate switched to the exit-code form
+(6.0.x `--check` emits no stdout to diff). See CHANGELOG 0.3.0.
 
 **0.2.2** — 2026-05-01. P(-1) hardening pass. One HIGH +
 one MED correctness defect fixed (HIGH-1: `samvada_init`

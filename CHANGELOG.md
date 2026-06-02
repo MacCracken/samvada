@@ -38,6 +38,23 @@ signature and error-code contract is unchanged from 0.2.2.
   6.0.40: `ffi_alloc` 63 ns, `ffi_get_slot` 11 ns,
   `init_reject_null` 7 ns, `release_idempotent` 7 ns). Deltas
   are within the documented per-iteration jitter floor.
+- **CI/release toolchain install modernized** (`ci.yml` +
+  `release.yml`). Both workflows now resolve the toolchain via
+  the canonical upstream installer
+  (`scripts/install.sh | CYRIUS_VERSION=<pin> sh`) instead of a
+  manual tarball fetch + flat `cp` into `~/.cyrius/{bin,lib}`.
+  The 6.0.x toolchain is version-aware — it resolves the
+  `cyrius.cyml` pin against `~/.cyrius/versions/<pin>/lib`, a
+  layout the old flat copy never produced, so `cyrius deps`
+  would have failed under 6.0.40. The pin remains the single
+  source of truth; no version is hardcoded in YAML. Mirrors the
+  patra/yukti install pattern.
+- **CI fmt gate fixed for 6.0.x** (`ci.yml`). `cyrius fmt`
+  changed to file-before-flag (`cyrius fmt <file> --check`) and
+  `--check` is now a pure exit-code check that emits nothing to
+  stdout. The gate previously diffed that stdout against the
+  committed file, which would report drift on every file under
+  6.0.x; it now branches on the exit code.
 
 ### Notes
 - Consumers pinning `[deps.samvada]` need no migration — the
