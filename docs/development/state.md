@@ -5,6 +5,19 @@
 
 ## Version
 
+**0.4.1** — 2026-06-14. Toolchain update release. Pinned
+Cyrius toolchain bumped `6.0.40` → `6.2.6` (a minor-line move
+within the 6.x series — no major-line jump, no CLI-surface
+change). Full local gate sweep (lint, fmt --check, vet,
+distlib, build, C-shim compile-check, test) passes clean with
+no source-logic change. Patch bump reflects the toolchain
+minor-line move, not new protocol surface. `samvada_version()`
+packed triple → `(0,4,1)`; version-triple pin updated
+lock-step. `dist/samvada.cyr` regenerated under 6.2.6's distlib
+(269 lines, unchanged shape — version stamp + triple only). No
+public API change. 38 tests pass (unchanged count). See
+CHANGELOG 0.4.1.
+
 **0.4.0** — 2026-06-02. Road-to-v1.0 batch. No public API
 change (`samvada_version()` → `(0,4,0)`; `dist/samvada.cyr`
 shape unchanged). Added the HW-gated live-bus bench harness
@@ -74,11 +87,12 @@ Live-bus end-to-end validation pending mabda's
 
 ## Toolchain
 
-- **Cyrius pin**: `6.0.40` (in `cyrius.cyml [package].cyrius`)
-- Local cyrius bin: `6.0.40` — pin and local match; bumped in
-  0.3.0 from `5.7.48` (the 0.2.x line's pin). The full gate
-  sweep passes clean under 6.0.40; the only consumer-visible
-  CLI change is `cyrius fmt` taking the file before `--check`.
+- **Cyrius pin**: `6.2.6` (in `cyrius.cyml [package].cyrius`)
+- Local cyrius bin: `6.2.6` — pin and local match; bumped in
+  0.4.1 from `6.0.40` (a 6.x minor-line move). The full gate
+  sweep passes clean under 6.2.6 with no source-logic change.
+  The `cyrius fmt <file> --check` arg order (introduced in the
+  0.3.0 6.0.x jump) is unchanged.
 
 ## Source
 
@@ -88,7 +102,7 @@ Live-bus end-to-end validation pending mabda's
   append-after-kind invariant) + alloc/get/set helpers.
 - `src/samvada.cyr` — public API surface (v0.x stable). Full
   surface map in `docs/architecture/public-api.md`.
-  - `samvada_version()` → packed u32 (0.4.0).
+  - `samvada_version()` → packed u32 (0.4.1).
   - `samvada_init(table)` → 0 | -err (opens bus, looks up
     session). Returns `-EBUSY` (`-16`) on re-init without
     release as of 0.2.2.
@@ -109,7 +123,7 @@ Live-bus end-to-end validation pending mabda's
   kinds, alloc/get/set round-trip, get_slot null-safety, init
   null-table rejection, init NULL-kind rejection, release
   idempotency, init double-init rejection (added 0.2.2 for
-  HIGH-1), v0.4.0 version triple. All pass via `cyrius test`.
+  HIGH-1), v0.4.1 version triple. All pass via `cyrius test`.
   Live sd_bus calls are HW-gated and not in this suite.
 - `tests/samvada.bcyr` — 4 CPU baselines (`ffi_alloc`,
   `ffi_get_slot`, `init_reject_null`, `release_idempotent`).

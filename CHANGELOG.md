@@ -4,6 +4,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-06-14
+
+Toolchain update release. The pinned Cyrius toolchain moves
+from `6.0.40` to `6.2.6` — a minor-line bump within the 6.x
+series (no major-line jump, no CLI-surface change), which the
+full local gate sweep (lint, fmt --check, vet, distlib, build,
+C-shim compile-check, test) passes clean against with no
+source-logic change. Patch bump (0.4.0 → 0.4.1): toolchain
+minor-line move, no new protocol surface and no public API
+change — every exported symbol's signature and error-code
+contract is unchanged from 0.4.0. `samvada_version()` packed
+triple bumps `(0,4,1)`.
+
+### Changed
+- **Toolchain pin** `cyrius.cyml [package].cyrius` bumped
+  `6.0.40` → `6.2.6`. CI and release both read this pin; no
+  hardcoded version strings in YAML, so no workflow edits were
+  needed.
+- `samvada_version()` packed triple `(0,4,0)` → `(0,4,1)` in
+  `src/samvada.cyr`; the version-triple pin in
+  `tests/samvada.tcyr` (`test_samvada_version`) updated
+  lock-step.
+- `dist/samvada.cyr` regenerated under 6.2.6's `cyrius distlib`
+  emitter — version stamp + the `samvada_version()` triple are
+  the only changes (269 lines, unchanged shape). No API or
+  symbol change.
+
+### Notes
+- No source-logic change. 38 tcyr asserts pass (unchanged
+  count); the live-bus scaffold still runs as the separate CI
+  skip-path smoke. FFI slot offsets and the v0.x stability
+  contract are untouched.
+
 ## [0.4.0] — 2026-06-02
 
 Road-to-v1.0 batch. No public API change — `samvada_version()`
