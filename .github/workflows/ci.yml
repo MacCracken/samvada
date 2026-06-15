@@ -149,7 +149,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install libsystemd headers
-        run: sudo apt-get install -y --no-install-recommends libsystemd-dev pkg-config
+        # apt-get update first: the runner image's package index can
+        # point at a superseded point-release .deb that the mirror has
+        # already pruned (404 on fetch). Refreshing resolves the
+        # current version before the install.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsystemd-dev pkg-config
 
       - name: Compile-check deps/samvada_main.c
         # samvada itself doesn't link libsystemd — the consumer
