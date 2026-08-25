@@ -180,7 +180,7 @@ Run as the last patch of the current minor (e.g. `0.2.5` before
 
 - All struct fields are 8 bytes (`i64`), accessed via `load64` / `store64` with offset (Cyrius has no struct types — offset-table-on-heap is canonical)
 - Heap allocation via `alloc()` for long-lived data (FFI tables, scratch buffers); `alloc_init()` must run before any `alloc()`
-- Enum-style constants via fns (`samvada_slot_*()` returning literals) — don't consume `gvar_toks` slots (256 initialized globals limit per compilation unit)
+- Enum-style constants via fns (`samvada_slot_*()` returning literals) — don't consume `gvar_toks` slots (4,096 initialized globals limit per compilation unit)
 - `var buf[N]` allocates N **bytes**, not entries — and inside fns it's STATIC data, not stack (consecutive calls share + clobber); use `alloc(N)` for per-call scratch
 - `var X;` (uninitialized) is rejected — always `var X = 0;`
 - Top-level `var X = expr` is evaluated in source order; forward refs silently resolve to 0 (gotcha; fix slotted for cyrius 5.7.32)
@@ -194,7 +194,8 @@ Run as the last patch of the current minor (e.g. `0.2.5` before
 - All `var` declarations are function-scoped — no block scoping
 - `break` in while loops with `var` declarations is unreliable — use flag + `continue`
 - No negative literals — write `(0 - N)` not `-N`
-- Max limits per compilation unit: 4,096 variables, 1,024 functions, 256 initialized globals
+- Max limits per compilation unit: 4,096 variables, 1,024 functions, 4,096 initialized globals
+- Counting rule: only a top-level `var NAME = <non-literal>;` (call / identifier / expression initializer) consumes an initialized-globals slot; a bare integer-literal init (`var x = 42;`) takes the static-init fast path and enum members are const-folded, so neither counts. See the cyrius guide's **Global Initializers** section (`docs/guides/cyrius-guide.md` in the cyrius repo)
 - `println(s)` is single-arg + newline; `print(s, len)` is two-arg explicit-length — there is **no** `print(s)` single-arg form
 - `print_num(n)` (string.cyr) and `fmt_int(n)` (fmt.cyr) print integers — interchangeable
 
