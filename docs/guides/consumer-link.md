@@ -22,8 +22,8 @@ touching consumer `.cyr` code.
   - Debian / Ubuntu: `apt install libsystemd-dev`
   - Arch: already in the `systemd` package
   - Fedora: `dnf install systemd-devel`
-- A C compiler, plus `objcopy` (binutils — **required**, see
-  step 3).
+- A C compiler. (`objcopy` is needed **only** if you pin cyrius
+  below 6.6.2 — see step 3.)
 - `pkg-config` with `libsystemd.pc` discoverable.
 - The Cyrius toolchain: both `cyrius` **and** `cycc`, which the
   installer drops side by side in `~/.cyrius/bin`. Step 2
@@ -31,7 +31,7 @@ touching consumer `.cyr` code.
 
 ```sh
 pkg-config --modversion libsystemd      # 245+ recommended
-command -v cycc objcopy
+command -v cycc
 ```
 
 ## Adding samvada to your `cyrius.cyml`
@@ -154,7 +154,37 @@ Check the result before moving on — `file build/app.o` must say
 `ELF 64-bit LSB relocatable`. If it says `executable`, the
 `object;` line did not reach the compiler.
 
-### 3. Localize the Cyrius object's libc symbols — REQUIRED
+### 3. Symbol localization — NO LONGER NEEDED on cyrius ≥ 6.6.2
+
+**Skip this step** if you are on the pinned toolchain. It is kept
+here because a consumer on an older cyrius still needs it, and
+because the failure it prevents is otherwise impossible to
+diagnose.
+
+Through cyrius **6.6.1**, an `object;` build exported
+`memchr`, `strchr`, `strstr`, `strlen`, `memcpy`, `memset`,
+`atoi` and `getenv` as **preemptible** globals (`vis=DEFAULT`), so
+a linked C library's own calls rebound to Cyrius's
+implementations. The contracts differ in both directions —
+Cyrius's `memchr` returns an **offset or `-1`**, C's returns a
+**pointer or NULL** — so "not found" reads as a garbage non-NULL
+pointer and "found at offset 0" reads as NULL. samvada's process
+hung inside `sd_bus_call_method`.
+
+cyrius **6.6.2** emits these names with `vis=HIDDEN`, so the
+dynamic linker can no longer preempt them. Verified on the pinned
+toolchain:
+
+| | 6.6.1 | 6.6.2 |
+|---|---|---|
+| `readelf -sW` on `memchr` | `bind=GLOBAL vis=DEFAULT` | `bind=GLOBAL vis=HIDDEN` |
+| link with no `objcopy` | **hangs** | **works** |
+
+(`nm` shows `T` in both cases — the binding is unchanged; it is
+the *visibility* that was fixed. Checking with `nm` alone will
+mislead you.)
+
+**If you are pinned below 6.6.2**, add:
 
 ```sh
 objcopy -L atoi -L getenv -L memchr -L memcpy -L memset \
@@ -162,60 +192,14 @@ objcopy -L atoi -L getenv -L memchr -L memcpy -L memset \
         build/app.o
 ```
 
-**Do not skip this.** The Cyrius object exports its own `atoi`,
-`getenv`, `memchr`, `memcpy`, `memset`, `strchr`, `strlen` and
-`strstr` as global `T` symbols. A strong definition in a `.o`
-beats a shared library's, so linking without localizing rebinds
-*libsystemd's* calls to Cyrius's implementations, program-wide.
-
-Derive the list rather than trusting this one — it grows with
-your include set:
-
-```sh
-nm -g --defined-only build/app.o \
-  | awk '$2 ~ /^[TDB]$/ {print $3}' | sort -u > /tmp/cy.txt
-nm -D --defined-only "$(ldd /bin/true | awk '/libc\.so/ {print $3}')" \
-  | awk '{print $3}' | sed 's/@.*//' | sort -u > /tmp/libc.txt
-comm -12 /tmp/cy.txt /tmp/libc.txt
-```
-
-For the ten stdlib leaves above that prints exactly the eight
-names flagged here.
-
-The failure is silent and misleading. Verified on this exact
-setup, with byte-identical C source either side:
-
-| | `samvada_shim_init()` returns |
-|---|---|
-| without `objcopy -L …` | **`-107`** (`-ENOTCONN`) on one build, a **hang** on another — every `sd_bus_call_method` misbehaves, on a host whose system bus is running fine |
-| with `objcopy -L …` | **`0`** — success |
-
-Nothing in the error points at symbol interposition, and the
-build succeeds either way.
-
-**`memchr` is the load-bearing one.** Bisecting one symbol at a
-time: localizing `memchr` *alone* is sufficient, and localizing
-any single other symbol is not. The contracts differ in both
-directions — Cyrius's `memchr` returns an **offset or `-1`**,
-C's returns a **pointer or NULL** — so "not found" reads as a
-non-NULL garbage pointer and "found at offset 0" reads as NULL.
-Localize the whole set anyway: `strchr` and `strstr` have the
-same offset-or-`-1` shape and are simply not on a hot path today.
-
-Two things make this easy to misdiagnose, both verified:
-
-- **It depends on reachability.** If nothing in your include
-  chain reaches `memchr` it is eliminated as unreachable, never
-  lands in the `.o`, and there is no bug — until unrelated code
-  makes it reachable later.
-- **`sd_bus_default_system()` alone does not trip it.** The bus
-  opens cleanly either way; the failure needs a call that goes
-  further, such as `GetSessionByPID`.
+`memchr` is the load-bearing one — localizing it alone was
+sufficient — and `memeq`, which some older recipes list, is a
+Cyrius-only name with no libc counterpart, so localizing it does
+nothing.
 
 Filed upstream as
 `cyrius/docs/development/issues/2026-09-09-stdlib-exports-libc-names-with-incompatible-abi.md`
-with a standalone repro. If a future toolchain stops exporting
-these names, this step becomes a no-op rather than wrong.
+and fixed in 6.6.2.
 
 ### 4. Compile your `main()`, which calls `samvada_shim_init()`
 
@@ -286,8 +270,6 @@ cc -Wall -Wextra -Werror -DSAMVADA_STANDALONE_MAIN \
    $(pkg-config --cflags libsystemd) -o build/samvada_standalone.o
 
 printf 'object;\n' | cat - src/probe.cyr | cycc > build/probe.o
-objcopy -L atoi -L getenv -L memchr -L memcpy -L memset \
-        -L strchr -L strlen -L strstr build/probe.o
 
 cc build/samvada_standalone.o build/probe.o \
    $(pkg-config --libs libsystemd) -o build/samvada-probe
@@ -460,8 +442,10 @@ Two more things worth stating plainly:
    against a 0.5.1 bundle leaves slot +72 null, and
    `samvada_init` returns `-38` (`-ENOSYS`) rather than walking
    into a guaranteed `NotInControl`.
-4. **Add the `objcopy` step** (step 3). It was always required;
-   it was never documented.
+4. **You can drop the `objcopy` step** if you also move to
+   cyrius ≥ 6.6.2, which hides the colliding libc names at the
+   source (step 3). On an older cyrius it is still required, and
+   it was never documented before 0.5.1.
 5. **Drop `--emit-object`** from your build. It does not exist;
    use the `object;` directive (step 2).
 6. **Drop any `rc == 1` workaround** around
@@ -491,9 +475,12 @@ The 2026-09-09 audit found this guide documented a build that
 - `cyrius build … --emit-object` — no such flag, and passing it
   is silently ignored rather than rejected, so the "object" it
   writes is a linked executable.
-- The `objcopy` localization step was missing entirely, and
-  without it the link succeeds and the program then hangs or
-  fails with `-107`, depending on the build.
+- The `objcopy` localization step was missing entirely, and on
+  cyrius ≤ 6.6.1 the link succeeds without it and the program
+  then hangs (or fails with `-107`, depending on the build).
+  Filed upstream and **fixed in cyrius 6.6.2**, which samvada
+  now pins — so on the pinned toolchain the step is no longer
+  needed at all.
 - It told you to define `samvada_main` yourself, colliding with
   the bundle's and replacing it.
 - It pointed at `lib/samvada/deps/samvada_main.c`, a path

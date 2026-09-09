@@ -5,6 +5,20 @@
 
 ## Version
 
+**0.5.2** — 2026-09-09. Toolchain patch. Pinned Cyrius bumped
+`6.6.1` → `6.6.2`, which carries the upstream fix for the
+symbol-collision defect samvada filed during the 0.5.1 audit
+(credited upstream as *"filed by samvada, reproduced and
+fixed"*). The `objcopy` localization step drops out of the
+consumer build: 6.6.2 emits the libc-reserved names with
+`vis=HIDDEN` instead of `vis=DEFAULT`, verified here by
+`readelf` **and** by a full consumer link that hangs on 6.6.1 and
+returns `samvada_init -> 0` / `take_device -> -13` on 6.6.2. The
+fix is to visibility, not binding — `nm` shows `T` either way.
+No source-logic change; 131 tests pass unchanged. 6.6.2's
+headline `lib/tagged.cyr` repair is a no-op for samvada, which
+calls none of that API.
+
 **0.5.1** — 2026-09-09. **P(-1) hardening + security audit
 release.** 2 CRITICAL / 10 MEDIUM / 16 LOW findings fixed; tests
 38 → 114; every repair mutation-proven. Report:
@@ -141,9 +155,10 @@ Live-bus end-to-end validation pending mabda's
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.1` (in `cyrius.cyml [package].cyrius`)
-- Local cyrius bin: `6.6.1` — pin and local match; bumped in
-  0.5.0 from `6.2.6` (four 6.x minor lines). The full gate
+- **Cyrius pin**: `6.6.2` (in `cyrius.cyml [package].cyrius`)
+- Local cyrius bin: `6.6.2` — pin and local match; bumped in
+  0.5.2 from `6.6.1` (a patch carrying samvada's own upstream
+  fix), and in 0.5.0 from `6.2.6` (four 6.x minor lines). The full gate
   sweep passes clean under 6.6.1 with no source-logic change.
   The `cyrius fmt <file> --check` arg order (introduced in the
   0.3.0 6.0.x jump) is unchanged.
@@ -161,6 +176,10 @@ Live-bus end-to-end validation pending mabda's
   - `CYRIUS_DCE=1` genuinely eliminates as of cyrius 6.5.72 —
     before that it NOP-ed and padded, so the release build
     carried its dead code.
+  - `object;` builds hide libc-reserved names (`vis=HIDDEN`) as
+    of **6.6.2**. Below that, a consumer linking a Cyrius object
+    against a C library must `objcopy -L` them or the C library
+    binds to Cyrius's incompatible implementations.
 
 ## Source
 
@@ -172,7 +191,7 @@ Live-bus end-to-end validation pending mabda's
   helpers.
 - `src/samvada.cyr` — public API surface (v0.x stable). Full
   surface map in `docs/architecture/public-api.md`.
-  - `samvada_version()` → packed u32 (0.5.1).
+  - `samvada_version()` → packed u32 (0.5.2).
   - `samvada_init(table)` → 0 | -err (opens bus, looks up
     session, **takes session control**). Returns `-EBUSY` (`-16`)
     on re-init without release as of 0.2.2; self-cleans on every

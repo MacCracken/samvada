@@ -184,15 +184,10 @@ cc -c deps/samvada_main.c $(pkg-config --cflags libsystemd) -o build/samvada_mai
   cat src/app.cyr
 } | cycc > build/app.o
 
-# 3. REQUIRED: localize the Cyrius object's libc symbols, or libsystemd binds to
-#    them instead of libc's. `memchr` is the load-bearing one.
-objcopy -L atoi -L getenv -L memchr -L memcpy -L memset \
-        -L strchr -L strlen -L strstr build/app.o
+# 3. your own main(), which calls samvada_shim_init()
+cc -c src/launch.c -o build/main.o    # calls samvada_shim_init()
 
-# 4. your own main(), which calls samvada_shim_init()
-cc -c src/launch.c -o build/main.o
-
-# 5. link
+# 4. link
 cc build/samvada_main.o build/app.o build/main.o \
    $(pkg-config --libs libsystemd) -o build/app
 ```

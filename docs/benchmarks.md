@@ -59,13 +59,13 @@ stdlib); see `tests/samvada.bcyr` for the four call sites.
 
 ## Run history
 
-| | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 |
-|---|---|---|---|---|---|
-| **Date (UTC)** | `2026-05-01T21:47:19Z` | `2026-05-01T21:58:21Z` | `2026-06-02T22:52:43Z` | `2026-09-09T15:42:03Z` | `2026-09-09T17:58:00Z` |
-| **Commit** | `4c7ada9` | (`0.2.2` release commit) | (`0.3.0` release commit) | (`0.5.0` release commit) | (`0.5.1` release commit) |
-| **samvada** | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | `0.5.1` |
-| **Toolchain** | `cyrius 5.7.48` | `cyrius 5.7.48` | `cyrius 6.0.40` | `cyrius 6.6.1` | `cyrius 6.6.1` |
-| **Host** | `Linux 7.0.2-arch1-1 x86_64`, AMD Ryzen 7 5800H (16T) | same | `Linux 7.0.10-arch1-1 x86_64`, same CPU | `Linux 7.2.3-arch1-3 x86_64`, same CPU | same as Run 4 |
+| | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Run 6 |
+|---|---|---|---|---|---|---|
+| **Date (UTC)** | `2026-05-01T21:47:19Z` | `2026-05-01T21:58:21Z` | `2026-06-02T22:52:43Z` | `2026-09-09T15:42:03Z` | `2026-09-09T17:58:00Z` | `2026-09-09T19:40:00Z` |
+| **Commit** | `4c7ada9` | (`0.2.2` release commit) | (`0.3.0` release commit) | (`0.5.0` release commit) | (`0.5.1` release commit) | (`0.5.2` release commit) |
+| **samvada** | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | `0.5.1` | `0.5.2` |
+| **Toolchain** | `cyrius 5.7.48` | `cyrius 5.7.48` | `cyrius 6.0.40` | `cyrius 6.6.1` | `cyrius 6.6.1` | `cyrius 6.6.2` |
+| **Host** | `Linux 7.0.2-arch1-1 x86_64`, AMD Ryzen 7 5800H (16T) | same | `Linux 7.0.10-arch1-1 x86_64`, same CPU | `Linux 7.2.3-arch1-3 x86_64`, same CPU | same as Run 4 | same as Run 4 |
 
 > **Gap, stated rather than papered over.** `0.4.0` and `0.4.1`
 > shipped without appending a row, so there is no Run between
@@ -77,12 +77,12 @@ stdlib); see `tests/samvada.bcyr` for the four call sites.
 
 ### Results
 
-| Benchmark | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | `0.5.1` | Δ (0.3.0→0.5.0) | Δ (0.5.0→0.5.1) |
-|---|---|---|---|---|---|---|---|
-| `ffi_alloc` | 56 ns | 59 ns | 63 ns | 28 ns | 32 ns | **−55.6%** | **+14.3%** (expected — see note) |
-| `ffi_get_slot` | 9 ns | 11 ns | 11 ns | 9 ns | 9 ns | −18.2% | 0% |
-| `init_reject_null` | 6 ns | 7 ns | 7 ns | 6 ns | 6 ns | −14.3% | 0% |
-| `release_idempotent` | 6 ns | 6 ns | 7 ns | 6 ns | 6 ns | −14.3% | 0% |
+| Benchmark | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | `0.5.1` | `0.5.2` | Δ (0.3.0→0.5.0) | Δ (0.5.0→0.5.1) | Δ (0.5.1→0.5.2) |
+|---|---|---|---|---|---|---|---|---|---|
+| `ffi_alloc` | 56 ns | 59 ns | 63 ns | 28 ns | 32 ns | 30 ns | **−55.6%** | **+14.3%** (expected — see note) | −2 ns (noise) |
+| `ffi_get_slot` | 9 ns | 11 ns | 11 ns | 9 ns | 9 ns | 8 ns | −18.2% | 0% | −1 ns (noise) |
+| `init_reject_null` | 6 ns | 7 ns | 7 ns | 6 ns | 6 ns | 5 ns | −14.3% | 0% | −1 ns (noise) |
+| `release_idempotent` | 6 ns | 6 ns | 7 ns | 6 ns | 6 ns | 7 ns | −14.3% | 0% | +1 ns (noise) |
 
 Notes:
 
@@ -135,6 +135,16 @@ Notes:
   is the useful signal: the dispatch hot path (`ffi_get_slot`) did
   **not** regress despite the table growing, confirming the cost
   is confined to allocation.
+- Run 6 (`0.5.2`) is a **toolchain patch** — cyrius `6.6.1` →
+  `6.6.2`, no source-logic change. Three runs minutes apart:
+  `ffi_alloc` 29/31/30 ns, the other three identical across all
+  three. Every delta is ±1–2 ns, i.e. **inside this host's
+  documented jitter floor**, and should be read as flat, not as
+  four small wins. That is the expected and desired result: 6.6.2
+  changes symbol *visibility* in `object;` output, which is a
+  linking property and touches no code on any benched path.
+  Binary sizes are byte-identical to 0.5.1 (80,904 B default,
+  15,368 B under `CYRIUS_DCE=1`), which corroborates it.
 - **Binary size, first recorded here.** `CYRIUS_DCE=1` did not
   eliminate before cyrius 6.5.72 — it NOP-ed and padded. Under
   6.6.1 the standalone smoke binary goes **80,904 B → 15,368 B

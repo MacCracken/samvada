@@ -4,6 +4,62 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-09-09
+
+Toolchain patch. Pinned Cyrius bumped `6.6.1` → `6.6.2`, which
+contains the upstream fix for the symbol-collision defect samvada
+filed during the 0.5.1 audit. No source-logic change; 131 tests
+pass unchanged.
+
+### Fixed
+- **The `objcopy` symbol-localization step is no longer needed.**
+  cyrius 6.6.2 fixes the defect samvada filed
+  (`cyrius/docs/development/issues/2026-09-09-stdlib-exports-libc-names-with-incompatible-abi.md`,
+  credited upstream as *"filed by samvada, reproduced and
+  fixed"*). Through 6.6.1 an `object;` build exported `memchr`,
+  `strchr`, `strstr`, `strlen`, `memcpy`, `memset`, `atoi` and
+  `getenv` as **preemptible** globals, so a linked C library's
+  calls rebound to Cyrius's implementations — and the contracts
+  differ in both directions (Cyrius's `memchr` returns an offset
+  or `-1`; C's returns a pointer or NULL). samvada's process hung
+  inside `sd_bus_call_method`.
+
+  **Verified on the pinned toolchain rather than taken from the
+  changelog:**
+
+  | | 6.6.1 | 6.6.2 |
+  |---|---|---|
+  | `readelf -sW` on `memchr` | `bind=GLOBAL vis=DEFAULT` | `bind=GLOBAL vis=HIDDEN` |
+  | full consumer link, no `objcopy` | **hangs** | `samvada_init -> 0`, `take_device -> -13` |
+
+  Note the fix is to **visibility**, not binding — `nm` reports
+  `T` in both cases, so checking with `nm` alone would suggest
+  nothing had changed. Upstream also re-derived the affected
+  name list as **11 symbols, not the 8** in samvada's filing.
+
+  `docs/guides/consumer-link.md` and `README.md` drop the step
+  from the main recipe; it is retained in the guide, clearly
+  scoped, for consumers pinned below 6.6.2.
+
+### Changed
+- **Toolchain pin** `cyrius.cyml [package].cyrius` bumped
+  `6.6.1` → `6.6.2`. CI and release both read this pin.
+- `samvada_version()` packed triple `(0,5,1)` → `(0,5,2)`; the
+  version-triple pin in `tests/samvada.tcyr` updated lock-step.
+- `dist/samvada.cyr` regenerated under 6.6.2 (332 lines, shape
+  unchanged).
+
+### Notes
+- 6.6.2's headline repair is to `lib/tagged.cyr` (`tag()` and
+  `is_tag()` had been silently redefined at unchanged arity in
+  6.6.0). samvada declares `tagged` as a stdlib leaf but calls
+  **none** of that API — verified by grep across `src/` and
+  `tests/` — so it is a no-op here. `tagged` and `str` remain
+  declared-but-unused, which the 0.5.1 audit filed as INFO.
+- CI gates, FFI layout (11 slots / 88 bytes, `kind` at +64) and
+  the public API are all unchanged. The C shim compiles clean in
+  both modes under 6.6.2.
+
 ## [0.5.1] — 2026-09-09
 
 **P(-1) hardening + security audit release.** Two CRITICAL, ten
