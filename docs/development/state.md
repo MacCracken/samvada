@@ -5,6 +5,39 @@
 
 ## Version
 
+**0.5.1** — 2026-09-09. **P(-1) hardening + security audit
+release.** 2 CRITICAL / 10 MEDIUM / 16 LOW findings fixed; tests
+38 → 114; every repair mutation-proven. Report:
+[`docs/audit/2026-09-09-audit.md`](../audit/2026-09-09-audit.md).
+
+The two CRITICALs share one cause — nothing in the repo had ever
+run against a real dbus daemon or a real consumer link:
+- **CRIT-1**: `samvada_session_take_device()` could never succeed
+  in any environment. logind requires `TakeControl` before
+  `TakeDevice`; samvada never sent it, so every call got
+  `NotInControl`. Proven live. Fixed by appending two slots after
+  `kind` (ADR-0002): `take_control` +72, `release_control` +80;
+  `samvada_ffi_size()` 72 → 88; `kind` unmoved at +64.
+- **CRIT-2**: the documented consumer link could never work — the
+  shim defined `main()` unconditionally and every consumer owns
+  its own. **BREAKING**: `main()` is now behind
+  `-DSAMVADA_STANDALONE_MAIN`; consumers call
+  `samvada_shim_init()` from their own `main()`. The fn-table is
+  now `static` (samvada borrows the pointer, it never copies).
+
+No public Cyrius API signature changed. The break is at the
+C/link surface only.
+
+Also: `F_DUPFD_CLOEXEC` instead of `dup()` (the DRM fd leaked
+across `execve`); `release_device` returned 1 not 0; `init` now
+self-cleans on late failure and whitelists backend kinds; the
+signal drain is capped at 256/call; CI's security scan (which
+could not fire) rewritten and widened to `deps/`; the toolchain
+installer pinned + checksummed and workflow tokens scoped to
+`contents: read`. **[ADR-0003](../adr/0003-native-cyrius-dbus.md)
+adopts native Cyrius dbus as the v1.0 path** and
+[`roadmap.md`](roadmap.md) is rewritten around it.
+
 **0.5.0** — 2026-09-09. Toolchain update release. Pinned
 Cyrius toolchain bumped `6.2.6` → `6.6.1` (four minor lines
 within the 6.x series — no major-line jump). Full local gate
@@ -133,33 +166,46 @@ Live-bus end-to-end validation pending mabda's
 
 - `src/main.cyr` — smoke entry point ("hello from samvada").
 - `src/lib.cyr` — include chain: samvada_ffi.cyr → samvada.cyr.
-- `src/samvada_ffi.cyr` — fn-table layout (9 slots, 72 bytes,
-  append-after-kind invariant) + alloc/get/set helpers.
+- `src/samvada_ffi.cyr` — fn-table layout (**11 slots, 88 bytes**
+  as of 0.5.1; `take_control` +72 and `release_control` +80 were
+  appended after `kind`, which stays at +64) + alloc/get/set
+  helpers.
 - `src/samvada.cyr` — public API surface (v0.x stable). Full
   surface map in `docs/architecture/public-api.md`.
-  - `samvada_version()` → packed u32 (0.5.0).
+  - `samvada_version()` → packed u32 (0.5.1).
   - `samvada_init(table)` → 0 | -err (opens bus, looks up
-    session). Returns `-EBUSY` (`-16`) on re-init without
-    release as of 0.2.2.
+    session, **takes session control**). Returns `-EBUSY` (`-16`)
+    on re-init without release as of 0.2.2; self-cleans on every
+    late failure as of 0.5.1.
   - `samvada_session_take_device(major, minor)` → fd | -err.
   - `samvada_session_release_device(major, minor)` → 0 | -err.
   - `samvada_pump_signals()` → events | -err.
-  - `samvada_release()` → 0 (idempotent).
+  - `samvada_release()` → 0 (idempotent). Drops session
+    control and zeroes scratch as of 0.5.1. **Note**: logind
+    revokes devices taken via `TakeDevice` when control is
+    released, so outstanding consumer fds become invalid.
   - `samvada_main(table)` → 0 | -err (C-shim entry point).
 - `src/test.cyr` — top-level test entry referenced by
   `cyrius.cyml [build].test`.
 - `deps/samvada_main.c` — libsystemd C shim. Not linked by
-  `cyrius build`; consumers build it and link libsystemd.
+  `cyrius build`; consumers build it and link libsystemd, calling
+  `samvada_shim_init()` from their own `main()`. The shim's own
+  `main()` is compiled only under `-DSAMVADA_STANDALONE_MAIN`
+  (0.5.1, breaking).
 
 ## Tests
 
-- `tests/samvada.tcyr` — 38 asserts across 9 groups: smoke,
-  FFI slot-offset pin (freezes the C-shim contract), backend
-  kinds, alloc/get/set round-trip, get_slot null-safety, init
-  null-table rejection, init NULL-kind rejection, release
-  idempotency, init double-init rejection (added 0.2.2 for
-  HIGH-1), v0.5.0 version triple. All pass via `cyrius test`.
-  Live sd_bus calls are HW-gated and not in this suite.
+- `tests/samvada.tcyr` — **114 asserts** (was 38) across 23
+  groups. Adds a **pure-Cyrius mock backend** (`mock_table_new`)
+  giving `take_device` / `release_device` / `pump_signals` real
+  behavioural coverage with no hardware — the long-standing
+  "HW-gated, untestable" claim was false. Also pins: the
+  `TakeControl` dispatch (CRIT-1 regression), init self-clean on
+  late failure, dispatch wiring per slot, fd sign-extension across
+  int32, `samvada_main`, `set_slot`'s null guard, and the
+  append-after-kind layout invariants. Vacuous assertions removed
+  and the load-bearing ones mutation-proven. Live sd_bus calls are
+  still HW-gated and not in this suite.
 - `tests/samvada.bcyr` — 4 CPU baselines (`ffi_alloc`,
   `ffi_get_slot`, `init_reject_null`, `release_idempotent`).
   History tracked in `docs/benchmarks.md`.
@@ -214,7 +260,16 @@ Published alongside the bundle:
 
 ## Next
 
-See [`roadmap.md`](roadmap.md). M1 status unchanged —
+See [`roadmap.md`](roadmap.md) — rewritten 0.5.1 as **the road to
+Native DBus in Cyrius**, with the N lane (N0–N7, no consumer or
+hardware dependency) quarantined from the CG lane (the
+hardware-gated consumer e2e). Immediate next item is **N0**:
+decide the signal-visibility contract as ADR-0004, because the
+answer may require an additive FFI slot and that propagates
+through every later milestone.
+
+Historic note below is retained for context; the M-numbered
+milestones are folded into the new lanes. M1 status unchanged —
 code-complete, awaiting live-bus e2e through a desktop
 session. mabda's rc.2 pulls 0.2.2 but does not schedule the
 e2e validation. M2 generalization is unscoped pending a

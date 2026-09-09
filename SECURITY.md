@@ -14,7 +14,10 @@ report it responsibly through **GitHub Security Advisories**:
 ## Scope
 
 This policy covers samvada's own source — `src/*.cyr`,
-`deps/samvada_main.c`, and the `dist/samvada.cyr` bundle.
+`deps/samvada_main.c`, the `dist/samvada.cyr` bundle and its
+`dist/samvada.deps` sidecar — and the release supply chain that
+produces them (`.github/workflows/`), since a consumer fetching
+a tag trusts both.
 
 samvada wraps `libsystemd`'s `sd_bus_*` API in v0.x; vulnerabilities
 in libsystemd itself, in the dbus broker, in logind, or in the
@@ -26,10 +29,31 @@ the wrapper, document the workaround, or both.
 
 ## Supported Versions
 
-| Version | Supported                                                  |
-|---------|------------------------------------------------------------|
-| 0.2.x   | **Yes** — current release, receives security fixes         |
-| 0.1.x   | No — pre-protocol scaffold only                            |
+| Version | Supported                                                            |
+|---------|----------------------------------------------------------------------|
+| 0.5.x   | **Yes** — current release line, receives security fixes              |
+| 0.4.x   | No — superseded by 0.5.1; upgrade, there is no backport path         |
+| 0.3.x   | No                                                                   |
+| 0.2.x   | No                                                                   |
+| 0.1.x   | No — pre-protocol scaffold only                                      |
+
+Every release from 0.2.0 through 0.5.0 carried two defects that
+0.5.1 fixes and that cannot be backported without the same code
+change (see "Audit History"):
+
+- `samvada_session_take_device()` could not succeed in **any**
+  environment — samvada never sent `TakeControl`, so logind
+  answered every `TakeDevice` with
+  `org.freedesktop.login1.NotInControl`.
+- `deps/samvada_main.c` defined `main()` unconditionally, so the
+  shim could not link into a consumer that owns its own `main()`
+  — i.e. into any real consumer. The documented two-stage build
+  never worked.
+
+Consequently the 0.2.x–0.4.x lines receive no security fixes:
+the correct remedy for anything found there is to move to 0.5.x.
+mabda currently pins `tag = "0.4.1"` and has not yet been
+re-pinned.
 
 Once v1.0 ships and the libsystemd C shim retires (replaced by
 the pure-Cyrius dbus marshaller, or removed entirely — see
@@ -58,45 +82,234 @@ trusts vs. validates:
 
 | Source | Trust | Notes |
 |---|---|---|
-| Consumer-supplied `major` / `minor` device numbers | validated at C boundary | passed through to `TakeDevice` as `uu`; logind enforces ACLs |
-| Consumer-supplied `pid` (for `GetSessionByPID`) | trusted | typically the consumer's own `getpid()`; no special permission to look up |
-| Bytes from the system dbus socket | validated by libsystemd | `sd_bus_message_read` enforces signature match before we see the data |
-| FDs received via `SCM_RIGHTS` | dup'd before the message is unref'd | prevents fd reuse-after-close in the consumer |
-| logind's `PauseDevice` / `ResumeDevice` signals | trusted (signed by logind's bus name) | only the well-known dest can emit these |
+| Consumer-supplied fn-table pointer (`samvada_init`) | `kind` whitelisted, slots trusted | `samvada_init` rejects a null table, and rejects any `kind` word at `+64` outside `{LIBSYSTEMD=1, PURE_CYRIUS=2}` with `-EINVAL` (`src/samvada.cyr`). The slot fn-pointers themselves are dispatched unvalidated — they *are* the backend. samvada **borrows** the table and re-reads it with `load64` on every call, so keeping it alive and unmodified from `samvada_init()` to `samvada_release()` is the consumer's contract; the shim satisfies it with a file-scope `static int64_t samvada_fn_table[]` |
+| Consumer-supplied `major` / `minor` device numbers | validated at the C boundary | `devnum_ok()` in `deps/samvada_main.c` gates both `sb_take_device` and `sb_release_device` on `0 <= v <= UINT32_MAX` and returns `-EINVAL` otherwise — **before** the 64→32 narrowing cast, which previously truncated silently. Values that pass go to `TakeDevice` / `ReleaseDevice` as `uu`; logind enforces the ACLs. The check lives in the shim, so a future `PURE_CYRIUS` backend must re-supply it |
+| `pid` for `GetSessionByPID` | not consumer-supplied | samvada resolves its own session: `samvada_init` calls `sys_getpid()` and passes that (`src/samvada.cyr`). No consumer-supplied pid reaches the bus, and no public fn accepts one |
+| Bytes from the system dbus socket | validated by libsystemd | `sd_bus_message_read` enforces signature match before we see the data. `sb_get_session_path` adds its own bounds: it rejects `out_buf == 0` or `out_buf_len <= 0` before the `(size_t)` cast, rejects a `NULL` path from a successful read, and returns `-ENOBUFS` rather than truncating a path that does not fit |
+| FDs received via `SCM_RIGHTS` | re-duplicated `CLOEXEC` before the message is unref'd | see the fd-passing design principle below |
+| logind's `PauseDevice` / `ResumeDevice` signals | **not received at all** | no match rule is ever installed, so these signals are not delivered to consumer code. See "Known Limitations" — this is a functional gap, not a trust decision |
 
 ## Design Principles
 
 - **No filesystem I/O.** samvada does not read or write any
   files. The dbus socket is the only kernel-visible side effect.
 - **No process creation.** No `execve`, no `fork`, no
-  `sys_system`. CI scans for these patterns.
+  `system()`. CI's security-scan job enforces this over
+  `src/` **and** `tests/` **and** `deps/` — the C shim is a
+  released artifact and was previously scanned by nothing. The
+  deny list matches Cyrius spawn helpers by symbol
+  (`sys_execve`, `sys_execveat`, `sys_fork`, `sys_vfork`,
+  `sys_clone`/`sys_clone3`, `sys_posix_spawn`), `SYS_*`
+  syscall constants, raw numeric `syscall(...)` spawn numbers,
+  and the C library spawn family (`system`, `popen`, `exec*`,
+  `fork`, `vfork`, `posix_spawn`) — all under `grep -E`,
+  ignoring comment lines. The pre-0.5.1 list could not fire:
+  it grepped for `sys_system`, which does not exist in the
+  Cyrius stdlib, and for two numeric literals the codebase
+  never writes.
 - **No writes to system paths.** `/etc/`, `/bin/`, `/sbin/` are
   CI-rejected as string literals — samvada has no business
-  touching them.
+  touching them. Same scan, same widened scope.
 - **No raw pointer arithmetic in user code.** Cyrius's
   `load64` / `store64` over named offset constants (the
   offset-table-on-heap pattern) replaces struct types.
 - **`fncall6` ceiling honored.** Every C wrapper takes ≤6 args
   so dispatch stays portable across x86_64 SysV + aarch64.
-- **Fd-passing is `dup`-safe.** The C shim `dup`s every fd
-  returned via `SCM_RIGHTS` before unref'ing the dbus message,
-  so the consumer's fd lifetime is independent of dbus message
-  lifetime.
+- **Fd-passing is duplicate-safe *and* `CLOEXEC`-safe.** The C
+  shim re-duplicates every fd returned via `SCM_RIGHTS` before
+  unref'ing the dbus message, so the consumer's fd lifetime is
+  independent of dbus message lifetime. The duplicate is made
+  with `fcntl(fd, F_DUPFD_CLOEXEC, 0)`, **not** `dup()`:
+  `dup()` clears `FD_CLOEXEC` on the new descriptor, which
+  meant the DRM-master fd survived any `execve` the consumer
+  performed and leaked master rights into an unrelated child.
+  A message that reads successfully but delivers `fd < 0` — a
+  peer contract violation — returns an explicit `-EBADF`
+  rather than a stale `errno`.
 - **Errors are sd-bus negative errnos.** Pass-through from
   libsystemd; consumers branch on `< 0` and never inspect
-  magnitudes beyond logging.
+  magnitudes beyond logging. Success is exactly `0`:
+  `sd_bus_call_method` returns a *positive* value on success,
+  so `sb_release_device` and the `TakeControl` /
+  `ReleaseControl` wrappers normalise any non-negative return
+  to `0` before it crosses the FFI boundary, and
+  `samvada_session_release_device` normalises again on the
+  Cyrius side so a `PURE_CYRIUS` backend is covered too.
+- **The bus pump is bounded.** `sb_pump_signals` drains at most
+  `SAMVADA_PUMP_MAX_EVENTS` (256) messages per call and returns
+  the count. The pre-0.5.1 loop ran until the queue emptied, so
+  any peer able to emit signals on the connection could hold a
+  single call captive — measured at 0.77 s under an
+  unprivileged local flood. The public
+  `samvada_pump_signals()` signature is frozen and takes no
+  arguments, so the cap lives in the C wrapper; a residual
+  queue drains on the consumer's next tick.
+- **Init fails closed.** `samvada_init` refuses re-entry
+  without an intervening release (`-EBUSY`), and calls
+  `samvada_release()` itself on every late failure — so a
+  failure after the bus opened neither leaks the `sd_bus` nor
+  leaves the public API armed against a half-built session. The
+  subsequent retry is a clean init, not `-EBUSY`.
+- **Nothing sensitive survives release.** `samvada_release()`
+  zeroes both scratch buffers: `_samvada_outs` holds a raw
+  `sd_bus *` that is dangling the instant `close_bus` runs, and
+  `_samvada_sess` holds the resolved session object path.
+- **Buffers stay small and reviewable.** Every `var buf[N]` is
+  N *bytes*, and a `var` declaration of ≥64 KB fails the CI
+  security scan outright — large scratch belongs on the heap
+  via `alloc()`, where it can be reviewed as an allocation
+  rather than as static data shared across calls.
+- **The release supply chain is pinned.** The toolchain
+  installer is fetched from a pinned commit SHA and
+  checksum-verified before it executes, rather than piped into
+  a shell from a mutable branch. Workflow permissions default
+  to `contents: read`, with `contents: write` granted only to
+  the job that publishes; every `actions/checkout` runs with
+  `persist-credentials: false` so no job leaves a
+  `GITHUB_TOKEN` on disk for a third-party script to read.
+
+## Known Limitations
+
+Named here because a security document that only lists what is
+defended is misleading about what is wired.
+
+- **`PauseDevice` / `ResumeDevice` are not delivered.** The C
+  shim populates slot `+48` (`sb_subscribe_pause_resume`) and
+  slot `+56` (`sb_unsubscribe`), but **no samvada code path
+  dispatches either**, and no public fn installs a match rule —
+  the exported surface in `dist/samvada.cyr` carries the two
+  slot-offset constants and nothing that calls through them.
+  `samvada_pump_signals()` therefore services the connection
+  (it drives `sd_bus_process`) but can never run a pause/resume
+  callback, because none was ever registered — the callback ABI
+  is sound and has never executed. A consumer can reach slot `+48`
+  itself through the generic `samvada_ffi_get_slot` accessor
+  and dispatch it by hand; that is unsupported, undocumented
+  and untested. Any documentation implying samvada delivers
+  these signals is wrong. `PauseDeviceComplete` — the
+  acknowledgement half of logind's pause handshake — is not
+  wired either; a consumer that needs it must implement it
+  outside samvada. Tracked as MED-7 in the 2026-09-09 audit and
+  scheduled on the roadmap.
+- **Live-bus end-to-end is unverified.** Behaviour against a
+  real `dbus-broker` + `systemd-logind` on a **seated** session
+  remains hardware-gated. `TakeControl` was reproduced live
+  against `systemd-logind` (without it, `TakeDevice` fails
+  `NotInControl`; with it, the call advances past the control
+  check), but the remaining path then hits an
+  environment-specific `AccessDenied` on a seatless session.
+  The full seated path is untested. Treat every runtime claim
+  about `TakeDevice` success as unproven until the M1 closeout
+  gate clears.
+- **samvada is single-threaded and has no locking.** Module
+  scope state (`_samvada_table`, `_samvada_bus`,
+  `_samvada_sess`, `_samvada_outs`) is unguarded, and the
+  scratch buffers are shared across calls. **Consumers must
+  serialize all samvada calls.** Concurrent
+  `samvada_session_take_device()` from two threads races on the
+  same 16-byte out-scratch and can hand one thread the other's
+  fd. This contract previously lived only inside
+  `docs/audit/2026-05-01-hardening-review.md`; it is normative.
+- **The pump cap bounds a call, not a peer.** 256 events per
+  call stops one call being held captive; it does not
+  rate-limit a peer that sustains a flood, which still consumes
+  the pump budget on every tick. Rate-limiting is a v1.0 design
+  item.
+- **Input validation lives in the shim, not the core.** The
+  `major` / `minor` range check is in `deps/samvada_main.c`.
+  The Cyrius side passes both through unexamined, so a backend
+  that is not the libsystemd shim must supply the check itself.
 
 ## Audit History
 
-samvada is pre-audit while the C-shim era runs. The first audit
-pass is gated to v1.0 — either the pure-Cyrius marshaller (Path
-A in `roadmap.md` §M3) which gets a P(-1) scaffold-hardening
-pass before tagging, or the removal path (Path B) which doesn't
-need a samvada audit because the surface goes away.
+| Date       | Pass                                   | Target  | Report |
+|------------|----------------------------------------|---------|--------|
+| 2026-09-09 | P(-1) hardening review + security audit | 0.5.1  | [`docs/audit/2026-09-09-audit.md`](docs/audit/2026-09-09-audit.md) |
+| 2026-05-01 | Hardening review                       | 0.2.2   | [`docs/audit/2026-05-01-hardening-review.md`](docs/audit/2026-05-01-hardening-review.md) |
 
-In the meantime, every PR runs CI security scans for the
-patterns above (raw execve / fork / sys_system / system-path
-writes / large stack buffers) and fmt + lint + vet drift gates.
+The project uses two tiers deliberately. A **hardening review**
+is an internal per-file walk of the current surface plus its
+gates; the **formal pre-v1.0 audit** is the one that commits
+samvada to a stable disclosure posture over a surface that has
+stopped moving. Earlier revisions of this section said samvada
+was pre-audit with the first pass gated to v1.0. That is
+**superseded**: the 2026-09-09 pass was a full P(-1) hardening
+review *and* security audit of the shipped surface, and it
+found defects severe enough that deferring was no longer
+defensible.
+
+**What the 2026-09-09 pass covered.** A per-file walk of
+`src/*.cyr`, `deps/samvada_main.c`, the test suite, both CI
+workflows, and every doc making a security or behavioural
+claim — plus live probing against a running `systemd-logind`,
+which is the method change that mattered: prior reviews
+reasoned about the protocol from this repo's own documentation,
+this one issued the calls.
+
+It found two CRITICAL defects — samvada never sent
+`TakeControl`, so `TakeDevice` could not succeed anywhere; and
+the shim owned `main()`, so it could not link into any real
+consumer. Both are graded CRITICAL for functional impact on the
+shipped surface, not for exploitability; the ladder under
+"Response Timeline" grades *reported vulnerabilities* and is a
+separate scale. Alongside them sat MEDIUM and LOW findings
+spanning the `CLOEXEC` leak on the delegated DRM-master fd, an
+unvalidated 64→32 narrowing of `major` / `minor`, a success
+return that contradicted its own documented contract in four
+places, an unbounded bus pump, a backend-`kind` check that
+accepted any non-zero word, a leaking init failure path, and
+several supply-chain and gate weaknesses in CI — a security
+scan whose deny list could not fire, a slot-offset pin that
+never checked the C side, a link test that never reproduced
+the consumer shape, an installer piped from a mutable branch.
+
+Every repair carries a test, and each was mutation-proven:
+reverting the fix fails the suite. The suite grew from 38 to
+114 asserts, largely via a pure-Cyrius mock backend in
+`tests/samvada.tcyr` that gives `take_device` /
+`release_device` / `pump_signals` real behavioural coverage
+with no hardware — retiring the standing claim that those
+paths could only be tested on hardware.
+
+Admitted findings: 2 CRITICAL, 10 MEDIUM, 16 LOW and 9
+INFO/deferred — 37 in total, with a further 6 candidate
+findings refuted before admission and recorded as such. All 28
+CRITICAL/MEDIUM/LOW findings are fixed in 0.5.1; the deferred
+set is routed to the roadmap.
+
+**What it did not cover.** Four things, and they are the four
+that matter:
+
+- **Live-bus behavioural validation.** `TakeControl`'s
+  *necessity* was proven live, but no end-to-end `TakeDevice`
+  has ever succeeded — that needs an active **seated** session
+  holding a DRM device, which the probing host did not have.
+  This is the M1 gate.
+- **`PauseDevice` / `ResumeDevice` delivery**, and
+  `PauseDeviceComplete`. Not wired (MED-7). The
+  Cyrius-fn-pointer-as-`sd_bus_message_handler_t` callback ABI
+  was reviewed and is sound, but it is unreachable, so it has
+  never actually executed.
+- **Thread safety.** Not analysed; the surface is
+  single-threaded by design and the serialization contract is
+  stated under "Known Limitations".
+- **The native dbus marshaller.** This pass audits the
+  **C-shim surface**, which v1.0 retires. Replacing it with
+  hand-rolled byte parsing (Path A in `roadmap.md` §M3)
+  substantially *enlarges* the audit surface — samvada would
+  be parsing untrusted wire bytes itself rather than
+  delegating to libsystemd's validated parser — and **must get
+  its own audit before v1.0 tags**. The removal path (Path B)
+  needs no samvada audit because the surface goes away.
+
+Every PR additionally runs the CI security scan described under
+"Design Principles", the fmt + lint + vet drift gates, the
+C-shim strict-flag compile (`-Wall -Wextra -Werror -Wshadow
+-Wconversion -Wsign-conversion -Wcast-qual -Wformat=2`, in both
+library and standalone modes), the consumer-shape link test,
+the C-versus-Cyrius slot-offset cross-check (which also asserts
+`kind` is still at `+64`, per ADR-0002), and a
+`samvada_version()`-versus-`VERSION` equality gate.
 
 ## Disclosure
 

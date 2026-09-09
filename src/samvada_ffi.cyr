@@ -2,11 +2,17 @@
 # samvada_ffi.cyr — slot offsets and helpers for the C-shim
 # function table.
 #
-# The C side (`deps/samvada_main.c`) builds a 72-byte fn-table on
-# its own stack, populates each slot with an `sd_bus_*`-backed
-# wrapper, then calls `samvada_main(fn_table_ptr)`. The Cyrius
-# side reaches into the table via `samvada_ffi_get_slot` and
-# dispatches with `fncallN` from `lib/fnptr.cyr`.
+# The C side (`deps/samvada_main.c`) builds an 88-byte fn-table in
+# FILE-SCOPE STATIC storage, populates each slot with an
+# `sd_bus_*`-backed wrapper, then calls `samvada_main(fn_table_ptr)`.
+# The Cyrius side reaches into the table via `samvada_ffi_get_slot`
+# and dispatches with `fncallN` from `lib/fnptr.cyr`.
+#
+# Static storage is REQUIRED, not incidental: samvada borrows this
+# pointer and re-reads it on every dispatch for the life of the
+# process. Before 0.5.1 the table was a stack local in the shim's
+# `main()`, justified by a comment claiming `samvada_main()` never
+# returns — it does (audit CRIT-2).
 #
 # Layout (v1) — same shape pattern as mabda's Backend struct.
 # Append-after-kind invariant: every future v(N+1) slot lands at
@@ -23,7 +29,15 @@
 #   [+48]  sb_subscribe_pause_resume(bus, sess_cstr, callback, userdata)      -> slot|err
 #   [+56]  sb_unsubscribe(slot)                                               -> 0
 #   [+64]  kind  (NULL=0, LIBSYSTEMD=1, PURE_CYRIUS=2)
-#   [+72+] reserved for v0.3.0 (properties, introspection, session bus...)
+#   [+72]  sb_take_control(bus, sess_cstr)                                    -> 0|err
+#   [+80]  sb_release_control(bus, sess_cstr)                                 -> 0|err
+#   [+88+] reserved for a future minor (properties, introspection, session bus...)
+#
+# Slots 72/80 were APPENDED in 0.5.1, after `kind`, exactly as ADR-0002
+# requires. They exist because logind rejects `TakeDevice` with
+# `org.freedesktop.login1.NotInControl` unless the SAME bus connection has
+# already called `TakeControl` — so v0.2.0-0.5.0's take_device could never
+# succeed in any environment. See docs/audit/2026-09-09-audit.md CRIT-1.
 #
 # Every C wrapper takes <=6 args so the table is fncall6-safe on
 # both x86_64 SysV and aarch64 (cyrius's 6-arg fncall convention,
@@ -42,7 +56,10 @@ fn samvada_slot_close_bus()              { return 40; }
 fn samvada_slot_subscribe_pause_resume() { return 48; }
 fn samvada_slot_unsubscribe()            { return 56; }
 fn samvada_slot_kind()                   { return 64; }
-fn samvada_ffi_size()                    { return 72; }
+# --- appended in 0.5.1 (after kind, per ADR-0002) ---
+fn samvada_slot_take_control()           { return 72; }
+fn samvada_slot_release_control()        { return 80; }
+fn samvada_ffi_size()                    { return 88; }
 
 # Backend kinds. NULL = mock / unbound table (CPU tests). LIBSYSTEMD
 # is the v0.x C-shim. PURE_CYRIUS is the v1.0 retirement target.

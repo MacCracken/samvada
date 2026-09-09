@@ -20,7 +20,33 @@ fn test_ffi_slot_offsets() {
     assert_eq(samvada_slot_subscribe_pause_resume(),  48, "slot 6");
     assert_eq(samvada_slot_unsubscribe(),             56, "slot 7");
     assert_eq(samvada_slot_kind(),                    64, "kind @ +64 (FIXED)");
-    assert_eq(samvada_ffi_size(),                     72, "ffi size = 9 * 8");
+    # Appended in 0.5.1, AFTER kind — ADR-0002's append-after-kind rule.
+    assert_eq(samvada_slot_take_control(),            72, "slot 9 (appended 0.5.1)");
+    assert_eq(samvada_slot_release_control(),         80, "slot 10 (appended 0.5.1)");
+    assert_eq(samvada_ffi_size(),                     88, "ffi size = 11 * 8");
+    return 0;
+}
+
+# ADR-0002's invariant is that `kind` never moves and slots only append.
+# The offset pins above would catch a reorder, but nothing pinned the
+# RELATIONSHIP: that every slot is 8-aligned, distinct, below ffi_size, and
+# that kind stays put while the table grows (0.5.1, audit LOW-9).
+fn test_ffi_layout_invariants() {
+    test_group("ffi: append-after-kind layout invariants");
+    var sz = samvada_ffi_size();
+    assert_eq(sz - (sz / 8) * 8, 0, "ffi_size is a multiple of 8");
+    assert_eq(samvada_slot_kind(), 64, "kind is at 64 in EVERY version");
+    assert(samvada_slot_kind() < sz, "kind is inside the table");
+    # Every appended slot must land strictly after kind.
+    assert(samvada_slot_take_control()    > samvada_slot_kind(), "take_control after kind");
+    assert(samvada_slot_release_control() > samvada_slot_kind(), "release_control after kind");
+    # Every slot must be inside the table.
+    assert(samvada_slot_open_system_bus()        < sz, "slot 0 in range");
+    assert(samvada_slot_unsubscribe()            < sz, "slot 7 in range");
+    assert(samvada_slot_release_control()        < sz, "last slot in range");
+    # Distinctness of the two appended slots vs the pre-existing tail.
+    assert(samvada_slot_take_control() != samvada_slot_release_control(), "appended slots distinct");
+    assert(samvada_slot_take_control() != samvada_slot_kind(), "take_control != kind");
     return 0;
 }
 
@@ -36,10 +62,27 @@ fn test_ffi_alloc_and_set_get() {
     test_group("ffi: alloc/get/set round-trip");
     var t = samvada_ffi_alloc();
     assert(t != 0, "alloc returns non-null");
-    # All slots zero on alloc.
-    assert_eq(samvada_ffi_get_slot(t, samvada_slot_open_system_bus()), 0,
-      "fresh slot is 0");
-    assert_eq(samvada_ffi_kind(t), 0, "fresh kind is 0");
+    # "All slots zero on alloc" was VACUOUS: the bump allocator hands out
+    # untouched pages, so deleting the zero-fill loop left this green.
+    # Dirty the region first, then re-alloc, so the assert can actually fail
+    # (0.5.1, audit LOW-10).
+    var i = 0;
+    var sz = samvada_ffi_size();
+    while (i < sz) { store64(t + i, 0xDEADBEEF); i = i + 8; }
+    var t2 = samvada_ffi_alloc();
+    assert(t2 != 0, "second alloc non-null");
+    var j = 0;
+    var all_zero = 1;
+    while (j < sz) {
+        var w = load64(t2 + j);
+        if (w != 0) { all_zero = 0; }
+        j = j + 8;
+    }
+    assert(all_zero == 1, "alloc zero-fills EVERY slot (mutation-proof)");
+    assert_eq(samvada_ffi_get_slot(t, samvada_slot_open_system_bus()), 0xDEADBEEF,
+      "get_slot reads what was stored");
+    samvada_ffi_set_slot(t, samvada_slot_open_system_bus(), 0);
+    assert_eq(samvada_ffi_kind(t2), 0, "fresh kind is 0");
     # Set / get round-trips.
     samvada_ffi_set_slot(t, samvada_slot_kind(),
       samvada_backend_kind_libsystemd());
@@ -55,6 +98,17 @@ fn test_ffi_get_slot_null_safe() {
     assert_eq(samvada_ffi_get_slot(0, 0),    0, "null table -> 0");
     assert_eq(samvada_ffi_get_slot(0, 64),   0, "null table at any off");
     assert_eq(samvada_ffi_kind(0),           0, "null table kind");
+    return 0;
+}
+
+# get_slot's null guard was pinned; set_slot's was not — and set_slot is the
+# WRITE, so an unguarded null table there is a store to address `off`
+# (0.5.1, audit LOW-11).
+fn test_ffi_set_slot_null_safe() {
+    test_group("ffi: set_slot is null-safe (the WRITE path)");
+    assert_eq(samvada_ffi_set_slot(0, 0, 0xCAFE),  0, "null table write -> 0, no store");
+    assert_eq(samvada_ffi_set_slot(0, 64, 0xCAFE), 0, "null table write at kind off");
+    assert_eq(samvada_ffi_set_slot(0, 80, 0xCAFE), 0, "null table write at appended off");
     return 0;
 }
 
@@ -86,44 +140,418 @@ fn test_release_idempotent() {
 }
 
 # HIGH-1 in 2026-05-01-hardening-review: samvada_init must reject
-# re-init without an intervening release. Pin via a NULL-backed
-# table that init can't fully consume — _samvada_table gets set
-# before any slot dispatch, so the second init must hit the EBUSY
-# guard, and a release must clear it.
+# re-init without an intervening release.
+#
+# Rewritten in 0.5.1. The old version pinned the guard against a FAILED
+# partial init (a table whose open_system_bus slot was null), which was the
+# only shape available before the mock backend existed. That is the wrong
+# case twice over: it is not the leak HIGH-1 was about, and as of 0.5.1
+# init self-cleans on every late failure, so a failed init is deliberately
+# NOT -EBUSY any more. The guard exists for the SUCCESSFUL init, which is
+# the state that actually holds a live bus and session control.
 fn test_init_rejects_double_init() {
     test_group("init rejects double-init without release");
-    var t = samvada_ffi_alloc();
+    mock_reset();
+    var t = mock_table_new();
     assert(t != 0, "table alloc OK");
-    samvada_ffi_set_slot(t, samvada_slot_kind(),
-      samvada_backend_kind_libsystemd());
-    # First init: kind passes, but every slot is null, so it fails
-    # at the open_system_bus dispatch with -ENOSYS. _samvada_table
-    # is set before that point (the EBUSY guard).
-    var rc1 = samvada_init(t);
-    assert_eq(rc1, -38, "first init fails at null open_system_bus slot");
-    # Second init without release must hit the EBUSY guard.
-    assert_eq(samvada_init(t), -16, "EBUSY on double-init");
-    # Release clears the guard; init can be called again (still
-    # fails at the slot dispatch, but NOT at the EBUSY check).
-    assert_eq(samvada_release(), 0, "release after partial init");
-    var rc2 = samvada_init(t);
-    assert_eq(rc2, -38, "post-release init reaches slot dispatch");
-    assert(rc2 != -16, "post-release init not EBUSY");
+
+    # A SUCCESSFUL init now holds a live bus + session control.
+    assert_eq(samvada_init(t), 0, "first init succeeds");
+    assert_eq(_mock_calls_open, 1, "bus opened once");
+    assert_eq(_mock_calls_tctl, 1, "control taken once");
+
+    # Re-init without release must be refused — this is the leak HIGH-1
+    # found: the second init would otherwise overwrite a live sd_bus and a
+    # live control grant with no way to reach either again.
+    assert_eq(samvada_init(t), -16, "EBUSY on double-init over a LIVE session");
+    assert_eq(_mock_calls_open, 1, "second init did NOT re-open the bus");
+    assert_eq(_mock_calls_tctl, 1, "second init did NOT re-take control");
+
+    # Release clears the guard; init works again.
+    assert_eq(samvada_release(), 0, "release after successful init");
+    assert_eq(_mock_calls_rctl, 1, "control released");
+    assert_eq(_mock_calls_close, 1, "bus closed");
+    assert_eq(samvada_init(t), 0, "post-release init succeeds");
+    assert_eq(_mock_calls_open, 2, "bus re-opened on the clean re-init");
     samvada_release();
+    return 0;
+}
+
+# The other half of the contract, and the one 0.5.1 changed: a FAILED init
+# must NOT leave the guard set, because it self-cleans. Pinning this stops
+# a future change from silently reverting to the old leak-and-latch shape.
+fn test_failed_init_does_not_latch_ebusy() {
+    test_group("a failed init leaves no EBUSY latch");
+    mock_reset();
+    var t = mock_table_new();
+    # Fail at the very first dispatch, before the bus exists.
+    samvada_ffi_set_slot(t, samvada_slot_open_system_bus(), 0);
+    assert_eq(samvada_init(t), -38, "init fails at the null open_system_bus slot");
+    # The retry must reach the dispatch again, NOT -EBUSY.
+    var rc = samvada_init(t);
+    assert(rc != -16, "retry after a failed init is NOT EBUSY");
+    assert_eq(rc, -38, "retry reaches the same dispatch");
     return 0;
 }
 
 # ---- version triple ----
 fn test_samvada_version() {
-    test_group("v0.5.0 packed triple");
+    test_group("v0.5.1 packed triple");
     # Bumps lock-step with VERSION. Component asserts catch the
     # bit-shift reorder bug.
-    assert_eq(samvada_version(), (0 << 16) | (5 << 8) | 0,
-      "v0.5.0 packed triple");
+    assert_eq(samvada_version(), (0 << 16) | (5 << 8) | 1,
+      "v0.5.1 packed triple");
     var v = samvada_version();
     assert_eq((v >> 16) & 0xFF, 0, "major");
     assert_eq((v >> 8)  & 0xFF, 5, "minor");
-    assert_eq(v         & 0xFF, 0, "patch");
+    assert_eq(v         & 0xFF, 1, "patch");
+    return 0;
+}
+
+# ---- pure-Cyrius mock backend ----
+# The project has claimed since 0.2.0 that take_device / release_device /
+# pump_signals cannot be tested without hardware. That is false: the fn-table
+# is just function pointers, so a Cyrius mock backend exercises the whole
+# dispatch path — argument marshalling, out-parameter reads, error mapping —
+# with no bus, no logind and no device (0.5.1, audit MED-7).
+
+var _mock_bus_handle   = 0;
+var _mock_calls_open   = 0;
+var _mock_calls_sess   = 0;
+var _mock_calls_tctl   = 0;
+var _mock_calls_take   = 0;
+var _mock_calls_rel    = 0;
+var _mock_calls_pump   = 0;
+var _mock_calls_close  = 0;
+var _mock_calls_rctl   = 0;
+var _mock_last_major   = 0;
+var _mock_last_minor   = 0;
+var _mock_take_fd      = 0;
+var _mock_take_rc      = 0;
+var _mock_pump_events  = 0;
+var _mock_sess_rc      = 0;
+var _mock_open_rc      = 0;
+
+fn mock_open_system_bus(bus_out) {
+    _mock_calls_open = _mock_calls_open + 1;
+    var rc = _mock_open_rc;
+    if (rc < 0) { return rc; }
+    store64(bus_out, _mock_bus_handle);
+    return 0;
+}
+
+fn mock_get_session_path(bus, pid, out_buf, out_len) {
+    _mock_calls_sess = _mock_calls_sess + 1;
+    var rc = _mock_sess_rc;
+    if (rc < 0) { return rc; }
+    # Write a short NUL-terminated path so downstream reads see real bytes.
+    store64(out_buf + 0, 0x2F746573742F3100);
+    return 0;
+}
+
+fn mock_take_control(bus, sess) {
+    _mock_calls_tctl = _mock_calls_tctl + 1;
+    return 0;
+}
+
+fn mock_take_control_fail(bus, sess) {
+    _mock_calls_tctl = _mock_calls_tctl + 1;
+    return (0 - 1);
+}
+
+fn mock_release_control(bus, sess) {
+    _mock_calls_rctl = _mock_calls_rctl + 1;
+    return 0;
+}
+
+fn mock_take_device(bus, sess, major, minor, fd_out, active_out) {
+    _mock_calls_take = _mock_calls_take + 1;
+    _mock_last_major = major;
+    _mock_last_minor = minor;
+    var rc = _mock_take_rc;
+    if (rc < 0) { return rc; }
+    store64(fd_out, _mock_take_fd);
+    store64(active_out, 0);
+    return 0;
+}
+
+fn mock_release_device(bus, sess, major, minor) {
+    _mock_calls_rel = _mock_calls_rel + 1;
+    _mock_last_major = major;
+    _mock_last_minor = minor;
+    # Mimic sd_bus_call_method, which returns 1 on SUCCESS. samvada must
+    # normalise this to 0 — that is the whole point of the pin below.
+    return 1;
+}
+
+fn mock_pump_signals(bus) {
+    _mock_calls_pump = _mock_calls_pump + 1;
+    return _mock_pump_events;
+}
+
+fn mock_close_bus(bus) {
+    _mock_calls_close = _mock_calls_close + 1;
+    return 0;
+}
+
+# Build a fully-wired LIBSYSTEMD-kind mock table.
+fn mock_table_new() {
+    var t = samvada_ffi_alloc();
+    if (t == 0) { return 0; }
+    samvada_ffi_set_slot(t, samvada_slot_open_system_bus(),  &mock_open_system_bus);
+    samvada_ffi_set_slot(t, samvada_slot_get_session_path(), &mock_get_session_path);
+    samvada_ffi_set_slot(t, samvada_slot_take_device(),      &mock_take_device);
+    samvada_ffi_set_slot(t, samvada_slot_release_device(),   &mock_release_device);
+    samvada_ffi_set_slot(t, samvada_slot_pump_signals(),     &mock_pump_signals);
+    samvada_ffi_set_slot(t, samvada_slot_close_bus(),        &mock_close_bus);
+    samvada_ffi_set_slot(t, samvada_slot_take_control(),     &mock_take_control);
+    samvada_ffi_set_slot(t, samvada_slot_release_control(),  &mock_release_control);
+    samvada_ffi_set_slot(t, samvada_slot_kind(), samvada_backend_kind_libsystemd());
+    return t;
+}
+
+fn mock_reset() {
+    _mock_bus_handle  = 0xB05;
+    _mock_calls_open  = 0;
+    _mock_calls_sess  = 0;
+    _mock_calls_tctl  = 0;
+    _mock_calls_take  = 0;
+    _mock_calls_rel   = 0;
+    _mock_calls_pump  = 0;
+    _mock_calls_close = 0;
+    _mock_calls_rctl  = 0;
+    _mock_last_major  = 0;
+    _mock_last_minor  = 0;
+    _mock_take_fd     = 7;
+    _mock_take_rc     = 0;
+    _mock_pump_events = 0;
+    _mock_sess_rc     = 0;
+    _mock_open_rc     = 0;
+    samvada_release();
+    return 0;
+}
+
+# CRIT-1 regression pin. samvada 0.2.0-0.5.0 never called TakeControl, so
+# logind answered every TakeDevice with NotInControl. Reproduced live against
+# systemd-logind on 2026-09-09; this pin is the CPU-side guard that the call
+# is issued, and issued BEFORE any device call.
+fn test_init_takes_session_control() {
+    test_group("init takes session control (CRIT-1 regression)");
+    mock_reset();
+    var t = mock_table_new();
+    assert(t != 0, "mock table built");
+    assert_eq(samvada_init(t), 0, "init succeeds against the mock backend");
+    assert_eq(_mock_calls_open, 1, "open_system_bus dispatched once");
+    assert_eq(_mock_calls_sess, 1, "get_session_path dispatched once");
+    assert_eq(_mock_calls_tctl, 1, "TakeControl dispatched — the CRIT-1 fix");
+    assert_eq(_mock_calls_take, 0, "no device call during init");
+    samvada_release();
+    return 0;
+}
+
+# A table with a null take_control slot is a pre-0.5.1 backend. Proceeding
+# would guarantee NotInControl at the first take_device, so init must refuse.
+fn test_init_rejects_table_without_take_control() {
+    test_group("init rejects a pre-0.5.1 table (no take_control slot)");
+    mock_reset();
+    var t = mock_table_new();
+    samvada_ffi_set_slot(t, samvada_slot_take_control(), 0);
+    assert_eq(samvada_init(t), -38, "ENOSYS when take_control is unwired");
+    assert_eq(_mock_calls_tctl, 0, "control never taken");
+    # init must self-clean, not leave the API armed.
+    assert_eq(samvada_pump_signals(), -22, "API disarmed after failed init");
+    return 0;
+}
+
+# Pre-0.5.1, a failure AFTER the bus opened returned the error but left
+# _samvada_table and _samvada_bus set — so the public API stayed armed on a
+# half-initialised samvada and the open sd_bus leaked (0.5.1, audit MED-8).
+# init must now self-clean on EVERY late failure path.
+fn test_init_self_cleans_on_late_failure() {
+    test_group("init self-cleans on late failure (no armed API, no leak)");
+    # (a) failure inside get_session_path, after open_system_bus succeeded
+    mock_reset();
+    var t = mock_table_new();
+    _mock_sess_rc = (0 - 113);
+    assert_eq(samvada_init(t), (0 - 113), "init surfaces the session-path error");
+    assert_eq(_mock_calls_open, 1, "bus WAS opened before the failure");
+    assert_eq(_mock_calls_close, 1, "and was closed again by the self-clean");
+    assert_eq(_mock_calls_tctl, 0, "control never taken");
+    assert_eq(samvada_pump_signals(), -22, "API disarmed, not armed");
+    assert_eq(samvada_session_take_device(226, 0), -22, "take_device disarmed");
+    # A clean re-init must now be possible — not -EBUSY.
+    mock_reset();
+    var t2 = mock_table_new();
+    var rc2 = samvada_init(t2);
+    assert(rc2 != -16, "re-init after self-clean is NOT EBUSY");
+    assert_eq(rc2, 0, "re-init succeeds");
+    samvada_release();
+    # (a2) NULL get_session_path slot, with the bus ALREADY OPEN. This is
+    # the path that still leaked after 0.5.1's first MED-8 pass: the slot
+    # check returns before any dispatch, so the self-clean has to be on the
+    # early-return itself, not only on a negative rc.
+    mock_reset();
+    var tb = mock_table_new();
+    samvada_ffi_set_slot(tb, samvada_slot_get_session_path(), 0);
+    assert_eq(samvada_init(tb), -38, "ENOSYS on the null get_session_path slot");
+    assert_eq(_mock_calls_open, 1, "the bus WAS opened before the slot check");
+    assert_eq(_mock_calls_close, 1, "and the self-clean closed it — no leak");
+    assert_eq(samvada_pump_signals(), -22, "API disarmed");
+    var rc_retry = samvada_init(tb);
+    assert(rc_retry != -16, "retry is not latched to EBUSY");
+
+    # (a3) NULL open_system_bus slot — fails BEFORE the bus exists, so
+    # nothing to close, but the guard must still not latch.
+    mock_reset();
+    var tc = mock_table_new();
+    samvada_ffi_set_slot(tc, samvada_slot_open_system_bus(), 0);
+    assert_eq(samvada_init(tc), -38, "ENOSYS on the null open_system_bus slot");
+    assert_eq(_mock_calls_close, 0, "no bus was opened, so none to close");
+    assert(samvada_init(tc) != -16, "no EBUSY latch");
+
+    # (b) failure inside take_control, after the session path resolved
+    mock_reset();
+    var t3 = mock_table_new();
+    _mock_take_rc = 0;
+    samvada_ffi_set_slot(t3, samvada_slot_take_control(), &mock_take_control_fail);
+    assert_eq(samvada_init(t3), (0 - 1), "init surfaces the TakeControl error");
+    assert_eq(_mock_calls_close, 1, "bus closed by the self-clean");
+    assert_eq(samvada_pump_signals(), -22, "API disarmed after TakeControl failure");
+    return 0;
+}
+
+fn test_take_device_behaviour() {
+    test_group("take_device: dispatch, args, fd, errors");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    var fd = samvada_session_take_device(226, 1);
+    assert_eq(_mock_calls_take, 1, "take_device dispatched");
+    assert_eq(_mock_last_major, 226, "major forwarded intact");
+    assert_eq(_mock_last_minor, 1, "minor forwarded intact");
+    assert_eq(fd, 7, "fd read back from the out-parameter");
+    # Error pass-through: a negative rc must surface unchanged, not as an fd.
+    _mock_take_rc = (0 - 13);
+    var e = samvada_session_take_device(226, 1);
+    assert_eq(e, (0 - 13), "negative rc passes through (EACCES)");
+    samvada_release();
+    return 0;
+}
+
+# MED-4 pin: sd_bus_call_method returns 1 on success and the mock mimics that.
+# The documented contract is `0 | -err`, so samvada must normalise.
+fn test_release_device_normalises_success() {
+    test_group("release_device normalises a positive rc to 0");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    var rc = samvada_session_release_device(226, 1);
+    assert_eq(_mock_calls_rel, 1, "release_device dispatched");
+    assert_eq(_mock_last_major, 226, "major forwarded");
+    assert_eq(rc, 0, "positive backend rc normalised to 0 (NOT 1)");
+    samvada_release();
+    return 0;
+}
+
+fn test_pump_signals_behaviour() {
+    test_group("pump_signals: dispatch + count pass-through");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    _mock_pump_events = 5;
+    assert_eq(samvada_pump_signals(), 5, "event count passes through");
+    assert_eq(_mock_calls_pump, 1, "pump dispatched once");
+    _mock_pump_events = (0 - 107);
+    assert_eq(samvada_pump_signals(), (0 - 107), "negative rc passes through");
+    samvada_release();
+    return 0;
+}
+
+fn test_release_drops_control_and_closes() {
+    test_group("release drops control, closes bus, wipes scratch");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    assert_eq(samvada_release(), 0, "release ok");
+    assert_eq(_mock_calls_rctl, 1, "ReleaseControl dispatched");
+    assert_eq(_mock_calls_close, 1, "close_bus dispatched");
+    # LOW-5: the scratch must not retain the (now dangling) bus pointer.
+    assert_eq(samvada_pump_signals(), -22, "API disarmed after release");
+    # Idempotent: a second release must not re-dispatch.
+    assert_eq(samvada_release(), 0, "second release ok");
+    assert_eq(_mock_calls_close, 1, "close_bus NOT dispatched twice");
+    return 0;
+}
+
+# Pins which slot each public fn dispatches through. A misroute (e.g.
+# take_device reading slot 24) would otherwise return a plausible-looking
+# value and leave the whole suite green (0.5.1, audit LOW-8).
+fn test_dispatch_wiring() {
+    test_group("each public fn dispatches through its OWN slot");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    # Null exactly one slot at a time; only its own fn must fail with ENOSYS.
+    samvada_ffi_set_slot(t, samvada_slot_take_device(), 0);
+    assert_eq(samvada_session_take_device(226, 1), -38, "take_device -> slot 16");
+    assert_eq(samvada_session_release_device(226, 1), 0, "release_device unaffected");
+    assert_eq(samvada_pump_signals(), 0, "pump unaffected");
+    samvada_ffi_set_slot(t, samvada_slot_take_device(), &mock_take_device);
+    samvada_ffi_set_slot(t, samvada_slot_pump_signals(), 0);
+    assert_eq(samvada_pump_signals(), -38, "pump_signals -> slot 32");
+    assert_eq(samvada_session_take_device(226, 1), 7, "take_device unaffected");
+    samvada_ffi_set_slot(t, samvada_slot_pump_signals(), &mock_pump_signals);
+    samvada_ffi_set_slot(t, samvada_slot_release_device(), 0);
+    assert_eq(samvada_session_release_device(226, 1), -38, "release_device -> slot 24");
+    samvada_release();
+    return 0;
+}
+
+# samvada_main is the C-shim entry point and its return value becomes the
+# process exit code; it had no test at all (0.5.1, audit LOW-12).
+fn test_samvada_main_entry() {
+    test_group("samvada_main: returns, and surfaces init's rc");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_main(t), 0, "samvada_main returns 0 on good table");
+    samvada_release();
+    assert_eq(samvada_main(0), -22, "samvada_main surfaces EINVAL");
+    # It RETURNS — the C shim's old comment claimed it never did.
+    assert(1, "control reached the line after samvada_main");
+    return 0;
+}
+
+# init must whitelist kinds, not accept "any non-zero" (audit MED-6).
+fn test_init_rejects_unknown_kind() {
+    test_group("init rejects an unknown backend kind");
+    mock_reset();
+    var t = mock_table_new();
+    samvada_ffi_set_slot(t, samvada_slot_kind(), 99);
+    assert_eq(samvada_init(t), -22, "EINVAL on kind=99");
+    samvada_ffi_set_slot(t, samvada_slot_kind(), samvada_backend_kind_pure_cyrius());
+    assert_eq(samvada_init(t), 0, "PURE_CYRIUS kind accepted");
+    samvada_release();
+    return 0;
+}
+
+# The C side writes only the low 32 bits of the fd word; samvada sign-extends.
+# Pins the arithmetic across the whole int32 range (audit: previously untested).
+fn test_fd_sign_extension() {
+    test_group("take_device fd sign-extension across int32");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    _mock_take_fd = 0;
+    assert_eq(samvada_session_take_device(226, 0), 0, "fd 0 (stdin) survives");
+    _mock_take_fd = 0x7FFFFFFF;
+    assert_eq(samvada_session_take_device(226, 0), 2147483647, "INT32_MAX");
+    _mock_take_fd = 0xFFFFFFFF;
+    assert_eq(samvada_session_take_device(226, 0), (0 - 1), "0xFFFFFFFF -> -1");
+    _mock_take_fd = 0xFFFFFFF7;
+    assert_eq(samvada_session_take_device(226, 0), (0 - 9), "0xFFFFFFF7 -> -9");
+    _mock_take_fd = 0x80000000;
+    assert_eq(samvada_session_take_device(226, 0), (0 - 2147483648), "INT32_MIN");
+    samvada_release();
     return 0;
 }
 
@@ -145,6 +573,20 @@ fn main() {
     test_init_rejects_null_kind();
     test_release_idempotent();
     test_init_rejects_double_init();
+    test_failed_init_does_not_latch_ebusy();
+    test_ffi_layout_invariants();
+    test_ffi_set_slot_null_safe();
+    test_init_takes_session_control();
+    test_init_rejects_table_without_take_control();
+    test_init_self_cleans_on_late_failure();
+    test_take_device_behaviour();
+    test_release_device_normalises_success();
+    test_pump_signals_behaviour();
+    test_release_drops_control_and_closes();
+    test_dispatch_wiring();
+    test_samvada_main_entry();
+    test_init_rejects_unknown_kind();
+    test_fd_sign_extension();
     test_samvada_version();
     return assert_summary();
 }

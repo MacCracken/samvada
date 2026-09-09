@@ -59,13 +59,13 @@ stdlib); see `tests/samvada.bcyr` for the four call sites.
 
 ## Run history
 
-| | Run 1 | Run 2 | Run 3 | Run 4 |
-|---|---|---|---|---|
-| **Date (UTC)** | `2026-05-01T21:47:19Z` | `2026-05-01T21:58:21Z` | `2026-06-02T22:52:43Z` | `2026-09-09T15:42:03Z` |
-| **Commit** | `4c7ada9` | (`0.2.2` release commit) | (`0.3.0` release commit) | (`0.5.0` release commit) |
-| **samvada** | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` |
-| **Toolchain** | `cyrius 5.7.48` | `cyrius 5.7.48` | `cyrius 6.0.40` | `cyrius 6.6.1` |
-| **Host** | `Linux 7.0.2-arch1-1 x86_64`, AMD Ryzen 7 5800H (16T) | same | `Linux 7.0.10-arch1-1 x86_64`, same CPU | `Linux 7.2.3-arch1-3 x86_64`, same CPU |
+| | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 |
+|---|---|---|---|---|---|
+| **Date (UTC)** | `2026-05-01T21:47:19Z` | `2026-05-01T21:58:21Z` | `2026-06-02T22:52:43Z` | `2026-09-09T15:42:03Z` | `2026-09-09T17:58:00Z` |
+| **Commit** | `4c7ada9` | (`0.2.2` release commit) | (`0.3.0` release commit) | (`0.5.0` release commit) | (`0.5.1` release commit) |
+| **samvada** | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | `0.5.1` |
+| **Toolchain** | `cyrius 5.7.48` | `cyrius 5.7.48` | `cyrius 6.0.40` | `cyrius 6.6.1` | `cyrius 6.6.1` |
+| **Host** | `Linux 7.0.2-arch1-1 x86_64`, AMD Ryzen 7 5800H (16T) | same | `Linux 7.0.10-arch1-1 x86_64`, same CPU | `Linux 7.2.3-arch1-3 x86_64`, same CPU | same as Run 4 |
 
 > **Gap, stated rather than papered over.** `0.4.0` and `0.4.1`
 > shipped without appending a row, so there is no Run between
@@ -77,12 +77,12 @@ stdlib); see `tests/samvada.bcyr` for the four call sites.
 
 ### Results
 
-| Benchmark | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | Δ (0.2.2→0.3.0) | Δ (0.3.0→0.5.0) |
-|---|---|---|---|---|---|---|
-| `ffi_alloc` | 56 ns | 59 ns | 63 ns | 28 ns | +6.8% | **−55.6%** |
-| `ffi_get_slot` | 9 ns | 11 ns | 11 ns | 9 ns | 0% | −18.2% |
-| `init_reject_null` | 6 ns | 7 ns | 7 ns | 6 ns | 0% | −14.3% |
-| `release_idempotent` | 6 ns | 6 ns | 7 ns | 6 ns | +17% | −14.3% |
+| Benchmark | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | `0.5.1` | Δ (0.3.0→0.5.0) | Δ (0.5.0→0.5.1) |
+|---|---|---|---|---|---|---|---|
+| `ffi_alloc` | 56 ns | 59 ns | 63 ns | 28 ns | 32 ns | **−55.6%** | **+14.3%** (expected — see note) |
+| `ffi_get_slot` | 9 ns | 11 ns | 11 ns | 9 ns | 9 ns | −18.2% | 0% |
+| `init_reject_null` | 6 ns | 7 ns | 7 ns | 6 ns | 6 ns | −14.3% | 0% |
+| `release_idempotent` | 6 ns | 6 ns | 7 ns | 6 ns | 6 ns | −14.3% | 0% |
 
 Notes:
 
@@ -120,6 +120,21 @@ Notes:
   path that does work beyond a load-and-branch (an `alloc(72)`
   plus a 9-iteration `store64` zero-fill loop), so it is the
   only one with enough body for the 6.6.x codegen to improve.
+- Run 5 (`0.5.1`) is the P(-1) audit release, and it carries the
+  only **deliberate regression** in this table. `ffi_alloc` goes
+  **28 → 32 ns (+14.3%)** because the FFI table grew from 72 to
+  88 bytes: `samvada_ffi_alloc` zero-fills **11** slots instead of
+  9, so the loop does two more `store64`s. 4 ns for 16 bytes is
+  ~2 ns per 8-byte store, which is the right order for this host
+  and confirms the cost is the fill loop rather than anything
+  else. The table grew because `TakeControl` / `ReleaseControl`
+  were appended (audit CRIT-1 — without them `TakeDevice` could
+  never succeed), so this is a correctness fix bought with 4 ns on
+  a once-per-process cold path. Accepted without hesitation.
+  The other three benches are unchanged to the nanosecond, which
+  is the useful signal: the dispatch hot path (`ffi_get_slot`) did
+  **not** regress despite the table growing, confirming the cost
+  is confined to allocation.
 - **Binary size, first recorded here.** `CYRIUS_DCE=1` did not
   eliminate before cyrius 6.5.72 — it NOP-ed and padded. Under
   6.6.1 the standalone smoke binary goes **80,904 B → 15,368 B
@@ -127,6 +142,11 @@ Notes:
   removed); the default build is unchanged at 80,904 B. Not a
   per-iteration number, so it gets no column above, but it is
   the largest measured change in this release.
+  **0.5.1 re-measured**: default **80,904 B** and DCE **15,368 B**
+  — both byte-identical to 0.5.0 despite two new C wrappers, two
+  new slots and 76 new test asserts. The C shim is not linked into
+  this binary and the tests are a separate target, so neither
+  moves it.
 
 ## When this doc graduates
 

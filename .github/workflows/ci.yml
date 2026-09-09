@@ -7,6 +7,11 @@ on:
     branches: [main]
   workflow_call:
 
+# Least privilege. Without this, a workflow_call from release.yml would
+# inherit that workflow's contents:write into every CI job (audit MED-9).
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -17,23 +22,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Cyrius toolchain
         # The cyrius.cyml `[package].cyrius` pin is the single source of
         # truth (CLAUDE.md § CI/Release) — no version hardcoded in YAML.
-        # Hand the pin to the canonical upstream installer, which lays out
-        # the version-aware ~/.cyrius tree (versions/<pin>/{bin,lib} +
-        # bin/lib symlinks + a `current` file) that the 6.0.x toolchain
-        # resolves the pin against. The old manual tarball-fetch + flat
-        # `cp` into ~/.cyrius/{bin,lib} predated that layout and no longer
-        # satisfies `cyrius deps` (which checks versions/<pin>/lib).
+        #
+        # 0.5.1 (audit MED-9): the installer is fetched from a PINNED COMMIT
+        # and checksum-verified before it runs. It used to be piped straight
+        # from `main` into sh, in a job that had already run
+        # actions/checkout with persist-credentials — so the job's
+        # GITHUB_TOKEN was on disk, readable by the remote script, while a
+        # mutable upstream branch executed with full runner privileges.
+        # Bump CYRIUS_INSTALL_SHA/SUM deliberately alongside the toolchain pin.
+        env:
+          CYRIUS_INSTALL_SHA: "6020f5ba5f2986ab5d83de277a589c072133678e"
+          CYRIUS_INSTALL_SUM: "f33ee940c1387205f10f852c823b56983f5f44fda7ba3c2eff9af6917c3a8d51"
         run: |
-          set -e
-          # Precise PCRE — only matches `cyrius = "..."` at line start.
+          set -euo pipefail
           CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
-            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          curl -sSfL -o install.sh \
+            "https://raw.githubusercontent.com/MacCracken/cyrius/${CYRIUS_INSTALL_SHA}/scripts/install.sh"
+          echo "${CYRIUS_INSTALL_SUM}  install.sh" | sha256sum -c -
+          CYRIUS_VERSION="$CYRIUS_VERSION" sh install.sh
+          rm -f install.sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Resolve dependencies
@@ -86,12 +100,19 @@ jobs:
         # cyrius distlib" mistake before tagging.
         run: |
           cyrius distlib
-          if ! git diff --quiet dist/samvada.cyr; then
-            echo "ERROR: dist/samvada.cyr is stale. Run 'cyrius distlib' and commit the result."
-            git --no-pager diff dist/samvada.cyr | head -40
+          # Both artifacts are tracked and both are consumed downstream —
+          # the .deps sidecar was ungated before 0.5.1 (audit LOW-13).
+          if ! git diff --quiet dist/; then
+            echo "ERROR: dist/ is stale. Run 'cyrius distlib' and commit the result."
+            git --no-pager diff dist/ | head -60
             exit 1
           fi
-          echo "dist/samvada.cyr matches src/"
+          if [ -n "$(git status --porcelain --untracked-files=all dist/)" ]; then
+            echo "ERROR: cyrius distlib produced an untracked file in dist/ — track it."
+            git status --porcelain --untracked-files=all dist/
+            exit 1
+          fi
+          echo "dist/ matches src/"
 
       - name: Build
         run: |
@@ -116,6 +137,13 @@ jobs:
           slots=$(echo "$out" | sed -nE 's/^ffi slots = ([0-9]+) \(([0-9]+) bytes\)$/\1/p')
           bytes=$(echo "$out" | sed -nE 's/^ffi slots = ([0-9]+) \(([0-9]+) bytes\)$/\2/p')
           [ $((slots * 8)) -eq "$bytes" ] || { echo "smoke: slot/byte mismatch ($slots * 8 != $bytes)"; exit 1; }
+          # The packed triple must equal VERSION. Before 0.5.1 the gate only
+          # checked the line was WELL-FORMED, so a bundle whose header and
+          # code disagreed shipped green (audit LOW-14).
+          want=$(tr -d '[:space:]' < VERSION)
+          got=$(echo "$out" | sed -nE 's/^samvada_version = ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p')
+          [ "$got" = "$want" ] || { echo "smoke: samvada_version() is $got but VERSION is $want"; exit 1; }
+          echo "version triple matches VERSION ($want)"
 
       - name: Test
         # v5.6.28: bare `cyrius test` picks up [build].test AND
@@ -147,6 +175,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install libsystemd headers
         # apt-get update first: the runner image's package index can
@@ -158,54 +188,115 @@ jobs:
           sudo apt-get install -y --no-install-recommends libsystemd-dev pkg-config
 
       - name: Compile-check deps/samvada_main.c
-        # samvada itself doesn't link libsystemd — the consumer
-        # builds the shim and links. CI ensures the shim never
-        # rots: -Wall -Wextra -Werror clean against whatever
-        # libsystemd version ships with the runner.
+        # samvada itself doesn't link libsystemd — the consumer builds the
+        # shim and links. Both compile modes are gated: the default
+        # (library) mode consumers actually use, and the opt-in standalone
+        # probe mode.
         run: |
           mkdir -p build
-          cc -Wall -Wextra -Werror -c deps/samvada_main.c \
-             $(pkg-config --cflags libsystemd) \
-             -o build/samvada_main.o
+          for mode in "" "-DSAMVADA_STANDALONE_MAIN"; do
+            echo "=== compiling with: ${mode:-<library mode>}"
+            cc -Wall -Wextra -Werror -Wshadow -Wconversion -Wsign-conversion \
+               -Wcast-qual -Wformat=2 $mode -c deps/samvada_main.c \
+               $(pkg-config --cflags libsystemd) \
+               -o build/samvada_main.o
+          done
           echo "samvada_main.o: $(wc -c < build/samvada_main.o) bytes"
 
-      - name: Verify libsystemd link
-        # Stub _cyrius_init / alloc_init / samvada_main so the C
-        # side can link against -lsystemd cleanly. Catches missing
-        # libsystemd symbols or signature drift.
+      - name: Verify the shim links UNDER a consumer-owned main()
+        # 0.5.1 (audit CRIT-2). The old link test stubbed out main() entirely,
+        # so it never exercised the shape every real consumer has: their own
+        # main() plus the shim. Before 0.5.1 the shim defined main()
+        # unconditionally and that link failed with "multiple definition of
+        # `main'" — i.e. the documented two-stage build could never work.
+        # This gate now reproduces the consumer shape and would catch a
+        # regression immediately.
         run: |
-          cat > build/samvada_link_stubs.c <<'EOF'
+          cc -Wall -Wextra -Werror -c deps/samvada_main.c \
+             $(pkg-config --cflags libsystemd) -o build/shim_lib.o
+          cat > build/consumer_main.c <<'EOF'
+          #include <stdint.h>
+          extern void _cyrius_init(void);
+          extern long alloc_init(void);
+          extern long samvada_shim_init(void);
+          /* The consumer owns main(), exactly like mabda's deps/wgpu_main.c. */
+          int main(void) { _cyrius_init(); alloc_init(); return (int)samvada_shim_init(); }
+          EOF
+          cat > build/cyrius_stubs.c <<'EOF'
           #include <stdint.h>
           void _cyrius_init(void) {}
           long alloc_init(void) { return 0; }
           long samvada_main(int64_t t) { (void)t; return 0; }
           EOF
-          cc -c build/samvada_link_stubs.c -o build/samvada_link_stubs.o
-          cc build/samvada_main.o build/samvada_link_stubs.o \
-             $(pkg-config --libs libsystemd) \
-             -o build/samvada-shim-link-test
-          file build/samvada-shim-link-test
-          rm -f build/samvada-shim-link-test
+          cc -c build/consumer_main.c -o build/consumer_main.o
+          cc -c build/cyrius_stubs.c  -o build/cyrius_stubs.o
+          cc build/shim_lib.o build/consumer_main.o build/cyrius_stubs.o \
+             $(pkg-config --libs libsystemd) -o build/consumer-link-test
+          file build/consumer-link-test
+          ./build/consumer-link-test
+          echo "consumer-owned main() links against the shim"
+
+      - name: Verify slot offsets agree between C and Cyrius
+        # 0.5.1 (audit LOW-15): ADR-0002 and public-api.md both claim the
+        # test pin freezes the C-to-Cyrius contract. It does not — the pin
+        # only checks the Cyrius side. Nothing ever compared the C
+        # #defines against it, so the two could drift silently.
+        run: |
+          python3 - <<'PY'
+          import re, sys
+          c = open('deps/samvada_main.c').read()
+          y = open('src/samvada_ffi.cyr').read()
+          cdefs = dict((m[1], int(m[2])) for m in re.finditer(r'#define\s+(SLOT_\w+|FFI_SIZE)\s+(\d+)', c))
+          cy = dict((m[1], int(m[2])) for m in re.finditer(r'fn\s+samvada_(slot_\w+|ffi_size)\(\)\s*\{\s*return\s+(\d+);', y))
+          norm = lambda k: k.lower().replace('slot_', '').replace('ffi_size', 'size')
+          cmap = {norm(k): v for k, v in cdefs.items()}
+          ymap = {norm(k): v for k, v in cy.items()}
+          bad = 0
+          for k in sorted(set(cmap) | set(ymap)):
+              a, b = cmap.get(k), ymap.get(k)
+              if a != b:
+                  print(f"MISMATCH {k}: C={a} Cyrius={b}"); bad = 1
+              else:
+                  print(f"  ok {k} = {a}")
+          if not cmap or not ymap:
+              print("ERROR: parsed nothing — the extractor regex has rotted"); bad = 1
+          # kind must be at 64 forever (ADR-0002).
+          if ymap.get('kind') != 64:
+              print(f"ERROR: kind moved off +64 (now {ymap.get('kind')}) — ADR-0002 violation"); bad = 1
+          sys.exit(bad)
+          PY
 
   security:
     name: Security Scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Scan for dangerous patterns
-        # Matches code lines only — rejects patterns inside #
-        # comments. Use awk instead of `grep -v '# '` which would
-        # eat any line with an inline comment and hide real hits.
+        # Matches code lines only — rejects patterns inside # comments.
+        #
+        # 0.5.1 (audit MED-10): the pre-0.5.1 deny list could not fire.
+        # It grepped `syscall( *59`, `syscall( *57` and `sys_system` — but
+        # `sys_system` does not exist in the Cyrius stdlib at all, while the
+        # helpers that DO exist (`sys_execve`, `sys_execveat`, `sys_fork`)
+        # and the project's own idiom `syscall(SYS_EXECVE, ...)` matched
+        # nothing. A verified proof-of-miss: adding
+        # `sys_execve("/usr/bin/id", ...)` to src/main.cyr passed every gate.
+        # Now: symbol names, SYS_ constants, and a widened numeric set, all
+        # under grep -E (the patterns are ERE and silently fail under BRE).
+        # Scan scope widened from src/ to src/ tests/ deps/ — the C shim is
+        # shipped as a release artifact and was previously scanned by nothing.
         run: |
           FAIL=0
           scan() {
             local label="$1"; shift
             local pat="$1"; shift
             local hits
-            hits=$(grep -rn "$pat" src/ 2>/dev/null | awk -F: '
+            hits=$(grep -rEn "$pat" src/ tests/ deps/ 2>/dev/null | awk -F: '
               { line=$3; for(i=4;i<=NF;i++) line=line":"$i;
                 sub(/^[[:space:]]+/,"",line);
-                if (substr(line,1,1) != "#") print $1":"$2":"line }')
+                if (substr(line,1,1) != "#" && substr(line,1,2) != "/*" && substr(line,1,1) != "*") print $1":"$2":"line }')
             if [ -n "$hits" ]; then
               echo "FAIL: $label"
               echo "$hits"
@@ -214,20 +305,19 @@ jobs:
           }
           # samvada is a dbus client — no business spawning, exec'ing,
           # or writing to system paths.
-          scan "raw execve"      'syscall( *59'
-          scan "raw fork"        'syscall( *57'
-          scan "sys_system"      '\bsys_system\s*('
-          scan "writes to /etc"  '"/etc/'
-          scan "writes to /bin"  '"/bin/'
-          scan "writes to /sbin" '"/sbin/'
+          scan "process spawn helpers" '\b(sys_execve|sys_execveat|sys_fork|sys_vfork|sys_clone3?|sys_system|sys_posix_spawn)[[:space:]]*\('
+          scan "spawn syscall consts"  '\bSYS_(EXECVE|EXECVEAT|FORK|VFORK|CLONE3?)\b'
+          scan "raw spawn syscalls"    'syscall\([[:space:]]*(56|57|58|59|220|221|322|435)[[:space:],)]'
+          scan "C spawn calls"         '\b(system|popen|execv|execvp|execve|execl|execlp|fork|vfork|posix_spawn)[[:space:]]*\('
+          scan "writes to /etc"        '"/etc/'
+          scan "writes to /bin"        '"/bin/'
+          scan "writes to /sbin"       '"/sbin/'
           # Unbounded stack buffers (>=64KB — force heap review).
-          # var buf[N] in a fn is STATIC data, not stack — large
-          # ones bloat the binary and surface as a code-review smell.
           awk -F: '
             /var [A-Za-z_][A-Za-z0-9_]*\[[0-9]+\]/ {
               match($0, /\[[0-9]+\]/); s=substr($0,RSTART+1,RLENGTH-2); n=s+0;
               if (n >= 65536) print FILENAME":"NR": large buffer ("n" bytes): "$0
-            }' src/*.cyr | tee /tmp/bigbuf.txt
+            }' src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr | tee /tmp/bigbuf.txt
           [ -s /tmp/bigbuf.txt ] && FAIL=1
           echo "security scan complete (fail: $FAIL)"
           exit $FAIL
@@ -237,6 +327,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Check required files
         run: |
           MISSING=0

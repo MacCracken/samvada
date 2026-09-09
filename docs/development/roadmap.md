@@ -1,296 +1,485 @@
-# samvada — Roadmap to v1.0
+# samvada — the road to Native DBus in Cyrius
 
 **Identity.** Cyrius dbus client for the AGNOS suite. First
 consumer: [mabda](https://github.com/MacCracken/mabda)'s Phase D
 surface present (`gpu_surface_configure_native_logind`).
 
-**Mission.** Wrap enough of the dbus protocol to talk to logind
-for DRM-master delegation. Eventually grow to cover the broader
-dbus surface AGNOS tools need (polkit, NetworkManager, generic
-service IPC).
+**Destination.** samvada 1.0.0 speaks dbus natively, in Cyrius,
+over a raw unix socket — no libsystemd, no C shim, no
+`pkg-config`, nothing for a consumer to link. The path is settled:
+[ADR-0003](../adr/0003-native-cyrius-dbus.md) adopts Path A.1 and
+retires the A.1-vs-A.2 deferral that has blocked six documents
+since 0.2.0.
 
-**Architectural posture.** Same C-shim-during-the-dual-era
-strategy as mabda's wgpu-native integration: ship a libsystemd
-binding in v0.x, retire it at v1.0 alongside mabda v4.0's
-wgpu-native retirement. Pure-Cyrius dbus marshalling is the
-long-term target; the C shim is the pragmatic stop-gap that
-lets logind support actually land without a multi-week
-pure-Cyrius detour up front.
+**Posture.** The libsystemd C shim is a *transitional* backend,
+kept green and shipping until the native backend reaches parity,
+then deleted at the 1.0.0 tag. Both backends coexist through the
+transition: the shim is the differential reference and the
+fallback, not dead weight.
 
-State (what's currently in tree, what's WIP) lives in
-[`state.md`](state.md). This file is the sequencing — what
-ships, in what order, against what dependency gates.
+**What the 2026-09-09 audit changed about this plan.** Two things,
+and they are load-bearing:
 
----
+1. **The protocol scope was wrong.** samvada never sent
+   `TakeControl`, so `TakeDevice` failed in every environment for
+   five releases ([audit CRIT-1](../audit/2026-09-09-audit.md)).
+   The native marshaller's call fence is therefore **six method
+   calls, not three**. A plan built on the old three-call fence
+   would have shipped a 1.0.0 that cannot take a device.
+2. **Structural pins are not evidence.** Every gate was green
+   while the product did not work, because nothing had ever been
+   executed against a real bus. Every milestone below therefore
+   ends with **bytes that reached a real dbus daemon, or bytes
+   captured from one** — never with "the module is written".
 
-## v1.0 criteria
-
-- [x] Public API frozen — every exported symbol documented +
-  tested. Closed 0.4.0: `docs/architecture/public-api.md` maps
-  all 7 public fns + the internal FFI layer; the 0.4.0
-  certification audit fixed the missing `-EBUSY` (`-16`)
-  documentation and the double-init test-map row. CPU-path
-  symbols are unit-tested; the three HW-gated symbols have
-  structural dispatch pins plus the live-bus bench scaffold
-  (`tests/samvada_live.bcyr`). Behavioral live coverage stays
-  tracked under the downstream-consumer-green criterion below.
-- [ ] At least one downstream consumer green on `samvada` ≥ 0.2.0
-  (mabda's `_backend_native_surface_configure_logind` body
-  filled, e2e program runs from a desktop session)
-- [ ] Architectural pivot decided: pure-Cyrius dbus marshaller
-  OR removal (coordinated with mabda v4.0). **Decision deferred**
-  (it's downstream-demand-driven), but the options are now fully
-  scoped in
-  [proposal 0001](../proposals/0001-v1-dbus-backend-pivot.md) —
-  Path A.1 has a module map, ~650–1010 LoC estimate, a
-  no-hardware test strategy, a risk register, and a 1-session
-  de-risking spike. The checkbox closes when mabda v4.0 picks a
-  path and it lands as ADR-0003.
-- [ ] Benchmarks captured in `docs/benchmarks.md` (handshake
-  latency, signal pump throughput)
-- [x] CHANGELOG complete from v0.1.0 onward. Verified 0.4.0:
-  every released version (0.1.0 scaffold + 0.2.0 / 0.2.1 /
-  0.2.2 / 0.3.0 tags) has a Keep-a-Changelog entry with a
-  consistent `## [X.Y.Z] — YYYY-MM-DD` (em-dash) header that
-  both the CI docs-gate (`grep -q "^## \[$VERSION\]"`) and the
-  release body extractor (`awk`) parse cleanly. Kept current
-  per the work-loop version-sync step.
-- [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`)
-- [ ] Six-consumer regression sweep — any AGNOS consumer
-  depending on samvada builds + tests cleanly
+State (what is in tree right now) lives in
+[`state.md`](state.md). This file is the sequencing.
 
 ---
 
-## Milestones
+## v1.0.0 definition of done
 
-### M0 — Scaffold (v0.1.0) — ✅ shipped 2026-04-30
+Rewritten from the pre-0.5.1 checklist. Prior items are carried,
+not quietly dropped — where one changed, the change is stated.
 
-What landed:
-
-- `cyrius init samvada` baseline.
-- `README.md` + `docs/development/roadmap.md` + this file with
-  full architectural strategy.
-- `src/lib.cyr` + `src/samvada.cyr` placeholder (`samvada_version()`
-  returns the 0.1.0 version triple as a u32) so the bundle has a
-  real symbol consumers can reference.
-- `tests/samvada.tcyr` smoke green (`cyrius test` returns 0).
-- `cyrius.cyml` populated: description, repository,
-  `${file:VERSION}` substitution, expanded stdlib deps for the
-  v0.2.0 work (`tagged` for Result types, `fnptr` for the
-  fn-table dispatch pattern).
-- ADRs / architecture / guides / examples folders ready (from
-  `cyrius init`'s default doc tree).
-
-What does NOT land:
-
-- No protocol code, no C shim, no `sd_bus` calls.
-- No dbus marshalling.
-- No `.github/workflows/` (added in v0.1.1 alongside CI gates).
-
-Why ship v0.1.0 as scaffold-only: lets mabda v3.0 reference
-`[deps.samvada]` against a known package shape today. The
-scaffold itself is the baseline-of-work commit.
+- [x] **Public API frozen** — every exported symbol documented +
+  tested. Closed 0.4.0. **Re-asserted as a standing invariant,
+  not a closed box**: it was certified against the C-shim
+  implementation, so every milestone below re-checks that
+  `dist/samvada.cyr`'s exported symbol set is unchanged.
+- [x] **CHANGELOG complete from v0.1.0 onward.** Verified 0.4.0;
+  CI enforces per release.
+- [ ] **Native dbus backend reaches parity with the C shim** —
+  `kind = PURE_CYRIUS` populates the same slots, and every
+  behaviour the shim provides is provided natively. *(New; the
+  substance of this file.)*
+- [ ] **The C shim is deleted** — `deps/samvada_main.c` gone,
+  libsystemd absent from every consumer build. *(Replaces the old
+  "architectural pivot decided", which [ADR-0003](../adr/0003-native-cyrius-dbus.md)
+  closes.)*
+- [ ] **Benchmarks captured in `docs/benchmarks.md`.** *(Carried,
+  and now easier: a native backend can be driven from samvada's
+  own binary against any running system bus. Split into three
+  rows — handshake latency and signal-pump drain move into the N
+  lane; only the `TakeDevice` round-trip stays hardware-gated.)*
+- [ ] **Security audit pass over the native marshaller**
+  (`docs/audit/YYYY-MM-DD-audit.md`). *(Carried. The 0.5.1 pass
+  covered the C-shim surface; ~650–1010 LoC of hand-rolled byte
+  parsing replaces libsystemd's validated parser and earns its
+  own pass.)*
+- [ ] **Downstream consumer green** — mabda builds, pins and runs
+  against the native backend from a seated session. *(Carried.
+  Lives in the quarantined CG lane below and does **not** block
+  any N milestone.)*
+- [ ] ~~Six-consumer regression sweep~~ → **every AGNOS consumer
+  that pins `[deps.samvada]` builds and tests cleanly (today:
+  mabda).** *(The number was a template artifact from the
+  agnosticos standard; exactly one consumer exists and M2 is
+  gated on a hypothetical second. The intent is kept, the
+  fictional count is retired.)*
 
 ---
 
-### M1 — libsystemd C shim + minimum-viable logind (v0.2.0) — 🟡 code-complete 2026-04-30, awaiting consumer e2e
+## Two lanes
 
-**Estimated effort:** 3–5 sessions (actual: 1 session for the
-buildable scaffold; consumer e2e closes M1).
-**Gate:** mabda's `_backend_native_surface_configure_logind`
-needs real bytes flowing through.
+Everything below runs in one of two lanes, and the split is the
+point.
 
-What landed today (tag `0.2.0`):
+**The N lane (native dbus)** — N0 through N7. Buildable and
+completable with **zero mabda involvement and zero special
+hardware**. Nothing in this lane may be gated on the consumer.
 
-- `src/samvada_ffi.cyr` — 9-slot fn-table (72 bytes,
-  append-after-kind invariant; kind pinned at +64 forever).
-- `deps/samvada_main.c` — libsystemd C shim, compiles
-  `-Wall -Wextra -Werror` clean against libsystemd 260.
-  Wrappers: open_system_bus, get_session_path, take_device
-  (with `dup`'d fd), release_device, pump_signals, close_bus,
-  subscribe_pause_resume, unsubscribe.
-- `src/samvada.cyr` — public API filled
-  (`samvada_init` / `samvada_session_take_device` /
-  `samvada_session_release_device` / `samvada_pump_signals` /
-  `samvada_release` / `samvada_main`). Errors are negative
-  sd-bus errnos; null-table + null-kind init paths reject cleanly.
-- `tests/samvada.tcyr` — 32 CPU asserts across 8 groups,
-  including the slot-offset pin that freezes the C-shim contract.
-- `dist/samvada.cyr` — bundled lib (259 lines) for
-  `[deps.samvada]` consumers.
-- `docs/architecture/dbus-marshalling.md` — wire-format reference.
-- `docs/guides/consumer-link.md` — two-stage build recipe.
+**The CG lane (consumer green)** — externally gated on mabda's
+logind-master-retention hardware gate. It runs in parallel, it
+**never blocks an N milestone**, and only the 1.0.0 tag itself
+depends on it.
 
-What still has to happen for M1 to be "shipped":
+This quarantine is deliberate. M1 has read *"code-complete,
+awaiting consumer e2e"* since 0.2.0 — five releases in which a
+hardware gate on someone else's repo silently became samvada's
+critical path, and a guaranteed-fail bug sat undiscovered behind
+it.
 
-- Live `sd_bus` calls exercised against a real desktop session
-  via mabda's `_backend_native_surface_configure_logind` body.
-- A passing run of mabda's own e2e against samvada `0.2.0`.
-- A short note in `state.md` confirming the consumer gate cleared.
+---
 
-#### `deps/samvada_main.c` (new)
+## Shipped (historical)
 
-C shim entry point mirroring `mabda/deps/wgpu_main.c` exactly:
+| Milestone | Version | Status |
+|---|---|---|
+| **M0** — Scaffold | 0.1.0 | ✅ 2026-04-30. `cyrius init`, docs tree, placeholder `samvada_version()`. |
+| **M1** — libsystemd C shim + logind subset | 0.2.0 | ⚠️ Shipped, but **not correct**: `TakeDevice` could never succeed (audit CRIT-1). Fixed in 0.5.1. |
+| — Hardening review | 0.2.2 | ✅ HIGH-1 double-init leak, MED-1 stale errno. |
+| — Toolchain moves | 0.3.0, 0.4.1, 0.5.0 | ✅ cyrius 5.7.48 → 6.0.40 → 6.2.6 → 6.6.1. |
+| — Live-bus bench scaffold + v1.0 pivot proposal | 0.4.0 | ✅ HW-gated harness; [proposal 0001](../proposals/0001-v1-dbus-backend-pivot.md). |
+| **P(-1) audit** | 0.5.1 | ✅ 2026-09-09. 2 CRITICAL, 10 MEDIUM, 16 LOW fixed; tests 38 → 114. |
 
-- C `main()` calls `_cyrius_init()` then `alloc_init()`.
-- C builds a function table with `sd_bus_*` entries (~12 fns:
-  `default_system`, `call_method`, `message_*` for marshalling,
-  `add_match` for signals, `process` for the event loop, `unref`
-  for cleanup, plus 2–3 helpers).
-- C calls `samvada_main(fn_table_ptr)` which the consumer
-  defines.
-- Cyrius side calls `sd_bus_*` via `fncall1`/`fncall2`/`fncall5`
-  through the table.
+**M2 — "generalize beyond logind"** (Properties, Introspectable,
+session bus, generic method dispatch, async variants) is
+**deferred past 1.0**, unchanged. It was always gated on a second
+AGNOS consumer, none exists, and widening the surface before the
+pivot would enlarge exactly what the pivot has to re-implement
+(ADR-0001 §Neutral). Retained as the v1.1+ wishlist at the foot
+of this file.
 
-#### `src/samvada_ffi.cyr` (new)
+---
 
-The function-table layout + `samvada_ffi_init_table` populator,
-matching `src/wgpu_ffi.cyr`'s shape. Slot offsets pinned by CPU
-asserts in `tests/samvada.tcyr`.
+## The N lane
 
-#### `src/samvada.cyr` (filled)
+### N0 — Decide the signal-visibility contract (0.5.2)
 
-The Cyrius API surface graduates from placeholder to real:
+**Why first.** The answer may require an additive FFI slot, and
+that decision propagates through every milestone below. It is
+also answerable this week, with no hardware.
 
-```cyrius
-fn samvada_init(fn_table_ptr) → 0|err
-fn samvada_session_take_device(major, minor) → fd | -err
-fn samvada_session_release_device(major, minor) → 0|err
-fn samvada_pump_signals() → events_drained_count
-fn samvada_release() → 0
+Today slots 48/56 are populated by the shim and dispatched by
+**no** Cyrius code, so `PauseDevice`/`ResumeDevice` are never
+delivered ([audit MED-7](../audit/2026-09-09-audit.md)), and
+`PauseDeviceComplete` is unwired. But the frozen API gives
+`samvada_pump_signals()` a single integer return and no callback
+registration — so even a fully working signal path would tell the
+consumer *nothing*, while the consumer's entire reason to care
+about a pause is to stop drawing to a revoked DRM fd.
+
+- **Deliverables**: read mabda's actual call site
+  (`_backend_native_surface_configure_logind`,
+  `src/surface_v3.cyr`, `src/backend_native.cyr:2553`) — it costs
+  nothing and needs no hardware; decide how a consumer observes a
+  pause; ratify as **ADR-0004**.
+- **Exit**: ADR-0004 accepted; if it needs a slot, that slot is
+  appended at +88 per ADR-0002 and pinned before N1 starts.
+- **Also settle here**: `samvada_release()` now issues
+  `ReleaseControl`, and **logind revokes every device taken via
+  `TakeDevice` when session control is released**. An fd the
+  consumer still holds becomes invalid. This was already true via
+  the bus close, but `public-api.md` tells the caller *"the fd's
+  lifetime is the caller's"*. Document the real contract.
+
+### N1 — SCM_RIGHTS fd passing, before any dbus byte (0.6.0)
+
+**Why first among the build milestones.** It is the one module
+proposal 0001 rates Low-confidence, and the fallback is cheap
+*only* while nothing is built on top of it.
+
+**Risk re-rated Low → Medium on evidence.** Proposal 0001 assumed
+no in-language `cmsg` reference exists. That is false, and the
+references were read:
+
+| Reference | What it ships |
+|---|---|
+| `cyrius-doom/src/platform/wayland/client.cyr:206-228` | hand-built `msghdr`(56) + `cmsghdr`(24) `SCM_RIGHTS` **send** |
+| `kybernet/src/lib/notify.cyr:182-235` | **receive** walk with `MSG_CTRUNC` handling + `cmsg_len` bounds checks |
+| `argonaut/src/notify.cyr:176-207` | receive-side walk with `MSG_DONTWAIT` |
+
+Diff against these rather than deriving the alignment macros from
+the kernel ABI. `dbus_sys.cyr` drops from ~120–180 LoC to ~40–60;
+the milestone drops from 2–3 sessions to ~1.
+
+- **Traps to carry** (each already cost someone else a bug):
+  - `cyrius-doom` hardcodes `SYS_SENDMSG = 46`, which is
+    **`ftruncate` on aarch64**. Arch-select behind the same
+    `CYRIUS_ARCH_X86` / `CYRIUS_ARCH_AARCH64` split
+    `lib/syscalls.cyr` uses (46 / 211; `recvmsg` is 47 / 212).
+  - `MSG_DONTWAIT` is **per-call, not per-socket**. Setting
+    `O_NONBLOCK` on the socket instead would silently break every
+    request/reply.
+  - `var buf[N]` inside a fn is **STATIC**, so the fd path is
+    non-reentrant by construction. State it; do not discover it.
+  - The test-only `sendmsg` helper goes in `tests/`, not `src/` —
+    samvada never *sends* an fd in production and the exported
+    surface must not grow for a harness.
+- **Tests (no hardware, no bus)**: send a real fd through a
+  `socketpair`, receive it, assert `fstat` dev/ino match. Pin the
+  layout constants (`iovec`=16, `msghdr`=56, `cmsghdr`=16,
+  `CMSG_LEN(4)`=20, `CMSG_SPACE(4)`=24). Assert `F_GETFD` shows
+  `FD_CLOEXEC` actually set rather than trusting
+  `MSG_CMSG_CLOEXEC`. Run the round-trip 1000× and assert the
+  process descriptor count is unchanged — an fd-leak pin.
+- **Exit**: an fd crosses a socketpair and is provably the same
+  file; layout pins green on x86_64 **and** aarch64.
+
+### N2 — Capture the golden corpus (0.6.1)
+
+Do this **while the shim still exists** — the reference dies with
+it.
+
+- **Deliverable**: `tools/dbus_tap.py`, a ~60-line python3 AF_UNIX
+  relay that listens on a socket, connects to
+  `/run/dbus/system_bus_socket`, hex-dumps both directions, and is
+  driven by pointing a client at it with
+  `DBUS_SYSTEM_BUS_ADDRESS=unix:path=…`. Verified working. It
+  needs no C, no libsystemd and no linking — unlike an
+  `sd_bus_set_fd` capture tool, whose fallback is hand
+  transcription.
+- **Deliverable**: `tests/fixtures/dbus/` with per-fixture
+  provenance (host, systemd version, command, date) and a
+  **REAL / SYNTHETIC marker**.
+- **Honesty requirement, and it is not optional**: the
+  `TakeDevice` *reply* — the single most important decode fixture
+  — **cannot be captured**, because no seated session is
+  available and the shim could not execute `TakeDevice` anyway.
+  It must be marked SYNTHETIC and hand-assembled from
+  `dbus-marshalling.md`. That means an error in the prose becomes
+  an error in the test and the implementation *simultaneously*.
+  Mitigate by re-deriving it independently from the D-Bus spec,
+  not from our own doc.
+- **Exit**: corpus committed; every fixture marked REAL or
+  SYNTHETIC; **captured a second time on a different host /
+  systemd version** to prove it is not over-fitted to one machine.
+
+### N3 — Transport, auth and framing (0.7.0)
+
+Modules: `dbus_socket.cyr`, `dbus_auth.cyr`, `dbus_frame.cyr`.
+
+**`dbus-marshalling.md` §SASL is wrong and N3 corrects it.** The
+captured reality: libsystemd sends **one pipelined 48-byte
+write** — `\0AUTH EXTERNAL\r\nDATA\r\nNEGOTIATE_UNIX_FD\r\nBEGIN\r\n`,
+with an *empty-credential* `DATA` step — and the server answers
+**three lines in a single 58-byte read**. The documented
+`AUTH EXTERNAL <hex(ascii(uid))>` ping-pong is also legal and also
+works, but the reply reader must be **line-oriented over a
+buffer**; one-read-per-line hangs against a real bus.
+
+**`dbus_frame.cyr` is a first-class module (~60–100 LoC), not a
+detail of unmarshalling.** Proposal 0001 has no framer. Verified
+necessary: the first server response after `Hello` is a single
+262-byte read carrying **two complete messages** (the
+`METHOD_RETURN`, then a `NameAcquired` signal). The framer owns a
+persistent receive buffer, computes total length as
+`16 + padded(fields_len) + body_len`, yields one message at a
+time, and carries a partial tail across reads.
+
+- **Also required, and named in no prior plan**: a **write-all
+  loop**. A unix stream socket can short-write under load; a
+  156-byte request that writes 100 bytes and returns leaves a torn
+  message on the wire and the bus disconnects. The stdlib's write
+  is a thin syscall wrapper, not a loop.
+- **Also**: the connect path must **tolerate and discard
+  unsolicited traffic**. `NameAcquired` arrives with the `Hello`
+  reply, before any match rule exists. This is where serial
+  correlation first breaks if it is not handled.
+- **Abstract sockets**: `addrlen = 2 + strlen(path) + 1` is
+  correct only for filesystem paths. An abstract socket (leading
+  NUL in `sun_path`) needs `addrlen = 2 + 1 + name_len` and no
+  trailing NUL — reachable in 1.0.0 via `DBUS_SYSTEM_BUS_ADDRESS`,
+  not just a v1.1 session-bus concern.
+- **Exit**: `Hello` round-trips against the real system bus and
+  the unique name (`:1.NN`) is printed; feeding the captured
+  262-byte blob **one byte at a time** yields the same two
+  messages as feeding it whole, with zero residual bytes.
+
+### N4 — Marshal and unmarshal (0.8.0)
+
+Modules: `dbus_marshal.cyr`, `dbus_unmarshal.cyr`.
+
+**Golden bytes are a regression fixture, not a correctness
+oracle.** The captured traffic shows libsystemd emits header
+fields in order **1, 3, 2, 6, 8** — non-ascending, an
+implementation choice, not a spec requirement — and the flags byte
+varies per call (`0x00` on `Hello`, `0x04 NO_AUTO_START` on the
+logind calls). A *correct* samvada emitting ascending field order
+would fail a naive byte-equality gate. So:
+
+- Byte-equality runs against samvada's **own** encoder output, as
+  a regression pin, with volatile ranges (SERIAL, REPLY_SERIAL,
+  the unique name in SENDER/DESTINATION, the flags byte)
+  **documented per fixture and masked**.
+- **The bus's acceptance is the correctness oracle.** Send
+  samvada's bytes to the running system bus and assert its
+  reaction. With `TakeControl` in scope this gives a three-way
+  discrimination available on any dev box with no DRM hardware:
+  a malformed request draws
+  `org.freedesktop.DBus.Error.InvalidArgs`; a well-formed request
+  from an uncontrolled session draws
+  `org.freedesktop.login1.NotInControl`; a well-formed request
+  from a *controlled* session with a nonexistent minor draws a
+  device error. That is the cheapest strong evidence in the whole
+  plan, and it directly exercises the CRIT-1 fix.
+- **`u32` masking is a milestone-one acceptance criterion, not a
+  risk-register row.** The bus's very first `METHOD_RETURN`
+  carries serial `0xFFFFFFFF`. `>>` is logical and there is no
+  unsigned type, so a signed-comparison bug fires on **message
+  one**, not in a fuzz corner. Use that literal as the fixture.
+- **Exit**: all six requests encode to accepted bytes; the
+  captured replies decode to the right values; the `0xFFFFFFFF`
+  serial fixture passes.
+
+### N5 — The logind session layer (0.9.0)
+
+Module: `dbus_session.cyr` — the six calls, the two signals, the
+serial counter, and the signal dispatch loop that replaces
+`sd_bus_process`.
+
+**The frozen fncall arity constrains every native signature, and
+no prior plan said so.** `src/samvada.cyr` is frozen and
+dispatches with exactly:
+
+```
+fncall1(bus_slot, bus_out)
+fncall4(sp_slot,  bus, pid, buf, len)
+fncall6(slot,     bus, sess_cstr, major, minor, fd_out, active_out)
+fncall4(slot,     bus, sess, major, minor)
+fncall2(slot,     bus, sess)                 # take_control / release_control
 ```
 
-Internally these wrap:
+The native populator must install Cyrius fns matching those exact
+shapes — **including the vestigial `bus` first argument and the
+C-style out-pointer pairs**. The session layer cannot be written
+with natural Cyrius signatures; it must be written to the C
+shim's ABI. Getting this wrong is a silent crash, not a compile
+error. "Populate the same offsets with Cyrius fn addresses" is not
+mechanical.
 
-- `sd_bus_default_system` — connect to system bus on init.
-- `org.freedesktop.login1.Manager.GetSession` — find caller's
-  session via `XDG_SESSION_ID` or PID lookup.
-- `org.freedesktop.login1.Session.TakeDevice(uint32 major,
-  uint32 minor)` — returns a unix_fd + bool active.
-- `PauseDevice` / `ResumeDevice` signal handlers — drain via
-  `pump_signals`.
-- `org.freedesktop.login1.Session.ReleaseDevice` on teardown.
+- **Session selection is an open design question, surfaced here.**
+  `GetSessionByPID($$)` returns the caller's session, which is
+  **not necessarily seated** — on the audit host it returned a
+  `Seat=""` session while seat0 belonged to the display manager.
+  So even with `TakeControl`, `TakeDevice` on the pid-derived
+  session cannot get DRM master. Validating the session's `Seat`
+  property needs `org.freedesktop.DBus.Properties`, which the
+  scope fence defers. Decide in N5: validate (and widen the
+  fence), or document that `TakeDevice` only works when the
+  caller's own pid is in a seated session.
+- **Session-path escaping**: logind returns `/session/_32`, where
+  `_32` is hex-escaped ASCII `'2'`. samvada passes it through
+  opaquely today, which is safe — but any comparison, validation
+  or logging needs the unescaping rule, and it appears in no
+  document or fixture.
+- **Exit**: `GetSessionByPID` → `TakeControl` → `ReleaseControl`
+  round-trips natively against the real bus; `TakeDevice` reaches
+  a device-level error rather than `NotInControl`.
 
-#### `tests/samvada.tcyr`
+### N6 — Cutover (0.10.0)
 
-CPU tests pin the FFI table layout, the slot constants, the
-struct shapes for marshalling buffers. Real `sd_bus` calls are
-HW-gated (need a running system dbus + logind); guarded by an
-`is_dbus_available`-style detection that skips on CI without
-dbus.
+`kind = PURE_CYRIUS` becomes the default backend. **The shim stays
+in tree**, selectable per build, as the differential reference.
 
-#### `cyrius.cyml` deltas
+- **Error-code parity is a contract, and it is the likeliest
+  silent breach.** The frozen API promises "sd-bus errno
+  pass-through". libsystemd maps dbus error *names* to errnos; the
+  native backend must reproduce that mapping or consumers
+  branching on specific magnitudes break. This is an explicit
+  deliverable with a name-to-errno table, not an afterthought.
+- **Exit**: both backends pass the same suite; a differential run
+  (sequential A/B, since the module-scope singleton and the
+  `-EBUSY` guard forbid two live backends in one process) agrees
+  on every outcome and every error code.
 
-- Bump `VERSION` 0.1.0 → 0.2.0.
-- `[lib].modules` adds `src/samvada_ffi.cyr`.
+### N7 — Delete the shim, audit, tag 1.0.0
 
-#### Documentation
+- `deps/samvada_main.c` deleted; libsystemd gone from every
+  consumer build; `consumer-link.md` reduced to "add the dep".
+- **Full security audit** of the native marshaller →
+  `docs/audit/YYYY-MM-DD-audit.md`. Non-negotiable: this is where
+  samvada takes ownership of alignment, endianness, bounds and fd
+  handling that libsystemd used to own.
+- Benchmark rows filled (handshake, signal-pump; `TakeDevice`
+  from the CG lane if it has cleared).
+- **Keep `tools/dbus_tap.py` as a committed dev tool.** `busctl`
+  and libsystemd remain installed on any dev box long after
+  samvada stops linking them — free ongoing conformance testing
+  against the reference implementation, permanently.
 
-- `docs/architecture/dbus-marshalling.md` — wire format
-  reference (header fields, type signatures, alignment rules)
-  scoped to what `sd_bus` exposes.
-- `docs/guides/consumer-link.md` — how to add libsystemd to a
-  consumer's build (mabda updates its own README in parallel).
+### Standing exit criteria (every N milestone)
+
+Mechanically checkable, so "the consumer is never broken" is a
+gate rather than an intention:
+
+- `dist/samvada.cyr`'s exported symbol set is unchanged (26 fns).
+- `test_ffi_slot_offsets` is untouched; `kind` is still at +64.
+- The C-shim backend still compiles, links and passes CI.
+- mabda re-pins to the milestone tag and its smoke build stays
+  green — **every milestone**, not only at cutover, so export
+  drift surfaces immediately instead of at the most expensive
+  commit.
 
 ---
 
-### M2 — Generalize beyond logind (v0.3.x)
+## The CG lane (consumer green) — externally gated
 
-**Estimated effort:** as needed by the next AGNOS consumer.
+Runs in parallel. Blocks **only** the 1.0.0 tag.
 
-Likely additions when a consumer hits them:
+- **CG-1** — mabda's live-bus e2e from a seated session. Gated on
+  the logind-master-retention hardware gate.
+- **CG-2** — a `TakeDevice` that actually returns an fd, filling
+  the last benchmark row.
+- **CG-3** — the `state.md` note confirming the gate cleared
+  (M1's original closing artifact, kept verbatim).
 
-- Generic dbus method-call API (any interface / member, not just
-  the logind subset baked into v0.2.0).
-- Property get / set with `org.freedesktop.DBus.Properties`.
-- Object-path introspection
-  (`org.freedesktop.DBus.Introspectable`).
-- Session-bus support (today: system bus only).
+**A cheap way to de-gate this that nobody proposed**: a dedicated
+**text VT** — a seated session with no compositor holding master —
+or attaching a seat with `loginctl`. Every prior plan either
+deferred to hardware or proposed running from the maintainer's
+graphical session, which can black-screen the user. The text-VT
+path is safe and cheap and should be tried before accepting the
+gate as immovable.
+
+**Expiry, which no prior plan gave it**: if CG-1 is still open at
+the N7 gate, 1.0.0 ships with the native backend **documented as
+not-yet-consumer-validated**, and the lane is re-evaluated at
+1.1.0. A lane with no expiry is how M1 stayed open for five
+releases.
+
+---
+
+## Kill criteria — a graded ladder
+
+Each rung names the evidence, the fallback, and what the fallback
+still buys. A flat "stop" is not actionable.
+
+| Rung | Evidence | Fallback | What it still buys |
+|---|---|---|---|
+| **1** | N1 fails: `SCM_RIGHTS` cannot be made to work in Cyrius after a bounded attempt | Retain a ~40-line **libc-only** `recvmsg`+`cmsg` helper. No libsystemd, no `pkg-config` | Still deletes ~250 of the shim's ~330 lines; still drops the libsystemd dep from every consumer |
+| **2** | N3/N4 stall: the bus rejects samvada's bytes and the cause resists diagnosis | Hybrid `kind = 3`: native transport, libsystemd marshalling | Keeps the native socket path; isolates the failure to the codec |
+| **3** | N5 breaches error-code parity in a way consumers can observe | Hold cutover; ship native as opt-in behind the kind word | Native backend gets real exercise without breaking mabda |
+| **4** | Effort exceeds ~3× the proposal-0001 estimate | Freeze the N lane; keep shipping the (now-correct) C shim | 0.5.1 made the shim work; it is a viable steady state, not a crisis |
+| **5** | AGNOS standardizes on a different session-management primitive | **A.2 (removal)**, per ADR-0003's retained contingency | Surface is 5 fns with 1 consumer — migration is hours |
+
+---
+
+## Deferred past 1.0 (the v1.1+ wishlist)
+
+Carried from M2 and the architecture docs' "what samvada does NOT
+touch". All still gated on a second AGNOS consumer:
+
+- `org.freedesktop.DBus.Properties` Get/Set/GetAll — **except**
+  if N5's session-selection question forces `Seat` validation into
+  1.0.
+- `org.freedesktop.DBus.Introspectable`.
+- Session bus (per-user, `DBUS_SESSION_BUS_ADDRESS`, abstract
+  sockets in `$XDG_RUNTIME_DIR`).
+- Generic `dbus_call_method(dst, path, iface, member, …)`.
 - Async / non-blocking variants for consumers with their own
   event loops.
+- Thread safety. samvada is single-threaded by design; module
+  scope state has no locking and consumers must serialize. `var
+  buf[N]` being static inside a fn is a structural reason this is
+  hard, not merely undone.
 
-No firm scope yet — files itself when the second AGNOS consumer
-hits a wall.
+## Out of scope (unchanged)
 
----
-
-### M3 — The pivot (v1.0)
-
-**Coordinated with:** mabda v4.0 (the wgpu-native retirement).
-**Estimated effort:** multi-week if pure-Cyrius; trivial if
-removal.
-**Scoping:** [proposal 0001](../proposals/0001-v1-dbus-backend-pivot.md)
-turns both exits below into a concrete plan (module map, LoC,
-no-hardware test strategy, risks, de-risking spike). The
-*decision* between them is still mabda-v4.0-driven.
-
-Two possible exits:
-
-#### Path A — Pure-Cyrius dbus marshaller
-
-If logind dbus integration is still load-bearing for AGNOS
-consumers at v4.0 ship, replace the C shim with a hand-rolled
-Cyrius dbus client. Scope:
-
-- ~500–1000 LoC for system-bus connect + SASL EXTERNAL auth +
-  message marshalling (header fields, type sigs, alignment) +
-  method-call / signal-listen plumbing + minimal type system
-  (int32, uint32, string, object_path, unix_fd, byte arrays).
-- `deps/samvada_main.c` removed.
-- libsystemd dep dropped from consumers.
-
-Public API (`samvada_session_take_device` etc.) does **not**
-change. Consumer code keeps working; only the impl below the
-boundary swaps.
-
-#### Path B — Removal
-
-If the v4.0 logind story has evolved (e.g., kernel-level
-master-delegation, or AGNOS standardizes on a different
-session-management primitive), samvada can be deprecated.
-Consumers' `gpu_surface_configure_native_logind` paths get
-revised in mabda v4.0 to call the new mechanism directly.
-
-The decision between A and B happens during mabda v4.0 design.
-samvada's v0.x line is structured so either exit is clean — the
-public API is small (5 fns) and the implementation is isolated
-in one C shim + one Cyrius FFI module.
-
----
-
-## Out of scope (for v1.0)
-
-- **Authenticated session bus** (per-user dbus). Out until a
-  consumer needs it.
-- **Property-changed signal subscriptions** beyond the logind
-  Pause/Resume cases. Out until needed.
-- **Windows / macOS portability.** dbus is Linux-shape;
-  AGNOS-on-Windows would need WinRT / COM analogs, not samvada.
-  Different package.
-- **DBus 1.x → KDBus migration.** KDBus was never merged into
-  Linux; non-issue.
+- **Windows / macOS portability.** dbus is Linux-shape.
+- **DBus 1.x → KDBus migration.** KDBus was never merged.
 
 ---
 
 ## Notes / decisions
 
-- **2026-04-30** — Project scaffolded via `cyrius init samvada`,
-  moved to `~/Repos/samvada`, README + this roadmap filled in,
-  baseline `cyrius test` green. Decision: ship v0.1.0 as
-  scaffold-only so mabda v3.0 can reference `[deps.samvada]`
-  against a known package shape, even though no protocol code
-  has landed yet. C-shim-then-pivot strategy locked in (was
-  pure-Cyrius-from-v0.x earlier the same day; revised after
-  realizing the wgpu-native parallel made the C shim the better
-  stop-gap).
-- **2026-09-09** — `0.5.0`, toolchain-only: cyrius pin
-  `6.2.6` → `6.6.1`. No criterion above moves; M1's gate is
-  still the consumer e2e and M2 is still unscoped pending a
-  second AGNOS consumer. Recorded here because the release
-  changes two numbers the v1.0 benchmark criterion will be
-  read against: `CYRIUS_DCE=1` eliminates for the first time
-  (release binary −81.0 %) and `ffi_alloc` drops −55.6 %. Both
-  land in `docs/benchmarks.md` Run 4, which also records that
-  `0.4.0` and `0.4.1` skipped the every-release row — the
-  benchmark criterion's audit trail has a two-release gap that
-  is documented rather than backfilled.
+- **2026-04-30** — Project scaffolded. C-shim-then-pivot strategy
+  locked in ([ADR-0001](../adr/0001-c-shim-then-pivot.md)) after
+  the wgpu-native parallel made the shim the better stop-gap.
+- **2026-06-02** — [Proposal 0001](../proposals/0001-v1-dbus-backend-pivot.md)
+  scoped Path A.1 without choosing it; decision deferred to mabda
+  v4.0.
+- **2026-09-09** — `0.5.1`. The P(-1) audit found that
+  `TakeDevice` had never been able to succeed (CRIT-1) and that
+  the documented consumer link could never have worked (CRIT-2).
+  Both trace to the same cause: nothing had been executed against
+  a real bus or a real consumer link, because the backend was
+  treated as disposable scaffolding.
+  **[ADR-0003](../adr/0003-native-cyrius-dbus.md) ends the
+  deferral and adopts native Cyrius dbus** — partly on the merits,
+  and partly because a backend nobody has committed to is a
+  backend nobody tests. This roadmap is rewritten around that
+  destination, with the two-lane split and the every-milestone
+  live-evidence rule as the direct structural answer to how CRIT-1
+  survived five releases.

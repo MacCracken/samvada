@@ -65,12 +65,25 @@ cyrius lint src/*.cyr                       # static checks
 cyrius vet src/main.cyr                     # dep audit (file arg required)
 CYRIUS_DCE=1 cyrius build ...               # release build (CI default)
 
-# Consumer build (with C shim + libsystemd):
+# Consumer build (with C shim + libsystemd) — see docs/guides/consumer-link.md
+# for the verified recipe. Three things that are NOT obvious:
+#   1. the shim does not define main() (0.5.1+); the consumer calls
+#      samvada_shim_init() from its own main(). -DSAMVADA_STANDALONE_MAIN
+#      brings the shim's own main() back, for probe binaries only.
+#   2. there is NO `--emit-object` flag. `cyrius build` emits a finished
+#      executable; a relocatable needs the `object;` directive through cycc.
+#      This is the ONE sanctioned direct-cycc invocation.
+#   3. `objcopy -L` on the Cyrius object is REQUIRED, not optional.
 cc -c deps/samvada_main.c \
    $(pkg-config --cflags libsystemd) \
    -o build/samvada_main.o
-cyrius build src/main.cyr build/samvada.o --emit-object
-cc build/samvada_main.o build/samvada.o \
+{ printf 'object;\n'; \
+  for m in syscalls string fmt alloc io vec str assert tagged fnptr; do \
+      echo "include \"lib/$m.cyr\""; done; \
+  cat src/app.cyr; } | cycc > build/app.o
+objcopy -L memcpy -L memset -L memchr -L strlen \
+        -L strchr -L strstr -L memeq -L atoi build/app.o
+cc build/samvada_main.o build/app.o build/main.o \
    $(pkg-config --libs libsystemd) \
    -o build/myapp
 ```
@@ -81,7 +94,7 @@ cc build/samvada_main.o build/samvada.o \
 - Test after every change, not after the feature is "done"
 - ONE change at a time — never bundle unrelated changes
 - Research before implementation — check vidya field notes / sibling repos for existing patterns
-- Build with `cyrius build`, never raw `cat file | cc5` — the manifest auto-resolves deps and prepends includes
+- Build with `cyrius build`, never raw `cat file | cc5` — the manifest auto-resolves deps and prepends includes. **One exception**: emitting a relocatable `.o` for the consumer link, which has no `cyrius build` equivalent (there is no `--emit-object` flag) and requires the `object;` directive piped through `cycc`, followed by `objcopy -L` symbol localization. That path is documented in `docs/guides/consumer-link.md` and nowhere else
 - Source files only need project includes — stdlib auto-resolves from `cyrius.cyml`
 - Every buffer declaration is a contract: `var buf[N]` = N **bytes**, not N entries
 - **Append-after-kind invariant** — `samvada_slot_kind` stays at offset 64 forever; new slots append after the existing tail so v0 callers reading a v(N+1) table never misread a fnptr as the kind word

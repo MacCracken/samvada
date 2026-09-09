@@ -4,6 +4,252 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-09-09
+
+**P(-1) hardening + security audit release.** Two CRITICAL, ten
+MEDIUM and sixteen LOW findings fixed; the test suite grows
+38 → 114 asserts; every repair is mutation-proven. Full report:
+[`docs/audit/2026-09-09-audit.md`](docs/audit/2026-09-09-audit.md).
+
+Both CRITICAL findings share one root cause: **no code path in
+this repository had ever been executed against a real dbus daemon
+or a real consumer link.** Everything was pinned structurally
+against a mock table that could not fail in the ways that
+mattered. Every gate was green while the product did not work.
+
+### Security
+- **CRIT-1 — `samvada_session_take_device()` could never succeed
+  in any environment.** logind requires `TakeControl(b)` on the
+  session before it will honour `TakeDevice`, bound to the same
+  bus connection. samvada 0.2.0 through 0.5.0 never sent it, so
+  every call returned `org.freedesktop.login1.NotInControl`.
+  Reproduced live against `systemd-logind`: without `TakeControl`,
+  *"You are not in control of this session"*; with it, the call
+  advances past the control check. Two slots are appended after
+  `kind` per ADR-0002 — `take_control` → +72, `release_control`
+  → +80, `samvada_ffi_size()` 72 → 88, `kind` unmoved at +64.
+  `samvada_init()` now takes control; `samvada_release()` drops
+  it. A table whose `take_control` slot is null (a pre-0.5.1
+  backend) is rejected with `-38` rather than proceeding into a
+  guaranteed failure. **No public signature changed.**
+- **MED-3 — the DRM-master fd leaked across `execve`.**
+  `sb_take_device` used `dup()`, which **clears** `FD_CLOEXEC`,
+  so the delegated master fd survived any `exec` the consumer
+  performed and leaked master rights into unrelated children. Now
+  `fcntl(fd, F_DUPFD_CLOEXEC, 0)`.
+- **MED-5 — unbounded signal drain.** `sb_pump_signals` looped
+  until the queue emptied; one call measured captive for **0.77 s**
+  under an unprivileged local flood. Capped at 256 events per
+  call. The frozen zero-argument signature forbids a parameter, so
+  the cap lives in the C wrapper; residue drains on the next tick.
+- **MED-9 — CI supply chain.** The toolchain installer was piped
+  from a mutable branch into `sh`, in a job that had already run
+  `actions/checkout` with `persist-credentials` — so the job's
+  `GITHUB_TOKEN` sat on disk, readable, while upstream code ran
+  with `contents: write`. Now: pinned commit + `sha256sum -c`;
+  `contents: read` by default with write granted only to the
+  publishing job; `persist-credentials: false` on every checkout.
+- **MED-10 — the security scan could not fire.** It grepped for
+  `sys_system` (which does not exist in the Cyrius stdlib) and two
+  numeric literals the codebase never writes, while `sys_execve`,
+  `sys_fork` and `syscall(SYS_EXECVE, …)` all passed unflagged.
+  Proof-of-miss: `sys_execve("/usr/bin/id", …)` added to
+  `src/main.cyr` passed **every** gate. Now matches symbol names,
+  `SYS_*` constants and a widened numeric set under `grep -E`.
+- **MED-11 — the C shim was scanned by nothing.** The scan covered
+  `src/` only. `deps/samvada_main.c` — a released artifact, the
+  only code touching raw pointers and fds — was excluded. Scope
+  widened to `src/ tests/ deps/`, with C spawn patterns added.
+- **MED-2 — `major`/`minor` were silently truncated** 64→32 with
+  no range check at any layer, while `SECURITY.md` claimed they
+  were "validated at C boundary". `devnum_ok()` now makes that
+  claim true.
+- **LOW-1**, open since 2026-05-01: `sb_get_session_path` now
+  checks `path == NULL` after a successful read.
+- **LOW-5** (was LOW-2), open since 2026-05-01:
+  `samvada_release()` now zeroes both scratch buffers. **New
+  angle**: `_samvada_outs` holds a raw `sd_bus *` that is
+  *dangling* after `close_bus` — not merely "an fd index" as
+  originally characterised.
+- **LOW-4/LOW-7**: bounds check on `out_buf`/`out_buf_len` before
+  the `(size_t)` cast a negative length would defeat;
+  `sb_unsubscribe` rejects `slot_ <= 0` so a caller who skipped an
+  error check cannot turn an errno into a wild pointer.
+
+### Breaking
+- **The C shim no longer defines `main()` by default.**
+
+  `deps/samvada_main.c` defined `int main()` unconditionally.
+  Every real consumer already owns `main()` — mabda's
+  `deps/wgpu_main.c:435` does — so linking both gave
+  `multiple definition of 'main'`. **The documented two-stage
+  build could never have worked** (audit CRIT-2). samvada's own CI
+  missed it because the shim link test used stub objects that
+  deliberately omit `main()` — the one shape no real consumer has.
+
+  **Migration.** Call `samvada_shim_init()` once from your own
+  `main()`:
+
+  ```c
+  extern void _cyrius_init(void);
+  extern long alloc_init(void);
+  extern long samvada_shim_init(void);
+
+  int main(void) {
+      _cyrius_init();
+      alloc_init();
+      long rc = samvada_shim_init();   /* 0, or a negative sd-bus errno */
+      if (rc < 0) { /* handle */ }
+      /* ... your program ... */
+  }
+  ```
+
+  For a standalone probe binary instead, compile the shim with
+  `-DSAMVADA_STANDALONE_MAIN` and it supplies `main()` as before.
+  Nothing else changes: the Cyrius public API is untouched and
+  consumer `.cyr` code needs no edit. Pre-1.0, taking the clean
+  shape beats carrying an unusable one into 1.0.
+
+  **Two further reasons the old recipe could not work**, found
+  while verifying the fix end to end — both now documented with
+  executed commands in
+  [`consumer-link.md`](docs/guides/consumer-link.md):
+  - **`cyrius build … --emit-object` does not exist** (`error:
+    unknown flag`). `cyrius build` emits a finished executable,
+    not a relocatable. A linkable object needs the `object;`
+    directive piped through `cycc` — so the documented recipe
+    could not produce the object it then told you to link.
+  - **`objcopy -L` symbol localization was never documented and
+    is mandatory.** A Cyrius object exports its own `memcpy`,
+    `memset`, `strlen`, `strchr`, `strstr`, `memchr` and `atoi`
+    as global symbols; without localizing them, *libsystemd's*
+    calls bind to Cyrius's. Measured on an otherwise-identical
+    build: `samvada_shim_init()` returns **`-107`** without the
+    `objcopy` step and **`0`** with it. The build succeeds either
+    way and nothing in the failure points at symbol interposition.
+  - **The pinned tag did not exist** (`tag = "v0.2.0"`; every
+    samvada tag is unprefixed) and **`lib/samvada/deps/samvada_main.c`
+    is not a path on any machine** — `cyrius deps` copies only the
+    `modules` list into `lib/`, and the full checkout is cached at
+    `~/.cyrius/deps/samvada/<tag>/`.
+- **The fn-table is now `static`.** It was a stack local in
+  `main()`. samvada *borrows* the pointer — `_samvada_slot()`
+  re-reads `load64(table + off)` on every dispatch, it never
+  copies — so under a library-style entry the frame would pop
+  while the pointer stayed live. The comment justifying the stack
+  table claimed `samvada_main()` "never returns until the process
+  exits"; it returns immediately. Both that comment and a second
+  one claiming the table "lives in C static memory" were wrong and
+  are corrected; the borrow contract is now stated in
+  `public-api.md`.
+
+### Fixed
+- **MED-4 — `samvada_session_release_device` returned `1`, not
+  `0`, on success.** `sd_bus_call_method` returns a positive value
+  on success and it was passed straight through, contradicting the
+  documented `0 | -err` contract in four places. Normalised in
+  both the C wrapper and the Cyrius fn.
+- **MED-6 — `samvada_init` accepted any non-zero `kind`**, so a
+  wrongly-shaped table whose +64 word happened to be non-zero was
+  dispatched as function pointers instead of rejected. Now
+  whitelists `LIBSYSTEMD` / `PURE_CYRIUS`.
+- **MED-8 — `samvada_init` did not self-clean on late failure.** A
+  failure after the bus opened returned the error but left
+  `_samvada_table`/`_samvada_bus` set — leaking the `sd_bus` and
+  leaving the public API armed on a half-initialised samvada, with
+  the next `samvada_init` hitting `-EBUSY`. It now releases on
+  every late-failure path.
+
+### Added
+- **A pure-Cyrius mock backend** in `tests/samvada.tcyr`. The
+  long-standing claim that `take_device` / `release_device` /
+  `pump_signals` could not be tested without hardware was false —
+  the fn-table is just function pointers, and a mock exercises the
+  whole dispatch path with no bus, no logind and no device.
+- New CI gates: a link test reproducing the **real** consumer
+  shape (consumer-owned `main()` + shim); a mechanical
+  **C-`#define`-vs-Cyrius-slot cross-check** with an assertion
+  that `kind` is still at +64 — ADR-0002 and `public-api.md` both
+  *claimed* the test pin froze this contract and it never did, it
+  only checked the Cyrius side; a **version-triple-vs-`VERSION`**
+  check; `dist/samvada.deps` freshness; `CYRIUS_DCE=1` on the
+  released binary (declared the CI default in CLAUDE.md, set by no
+  workflow).
+- [`docs/audit/2026-09-09-audit.md`](docs/audit/2026-09-09-audit.md)
+  — the full report, including six findings **refuted** before
+  admission.
+- [`docs/adr/0003-native-cyrius-dbus.md`](docs/adr/0003-native-cyrius-dbus.md)
+  — see below.
+
+### Changed
+- **`docs/development/roadmap.md` is rewritten as *the road to
+  Native DBus in Cyrius*.** ADR-0003 ends the A.1-vs-A.2 deferral
+  and adopts native Cyrius dbus as the v1.0 path — partly on the
+  merits, and partly because a backend nobody has committed to is
+  a backend nobody tests, which is how CRIT-1 survived five
+  releases. The roadmap now runs two lanes: an **N lane** (N0–N7)
+  buildable with zero consumer involvement and zero special
+  hardware, and a quarantined **CG lane** for the
+  hardware-gated consumer e2e that never blocks an N milestone.
+  All prior commitments are folded in explicitly — M0–M3, the old
+  v1.0 checklist, M2's surface wishlist and the 2026-05-01 audit's
+  "roadmap items" each land somewhere named, including where the
+  disposition is "deferred past 1.0".
+- **Test-suite quality, not just quantity.** Vacuous assertions
+  removed: `test_init_rejects_null_table` passed with the guard
+  deleted, and `"fresh slot is 0"` could not fail because the bump
+  allocator hands out untouched pages. `samvada_ffi_set_slot`'s
+  null guard was untested while `get_slot`'s was pinned — and
+  `set_slot` is the *write*. There was no dispatch-wiring pin, so
+  a misroute could return fd 0 (stdin) with the suite green.
+  `samvada_main` had no test at all despite its return value
+  becoming the process exit code.
+- Documentation corrected against the code throughout:
+  `SECURITY.md` (supported versions were six releases stale; the
+  threat model had a row for a consumer-supplied-pid path that
+  does not exist), `public-api.md` (undocumented table-lifetime
+  contract, mis-attributed `-EBADF`, an unreachable
+  `pump_signals` post-condition, the missing threading contract),
+  `consumer-link.md` (rewritten around `samvada_shim_init`),
+  `README.md`, and `dbus-marshalling.md` (which omitted the
+  session-control handshake entirely — the specification mirrored
+  the bug).
+
+### Notes
+- **Not fixed, and stated plainly.** Slots 48/56 are populated by
+  the shim but dispatched by no Cyrius code, and no public API
+  installs a match rule — so `PauseDevice`/`ResumeDevice` are
+  **not delivered** and `PauseDeviceComplete` is unwired. Four
+  documents claimed otherwise; they now tell the truth. Wiring it
+  needs the signal-visibility contract decided first, because the
+  frozen API gives `samvada_pump_signals()` a single integer
+  return and no callback registration. That is roadmap **N0**.
+- **`samvada_release()` invalidates outstanding device fds.**
+  logind revokes every device taken via `TakeDevice` when session
+  control is released. This was already true via the bus close;
+  0.5.1 makes it explicit and documents it.
+- **The fix is verified through the complete stack.** A full
+  consumer binary — Cyrius object + C shim + consumer-owned
+  `main()`, linked against libsystemd — was built and run against
+  the live system bus:
+
+  ```
+  samvada_init (incl. TakeControl) -> 0
+  take_device(226,1)               -> -13
+  ```
+
+  `samvada_init` returning **0** means bus open →
+  `GetSessionByPID` → `TakeControl` all succeeded. The `-13`
+  (`-EACCES`) is the *environment* — that probe ran from a
+  `Seat=""` session, which can never own a DRM device — and
+  crucially it is **not** `-22`, which is what `NotInControl`
+  squashes to and what every pre-0.5.1 build returned.
+- **What remains unverified**: whether `TakeControl` is
+  *sufficient*, which needs an active **seated** session holding a
+  DRM device. The audit host had none. This is the CG-lane gate
+  and is now the single most valuable unverified thing in the
+  project.
+
 ## [0.5.0] — 2026-09-09
 
 Toolchain update release. The pinned Cyrius toolchain moves

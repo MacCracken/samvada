@@ -1,9 +1,36 @@
 # 0001 — v1.0 dbus backend pivot: pure-Cyrius marshaller vs removal
 
-**Status**: Open — decision deferred to mabda v4.0 design
+**Status**: **Accepted** — ratified by [ADR-0003](../adr/0003-native-cyrius-dbus.md) on 2026-09-09
 **Date**: 2026-06-02
-**Feeds**: a future ADR-0003 (ratifies the chosen path)
+**Ratified by**: [ADR-0003 — Native Cyrius dbus is the v1.0 path](../adr/0003-native-cyrius-dbus.md)
 **Supersedes nothing; extends**: [ADR-0001](../adr/0001-c-shim-then-pivot.md) §Decision (Path A.1 / A.2)
+
+> **Status note (2026-09-09).** This proposal deliberately scoped
+> A.1 without choosing it. ADR-0003 chooses it: **A.1 is adopted,
+> A.2 is retired to a contingency.** The module map, LoC estimates,
+> test strategy and risk register below stand and are the basis of
+> the rewritten [roadmap](../development/roadmap.md).
+>
+> Two corrections the 0.5.1 audit forced, which supersede the text
+> below where they conflict:
+>
+> 1. **The call fence is six method calls, not three.** §Scope
+>    lists `GetSessionByPID` / `TakeDevice` / `ReleaseDevice`.
+>    logind also requires `TakeControl` before `TakeDevice`
+>    (audit CRIT-1 — this is why the shipped client could never
+>    take a device), plus `ReleaseControl` and
+>    `PauseDeviceComplete`. `b` (boolean) therefore joins the
+>    **sent** type set, where §Scope lists it as received only.
+> 2. **`dbus_fd.cyr` is Medium confidence, not Low, and is
+>    smaller than estimated.** §"module map" assumes no
+>    in-language `cmsg` reference exists. Four sibling repos ship
+>    working ones — see the roadmap's N1 table. Estimate drops
+>    from 80–130 LoC to ~40–60.
+>
+> The roadmap also adds a module this proposal has no line for:
+> **`dbus_frame.cyr`** (~60–100 LoC). A single 262-byte read from
+> the bus carries two complete messages, so framing/reassembly is
+> a first-class concern, not a detail of unmarshalling.
 
 ## Purpose
 

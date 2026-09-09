@@ -9,13 +9,19 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - '[0-9]+.[0-9]+.[0-9]+'
 
+# Least privilege (0.5.1, audit MED-9). This used to be `contents: write` at
+# WORKFLOW level, so every job — including the one that piped a remote script
+# into sh — ran with a token that could rewrite the repo and the release tag.
+# Write is now granted only to the job that actually publishes.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   ci:
     name: CI Gate
     uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
 
   build:
     name: Build Release
@@ -23,6 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Verify version
         run: |
@@ -35,16 +43,22 @@ jobs:
           echo "Version verified: $TAG (cyrius.cyml pulls from VERSION via \${file:VERSION})"
 
       - name: Install Cyrius toolchain
-        # Single source of truth is the cyrius.cyml pin; hand it to the
-        # canonical upstream installer (same as ci.yml). The installer
-        # builds the version-aware ~/.cyrius tree the 6.0.x toolchain
-        # resolves the pin against — see ci.yml for the full rationale.
+        # Single source of truth is the cyrius.cyml pin. The installer is
+        # fetched from a PINNED COMMIT and checksum-verified before it runs —
+        # see ci.yml for the full rationale (0.5.1, audit MED-9). Keep the
+        # SHA/SUM here in step with ci.yml's.
+        env:
+          CYRIUS_INSTALL_SHA: "6020f5ba5f2986ab5d83de277a589c072133678e"
+          CYRIUS_INSTALL_SUM: "f33ee940c1387205f10f852c823b56983f5f44fda7ba3c2eff9af6917c3a8d51"
         run: |
-          set -e
+          set -euo pipefail
           CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
-            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          curl -sSfL -o install.sh \
+            "https://raw.githubusercontent.com/MacCracken/cyrius/${CYRIUS_INSTALL_SHA}/scripts/install.sh"
+          echo "${CYRIUS_INSTALL_SUM}  install.sh" | sha256sum -c -
+          CYRIUS_VERSION="$CYRIUS_VERSION" sh install.sh
+          rm -f install.sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Resolve deps
@@ -54,9 +68,16 @@ jobs:
           cyrius deps
 
       - name: Build
+        # CYRIUS_DCE=1 is declared the CI default in CLAUDE.md but no workflow
+        # ever set it, so every published binary carried its dead code —
+        # including unreachable exec/fork/socket stdlib bodies (audit LOW-16).
+        # DCE genuinely eliminates as of cyrius 6.5.72; measured 80,904 ->
+        # 15,368 bytes on this binary.
+        env:
+          CYRIUS_DCE: "1"
         run: |
           mkdir -p build
-          cyrius build src/main.cyr build/samvada
+          CYRIUS_DCE=1 cyrius build src/main.cyr build/samvada
           echo "samvada: $(wc -c < build/samvada) bytes"
 
       - name: Test
@@ -101,8 +122,14 @@ jobs:
     name: Create GitHub Release
     needs: [build]
     runs-on: ubuntu-latest
+    # The ONLY job that needs write: it publishes the release. Every other
+    # job runs read-only (0.5.1, audit MED-9).
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: release-artifacts
