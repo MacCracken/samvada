@@ -158,18 +158,16 @@ fn test_init_rejects_double_init() {
     # A SUCCESSFUL init now holds a live bus + session control.
     assert_eq(samvada_init(t), 0, "first init succeeds");
     assert_eq(_mock_calls_open, 1, "bus opened once");
-    assert_eq(_mock_calls_tctl, 1, "control taken once");
+    assert_eq(_mock_calls_tctl, 0, "control NOT taken at init (ADR-0004)");
 
     # Re-init without release must be refused — this is the leak HIGH-1
     # found: the second init would otherwise overwrite a live sd_bus and a
     # live control grant with no way to reach either again.
     assert_eq(samvada_init(t), -16, "EBUSY on double-init over a LIVE session");
     assert_eq(_mock_calls_open, 1, "second init did NOT re-open the bus");
-    assert_eq(_mock_calls_tctl, 1, "second init did NOT re-take control");
 
     # Release clears the guard; init works again.
     assert_eq(samvada_release(), 0, "release after successful init");
-    assert_eq(_mock_calls_rctl, 1, "control released");
     assert_eq(_mock_calls_close, 1, "bus closed");
     assert_eq(samvada_init(t), 0, "post-release init succeeds");
     assert_eq(_mock_calls_open, 2, "bus re-opened on the clean re-init");
@@ -196,15 +194,15 @@ fn test_failed_init_does_not_latch_ebusy() {
 
 # ---- version triple ----
 fn test_samvada_version() {
-    test_group("v0.5.2 packed triple");
+    test_group("v0.6.0 packed triple");
     # Bumps lock-step with VERSION. Component asserts catch the
     # bit-shift reorder bug.
-    assert_eq(samvada_version(), (0 << 16) | (5 << 8) | 2,
-      "v0.5.2 packed triple");
+    assert_eq(samvada_version(), (0 << 16) | (6 << 8) | 0,
+      "v0.6.0 packed triple");
     var v = samvada_version();
     assert_eq((v >> 16) & 0xFF, 0, "major");
-    assert_eq((v >> 8)  & 0xFF, 5, "minor");
-    assert_eq(v         & 0xFF, 2, "patch");
+    assert_eq((v >> 8)  & 0xFF, 6, "minor");
+    assert_eq(v         & 0xFF, 0, "patch");
     return 0;
 }
 
@@ -331,21 +329,85 @@ fn mock_reset() {
     return 0;
 }
 
-# CRIT-1 regression pin. samvada 0.2.0-0.5.0 never called TakeControl, so
-# logind answered every TakeDevice with NotInControl. Reproduced live against
-# systemd-logind on 2026-09-09; this pin is the CPU-side guard that the call
-# is issued, and issued BEFORE any device call.
-fn test_init_takes_session_control() {
-    test_group("init takes session control (CRIT-1 regression)");
+# ADR-0004 pin. samvada 0.5.1 took session control inside samvada_init().
+# That fixed CRIT-1 (logind answers NotInControl without it) but logind's
+# TakeControl also runs session_prepare_vt(), which on any session with
+# vtnr >= 1 does KDSKBMODE=K_OFF and KDSETMODE=KD_GRAPHICS — muting the
+# keyboard and blanking the console BEFORE any device was asked for, and
+# leaving it muted if the take then failed. Verified against systemd v261
+# src/login/logind-session.c. Control is now acquired lazily, on the first
+# device take. This pin is what stops it drifting back into init.
+fn test_init_does_not_take_control() {
+    test_group("init does NOT take session control (ADR-0004)");
     mock_reset();
     var t = mock_table_new();
     assert(t != 0, "mock table built");
-    assert_eq(samvada_init(t), 0, "init succeeds against the mock backend");
-    assert_eq(_mock_calls_open, 1, "open_system_bus dispatched once");
-    assert_eq(_mock_calls_sess, 1, "get_session_path dispatched once");
-    assert_eq(_mock_calls_tctl, 1, "TakeControl dispatched — the CRIT-1 fix");
-    assert_eq(_mock_calls_take, 0, "no device call during init");
+    assert_eq(samvada_init(t), 0, "init succeeds");
+    assert_eq(_mock_calls_open, 1, "bus opened");
+    assert_eq(_mock_calls_sess, 1, "session path resolved");
+    assert_eq(_mock_calls_tctl, 0, "TakeControl NOT dispatched at init");
+    assert_eq(_mock_calls_take, 0, "no device call at init");
+    # Releasing without ever taking a device must not touch control either.
+    assert_eq(samvada_release(), 0, "release ok");
+    assert_eq(_mock_calls_rctl, 0, "ReleaseControl NOT dispatched — nothing to release");
+    assert_eq(_mock_calls_close, 1, "bus closed");
+    return 0;
+}
+
+# The other half: control IS taken, lazily, on the first device take.
+fn test_take_device_acquires_control_lazily() {
+    test_group("take_device acquires control on first use");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    assert_eq(_mock_calls_tctl, 0, "no control yet");
+    var fd = samvada_session_take_device(226, 1);
+    assert_eq(fd, 7, "device taken");
+    assert_eq(_mock_calls_tctl, 1, "TakeControl dispatched exactly once");
+    # A second take must NOT re-take control.
+    var fd2 = samvada_session_take_device(226, 0);
+    assert_eq(fd2, 7, "second device taken");
+    assert_eq(_mock_calls_tctl, 1, "control taken ONCE, not per-device");
     samvada_release();
+    assert_eq(_mock_calls_rctl, 1, "control released at teardown");
+    return 0;
+}
+
+# THE VT-MUTE FIX. If we acquired control purely for a take that then failed,
+# and we hold no other device, hand control straight back — otherwise the
+# user's console stays blanked and keyboard-dead for a device we never got.
+fn test_failed_take_returns_control() {
+    test_group("a failed take_device gives control back (VT stays live)");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    _mock_take_rc = (0 - 13);                 # EACCES, the seatless/denied case
+    var e = samvada_session_take_device(226, 1);
+    assert_eq(e, (0 - 13), "take fails with EACCES");
+    assert_eq(_mock_calls_tctl, 1, "control was taken for the attempt");
+    assert_eq(_mock_calls_rctl, 1, "and given straight back");
+    # A later successful take must be able to re-acquire.
+    _mock_take_rc = 0;
+    assert_eq(samvada_session_take_device(226, 1), 7, "later take succeeds");
+    assert_eq(_mock_calls_tctl, 2, "control re-acquired");
+    samvada_release();
+    return 0;
+}
+
+# But if a device IS already held, a subsequent failed take must NOT drop
+# control — that would revoke the fd the consumer is still using.
+fn test_failed_take_keeps_control_when_device_held() {
+    test_group("a failed take keeps control if a device is still held");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    assert_eq(samvada_session_take_device(226, 1), 7, "first device held");
+    assert_eq(_mock_calls_tctl, 1, "control taken");
+    _mock_take_rc = (0 - 13);
+    assert_eq(samvada_session_take_device(226, 0), (0 - 13), "second take fails");
+    assert_eq(_mock_calls_rctl, 0, "control NOT dropped — a device is still held");
+    samvada_release();
+    assert_eq(_mock_calls_rctl, 1, "released at teardown");
     return 0;
 }
 
@@ -409,14 +471,16 @@ fn test_init_self_cleans_on_late_failure() {
     assert_eq(_mock_calls_close, 0, "no bus was opened, so none to close");
     assert(samvada_init(tc) != -16, "no EBUSY latch");
 
-    # (b) failure inside take_control, after the session path resolved
+    # (b) a take_control failure now surfaces from take_device, not init,
+    # since control is acquired lazily (ADR-0004).
     mock_reset();
     var t3 = mock_table_new();
-    _mock_take_rc = 0;
     samvada_ffi_set_slot(t3, samvada_slot_take_control(), &mock_take_control_fail);
-    assert_eq(samvada_init(t3), (0 - 1), "init surfaces the TakeControl error");
-    assert_eq(_mock_calls_close, 1, "bus closed by the self-clean");
-    assert_eq(samvada_pump_signals(), -22, "API disarmed after TakeControl failure");
+    assert_eq(samvada_init(t3), 0, "init succeeds — it no longer takes control");
+    assert_eq(samvada_session_take_device(226, 1), (0 - 1),
+      "take_device surfaces the TakeControl error");
+    assert_eq(_mock_calls_take, 0, "no device call after a control failure");
+    samvada_release();
     return 0;
 }
 
@@ -453,6 +517,28 @@ fn test_release_device_normalises_success() {
     return 0;
 }
 
+# Releasing the last device must hand control back, so the console is
+# restored rather than staying blanked for the life of a process that has
+# fallen back to another path (ADR-0004).
+fn test_last_release_drops_control() {
+    test_group("releasing the last device restores the VT");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    assert_eq(samvada_session_take_device(226, 1), 7, "device 1 held");
+    assert_eq(samvada_session_take_device(226, 0), 7, "device 2 held");
+    assert_eq(_mock_calls_tctl, 1, "control taken once");
+    assert_eq(samvada_session_release_device(226, 1), 0, "release device 1");
+    assert_eq(_mock_calls_rctl, 0, "control KEPT — one device still held");
+    assert_eq(samvada_session_release_device(226, 0), 0, "release device 2");
+    assert_eq(_mock_calls_rctl, 1, "control dropped on the LAST release");
+    # And a later take re-acquires cleanly.
+    assert_eq(samvada_session_take_device(226, 1), 7, "take again");
+    assert_eq(_mock_calls_tctl, 2, "control re-acquired");
+    samvada_release();
+    return 0;
+}
+
 fn test_pump_signals_behaviour() {
     test_group("pump_signals: dispatch + count pass-through");
     mock_reset();
@@ -472,6 +558,7 @@ fn test_release_drops_control_and_closes() {
     mock_reset();
     var t = mock_table_new();
     assert_eq(samvada_init(t), 0, "init ok");
+    assert_eq(samvada_session_take_device(226, 1), 7, "hold a device so control is held");
     assert_eq(samvada_release(), 0, "release ok");
     assert_eq(_mock_calls_rctl, 1, "ReleaseControl dispatched");
     assert_eq(_mock_calls_close, 1, "close_bus dispatched");
@@ -576,11 +663,15 @@ fn main() {
     test_failed_init_does_not_latch_ebusy();
     test_ffi_layout_invariants();
     test_ffi_set_slot_null_safe();
-    test_init_takes_session_control();
+    test_init_does_not_take_control();
+    test_take_device_acquires_control_lazily();
+    test_failed_take_returns_control();
+    test_failed_take_keeps_control_when_device_held();
     test_init_rejects_table_without_take_control();
     test_init_self_cleans_on_late_failure();
     test_take_device_behaviour();
     test_release_device_normalises_success();
+    test_last_release_drops_control();
     test_pump_signals_behaviour();
     test_release_drops_control_and_closes();
     test_dispatch_wiring();

@@ -87,7 +87,8 @@ trusts vs. validates:
 | `pid` for `GetSessionByPID` | not consumer-supplied | samvada resolves its own session: `samvada_init` calls `sys_getpid()` and passes that (`src/samvada.cyr`). No consumer-supplied pid reaches the bus, and no public fn accepts one |
 | Bytes from the system dbus socket | validated by libsystemd | `sd_bus_message_read` enforces signature match before we see the data. `sb_get_session_path` adds its own bounds: it rejects `out_buf == 0` or `out_buf_len <= 0` before the `(size_t)` cast, rejects a `NULL` path from a successful read, and returns `-ENOBUFS` rather than truncating a path that does not fit |
 | FDs received via `SCM_RIGHTS` | re-duplicated `CLOEXEC` before the message is unref'd | see the fd-passing design principle below |
-| logind's `PauseDevice` / `ResumeDevice` signals | **not received at all** | no match rule is ever installed, so these signals are not delivered to consumer code. See "Known Limitations" — this is a functional gap, not a trust decision |
+| logind's `PauseDevice` / `ResumeDevice` signals | **not surfaced, by decision** | samvada does not deliver session signals in the 0.x line — ratified in [ADR-0004](docs/adr/0004-session-control-lifecycle-and-signal-visibility.md), not an unfixed gap. logind emits them only to the session *controller*, which samvada now is only while it holds a device. See "Known Limitations" for what a consumer must plan around |
+| logind session control (`TakeControl`) | **acquired only while a device is held** | `TakeControl` runs logind's `session_prepare_vt()`: on a session with `vtnr >= 1` it sets `KDSKBMODE=K_OFF` and `KDSETMODE=KD_GRAPHICS`, i.e. **it disables the keyboard and blanks the console**. 0.5.1 took control at init and so muted the console before any device was requested; 0.6.0 scopes it to device ownership (ADR-0004). Treat `TakeControl` as a privileged, user-visible action, not bookkeeping |
 
 ## Design Principles
 
@@ -189,7 +190,7 @@ defended is misleading about what is wired.
   these signals is wrong. `PauseDeviceComplete` — the
   acknowledgement half of logind's pause handshake — is not
   wired either; a consumer that needs it must implement it
-  outside samvada. Tracked as MED-7 in the 2026-09-09 audit and
+  outside samvada. Filed as MED-7 in the 2026-09-09 audit and **decided** in
   scheduled on the roadmap.
 - **Live-bus end-to-end is unverified.** Behaviour against a
   real `dbus-broker` + `systemd-logind` on a **seated** session
@@ -286,7 +287,10 @@ that matter:
   holding a DRM device, which the probing host did not have.
   This is the M1 gate.
 - **`PauseDevice` / `ResumeDevice` delivery**, and
-  `PauseDeviceComplete`. Not wired (MED-7). The
+  `PauseDeviceComplete`. Not wired, by decision (MED-7 →
+  ADR-0004; a VT seat only ever receives `PauseDevice("force")`,
+  which requires no reply, and nothing in logind waits on the
+  controller — verified against systemd v261 source). The
   Cyrius-fn-pointer-as-`sd_bus_message_handler_t` callback ABI
   was reviewed and is sound, but it is unreachable, so it has
   never actually executed.

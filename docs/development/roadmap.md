@@ -112,6 +112,8 @@ it.
 | — Toolchain moves | 0.3.0, 0.4.1, 0.5.0 | ✅ cyrius 5.7.48 → 6.0.40 → 6.2.6 → 6.6.1. |
 | — Live-bus bench scaffold + v1.0 pivot proposal | 0.4.0 | ✅ HW-gated harness; [proposal 0001](../proposals/0001-v1-dbus-backend-pivot.md). |
 | **P(-1) audit** | 0.5.1 | ✅ 2026-09-09. 2 CRITICAL, 10 MEDIUM, 16 LOW fixed; tests 38 → 114. |
+| — Toolchain patch | 0.5.2 | ✅ cyrius 6.6.2, carrying samvada's own upstream symbol-visibility fix. |
+| **N0** — signal-visibility contract | 0.6.0 | ✅ 2026-09-09. ADR-0004; `TakeControl` scoped to device ownership (0.5.1 console regression); no new slot. |
 
 **M2 — "generalize beyond logind"** (Properties, Introspectable,
 session bus, generic method dispatch, async variants) is
@@ -125,28 +127,47 @@ of this file.
 
 ## The N lane
 
-### N0 — Decide the signal-visibility contract (0.5.2)
+### N0 — Decide the signal-visibility contract (0.6.0) — ✅ SHIPPED
 
 **Why first.** The answer may require an additive FFI slot, and
 that decision propagates through every milestone below. It is
 also answerable this week, with no hardware.
 
-Today slots 48/56 are populated by the shim and dispatched by
-**no** Cyrius code, so `PauseDevice`/`ResumeDevice` are never
-delivered ([audit MED-7](../audit/2026-09-09-audit.md)), and
-`PauseDeviceComplete` is unwired. But the frozen API gives
+**The question as posed.** Slots 48/56 were populated by the shim
+and dispatched by no Cyrius code, so `PauseDevice`/`ResumeDevice`
+were never delivered ([audit MED-7](../audit/2026-09-09-audit.md)),
+and `PauseDeviceComplete` was unwired. The frozen API gives
 `samvada_pump_signals()` a single integer return and no callback
-registration — so even a fully working signal path would tell the
-consumer *nothing*, while the consumer's entire reason to care
-about a pause is to stop drawing to a revoked DRM fd.
+registration — so even a working signal path would tell the
+consumer *nothing*, while the consumer's whole reason to care about
+a pause is to stop drawing to a revoked DRM fd.
+
+**The answer**: not delivered in 0.x, ratified as a property. The
+slots stay reserved. See ADR-0004 for the evidence.
+
+> **Renumbered 2026-09-09.** N0 was originally scoped at 0.5.2;
+> that version was consumed by the cyrius 6.6.2 toolchain patch
+> (which carried samvada's own upstream symbol-visibility fix), so
+> the whole N lane shifts up one minor. N0 ships as **0.6.0**.
 
 - **Deliverables**: read mabda's actual call site
   (`_backend_native_surface_configure_logind`,
   `src/surface_v3.cyr`, `src/backend_native.cyr:2553`) — it costs
   nothing and needs no hardware; decide how a consumer observes a
   pause; ratify as **ADR-0004**.
-- **Exit**: ADR-0004 accepted; if it needs a slot, that slot is
-  appended at +88 per ADR-0002 and pinned before N1 starts.
+- **Exit**: ✅ [ADR-0004](../adr/0004-session-control-lifecycle-and-signal-visibility.md)
+  accepted. **No slot was needed** — the table stays at 11 slots /
+  88 bytes, so N1 starts against an unchanged ABI.
+- **What it actually found**: the larger half of N0 was not the
+  signal question but a console regression from 0.5.1 —
+  `samvada_init()` called `TakeControl`, which runs logind's
+  `session_prepare_vt()` (`KDSKBMODE=K_OFF`,
+  `KDSETMODE=KD_GRAPHICS`), blanking the console and killing the
+  keyboard on any seated VT session before a device was requested.
+  Control is now scoped to device ownership. Signal delivery is
+  ratified as **not provided in 0.x**, on evidence that a VT seat
+  only ever receives `PauseDevice("force")` (no reply required)
+  and that nothing in logind waits on the controller.
 - **Also settle here**: `samvada_release()` now issues
   `ReleaseControl`, and **logind revokes every device taken via
   `TakeDevice` when session control is released**. An fd the
@@ -154,7 +175,7 @@ about a pause is to stop drawing to a revoked DRM fd.
   the bus close, but `public-api.md` tells the caller *"the fd's
   lifetime is the caller's"*. Document the real contract.
 
-### N1 — SCM_RIGHTS fd passing, before any dbus byte (0.6.0)
+### N1 — SCM_RIGHTS fd passing, before any dbus byte (0.7.0)
 
 **Why first among the build milestones.** It is the one module
 proposal 0001 rates Low-confidence, and the fallback is cheap
@@ -197,7 +218,7 @@ the milestone drops from 2–3 sessions to ~1.
 - **Exit**: an fd crosses a socketpair and is provably the same
   file; layout pins green on x86_64 **and** aarch64.
 
-### N2 — Capture the golden corpus (0.6.1)
+### N2 — Capture the golden corpus (0.7.1)
 
 Do this **while the shim still exists** — the reference dies with
 it.
@@ -226,7 +247,7 @@ it.
   SYNTHETIC; **captured a second time on a different host /
   systemd version** to prove it is not over-fitted to one machine.
 
-### N3 — Transport, auth and framing (0.7.0)
+### N3 — Transport, auth and framing (0.8.0)
 
 Modules: `dbus_socket.cyr`, `dbus_auth.cyr`, `dbus_frame.cyr`.
 
@@ -267,7 +288,7 @@ time, and carries a partial tail across reads.
   262-byte blob **one byte at a time** yields the same two
   messages as feeding it whole, with zero residual bytes.
 
-### N4 — Marshal and unmarshal (0.8.0)
+### N4 — Marshal and unmarshal (0.9.0)
 
 Modules: `dbus_marshal.cyr`, `dbus_unmarshal.cyr`.
 
@@ -303,7 +324,7 @@ would fail a naive byte-equality gate. So:
   captured replies decode to the right values; the `0xFFFFFFFF`
   serial fixture passes.
 
-### N5 — The logind session layer (0.9.0)
+### N5 — The logind session layer (0.10.0)
 
 Module: `dbus_session.cyr` — the six calls, the two signals, the
 serial counter, and the signal dispatch loop that replaces
@@ -348,7 +369,7 @@ mechanical.
   round-trips natively against the real bus; `TakeDevice` reaches
   a device-level error rather than `NotInControl`.
 
-### N6 — Cutover (0.10.0)
+### N6 — Cutover (0.11.0)
 
 `kind = PURE_CYRIUS` becomes the default backend. **The shim stays
 in tree**, selectable per build, as the differential reference.

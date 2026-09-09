@@ -5,6 +5,25 @@
 
 ## Version
 
+**0.6.0** — 2026-09-09. **N0** — the first milestone of the road to
+native Cyrius dbus. Ratifies
+[ADR-0004](../adr/0004-session-control-lifecycle-and-signal-visibility.md)
+and fixes a console regression 0.5.1 introduced: `samvada_init()`
+called `TakeControl`, and logind's `TakeControl` runs
+`session_prepare_vt()` — `KDSKBMODE=K_OFF` plus
+`KDSETMODE=KD_GRAPHICS` — so initializing samvada **blanked the
+console and killed the keyboard** on any seated VT session, before
+any device was requested. Invisible in testing because
+`session_prepare_vt` returns early for `vtnr < 1` and every session
+on this host is seatless. Session control is now scoped to device
+ownership: acquired lazily on the first device take, returned if
+that take fails, dropped on the last release and at
+`samvada_release()`. ADR-0004 also ratifies that samvada **does not
+deliver `PauseDevice`/`ResumeDevice` in 0.x** — a documented
+property now, not the MED-7 gap. **No new FFI slot** (still 11
+slots / 88 bytes), so N1 is unblocked. Tests 131 → 162, each new
+pin mutation-proven. No public signature change.
+
 **0.5.2** — 2026-09-09. Toolchain patch. Pinned Cyrius bumped
 `6.6.1` → `6.6.2`, which carries the upstream fix for the
 symbol-collision defect samvada filed during the 0.5.1 audit
@@ -191,13 +210,17 @@ Live-bus end-to-end validation pending mabda's
   helpers.
 - `src/samvada.cyr` — public API surface (v0.x stable). Full
   surface map in `docs/architecture/public-api.md`.
-  - `samvada_version()` → packed u32 (0.5.2).
+  - `samvada_version()` → packed u32 (0.6.0).
   - `samvada_init(table)` → 0 | -err (opens bus, looks up
     session, **takes session control**). Returns `-EBUSY` (`-16`)
     on re-init without release as of 0.2.2; self-cleans on every
     late failure as of 0.5.1.
   - `samvada_session_take_device(major, minor)` → fd | -err.
+    Acquires logind session control on first use (0.6.0,
+    ADR-0004) and returns it if the take fails.
   - `samvada_session_release_device(major, minor)` → 0 | -err.
+    Drops session control when the last device is released, so
+    logind restores the VT.
   - `samvada_pump_signals()` → events | -err.
   - `samvada_release()` → 0 (idempotent). Drops session
     control and zeroes scratch as of 0.5.1. **Note**: logind
@@ -214,7 +237,7 @@ Live-bus end-to-end validation pending mabda's
 
 ## Tests
 
-- `tests/samvada.tcyr` — **114 asserts** (was 38) across 23
+- `tests/samvada.tcyr` — **162 asserts** (was 38) across 23
   groups. Adds a **pure-Cyrius mock backend** (`mock_table_new`)
   giving `take_device` / `release_device` / `pump_signals` real
   behavioural coverage with no hardware — the long-standing

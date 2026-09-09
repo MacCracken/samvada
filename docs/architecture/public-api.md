@@ -240,6 +240,26 @@ live verification.
   including that a re-init after a self-clean is not `-16`. All
   run against the pure-Cyrius mock backend, no bus required.
 
+### Session-control lifecycle (0.6.0, ADR-0004)
+
+samvada holds logind *session control* only while it holds a
+device. This is not an implementation detail — logind's
+`TakeControl` runs `session_prepare_vt()`, which on any session
+with `vtnr >= 1` sets `KDSKBMODE=K_OFF` and `KDSETMODE=KD_GRAPHICS`:
+**the keyboard goes dead and the console blanks.**
+
+| Call | Effect on control |
+|---|---|
+| `samvada_init` | **none** — validates the slot is wired, takes nothing |
+| `samvada_session_take_device` (first, succeeds) | acquires control |
+| `samvada_session_take_device` (fails) | acquires, then hands it straight back |
+| `samvada_session_take_device` (subsequent) | no-op — held once, not per device |
+| `samvada_session_release_device` (last device) | drops control; logind restores the VT |
+| `samvada_release` | drops control if still held |
+
+So a consumer that initializes samvada and never takes a device
+never touches the user's VT. 0.5.1 took control at init and did.
+
 ### `samvada_session_take_device`
 
 ```cyr
@@ -303,7 +323,22 @@ and, as of 0.5.1, still not exposed to the caller: there is no
 public fn that returns it. Pause/resume tracking therefore
 remains entirely the consumer's problem, and *not* via
 `samvada_pump_signals` — see that fn's entry for why signal
-delivery is not wired in v0.x.
+delivery is not wired in v0.x — and as of
+[ADR-0004](../adr/0004-session-control-lifecycle-and-signal-visibility.md)
+that is a **supported property of the 0.x line**, not a gap
+awaiting a fix. Two consequences a consumer must plan around:
+
+- **VT switching is not supported while a device is held.** You
+  are not told the device was paused, and will draw to a revoked
+  fd until you stop.
+- **`ResumeDevice`'s replacement fd is dropped.** logind hands
+  back a *new* descriptor on resume and the old one is not
+  guaranteed to still refer to the same kernel file; samvada has
+  no path to give you the new one. After a pause/resume cycle
+  your fd is stale.
+
+Supported usage is take-hold-release within one session
+activation. The slots at +48 / +56 stay reserved and unwired.
 
 - **Test**: `test_take_device_behaviour` — dispatch, argument
   forwarding, out-parameter read-back, and negative-rc

@@ -4,6 +4,91 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-09
+
+**N0 — the first milestone of the road to native Cyrius dbus.**
+Ratifies [ADR-0004](docs/adr/0004-session-control-lifecycle-and-signal-visibility.md)
+and fixes a user-visible console regression that 0.5.1 introduced.
+No public signature changes; no new FFI slot, so the table stays at
+11 slots / 88 bytes and N1 is unblocked. Tests 131 → 162.
+
+### Fixed
+- **`samvada_init()` blanked the console and disabled the keyboard
+  on any seated VT session.** 0.5.1 fixed CRIT-1 by calling
+  `TakeControl` inside `samvada_init()` — the right call in the
+  wrong place. logind's `method_take_control` passes
+  `prepare = true`, and that branch runs `session_prepare_vt()`,
+  which for any session with `vtnr >= 1` performs:
+
+  ```c
+  ioctl(vt, KDSKBMODE, K_OFF);        /* keyboard off   */
+  ioctl(vt, KDSETMODE, KD_GRAPHICS);  /* console blanks */
+  ioctl(vt, VT_SETMODE, &mode);       /* VT_PROCESS     */
+  ```
+
+  So initializing samvada muted the user's console **before any
+  device was requested**, and left it muted if the subsequent
+  `TakeDevice` failed. The concrete path for the only consumer:
+  mabda calls `samvada_shim_init()` at startup, its logind attempt
+  can return "unavailable" and fall back to kiosk, and samvada
+  stays initialized — console dead for the life of the process.
+
+  **Session control is now scoped to device ownership**:
+  `samvada_init()` no longer takes it (it still validates the slot,
+  so a pre-0.5.1 backend fails loudly at init);
+  `samvada_session_take_device()` acquires it lazily on the first
+  take and hands it straight back if that take fails;
+  `samvada_session_release_device()` drops it when the **last**
+  device is released, so logind's `session_restore_vt()` returns
+  the console immediately; `samvada_release()` drops it if held.
+
+  **Why it was not caught in 0.5.1**: `session_prepare_vt()` opens
+  with `if (s->vtnr < 1) return 0;`, and every session on the audit
+  host is seatless (`vtnr == 0`). The defect could not reproduce in
+  the only environment available — the same shape as CRIT-1 itself.
+
+### Added
+- [`docs/adr/0004-…`](docs/adr/0004-session-control-lifecycle-and-signal-visibility.md)
+  — the N0 decision, in two parts: the control lifecycle above, and
+  a ratification that **samvada does not deliver `PauseDevice` /
+  `ResumeDevice` in the 0.x line**. That is now a documented
+  property rather than the gap the 0.5.1 audit filed as MED-7.
+- 31 new asserts (131 → 162), each mutation-proven: reverting any
+  part of the control lifecycle fails the suite. Pins cover init
+  *not* taking control, lazy acquisition, control returned on a
+  failed take, control *kept* when another device is still held,
+  and control dropped on last release.
+
+### Changed
+- Roadmap N-lane renumbered: 0.5.2 was consumed by the cyrius 6.6.2
+  toolchain patch, so N0 ships as **0.6.0** and every later
+  milestone shifts up one minor (N1 → 0.7.0 … N6 → 0.11.0).
+- `samvada_version()` packed triple `(0,5,2)` → `(0,6,0)`.
+
+### Notes
+- **What we accept, stated plainly.** VT switching is not supported
+  while a device is held: the consumer is not told the device was
+  paused and will draw to a revoked fd until it stops. And
+  `ResumeDevice`'s replacement fd is dropped, so after a
+  pause/resume cycle the consumer's fd is stale. Supported usage is
+  take-hold-release within one session activation.
+- **Findings that made deferring signal delivery the right call**,
+  all verified against systemd v261 source rather than the man page
+  (which is wrong about the timeout):
+  `PauseDevice("pause")` — the only type requiring an ack — is
+  emitted solely from the no-VT branch of `session_activate()`, so
+  a VT seat receives `"force"`, which needs no reply; `struct Seat`
+  has no timer at all, and `session_leave_vt()` acknowledges VT
+  switches unconditionally, so nothing waits on us; and
+  `ResumeDevice` hands back a *new* fd, which means a "notify me"
+  contract would be actively misleading without an fd-handoff path.
+- **Recorded for whoever revisits this**: the signals are *unicast*
+  (`sd_bus_message_set_destination` to the controller's unique
+  name), so dbus-broker routes them with **no `AddMatch`** — a
+  future implementation needs only a local filter, and can use a
+  **C** filter in the shim rather than the Cyrius-fnptr-as-
+  `sd_bus_message_handler_t` path that has never executed.
+
 ## [0.5.2] — 2026-09-09
 
 Toolchain patch. Pinned Cyrius bumped `6.6.1` → `6.6.2`, which
