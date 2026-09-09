@@ -1,0 +1,216 @@
+# @internal — native-dbus low-level syscall + SCM_RIGHTS layer
+# dbus_sys.cyr — the first module of the native Cyrius dbus backend
+# (N1, ADR-0003). It does exactly one thing the C shim currently
+# does for us: receive a file descriptor over a unix socket via
+# `SCM_RIGHTS` ancillary data.
+#
+# Why this is first: proposal 0001 rates fd passing the only
+# Low-confidence module of the pivot, and the fallback is cheap
+# ONLY while nothing is built on top of it. So it is proven before
+# a single dbus byte exists.
+#
+# Not derived from the kernel ABI by hand — diffed against working
+# in-language implementations:
+#   kybernet/src/lib/notify.cyr:182-235  (receive walk, MSG_CTRUNC + bounds)
+#   argonaut/src/notify.cyr:176-207      (receive walk, MSG_DONTWAIT)
+#   cyrius-doom/src/platform/wayland/client.cyr:206-228 (send side)
+# Every layout constant below was then re-confirmed against glibc
+# headers on x86_64 (offsetof/sizeof/CMSG_*), and is pinned by
+# tests/samvada.tcyr so a silent ABI drift fails at CPU-test time.
+#
+# NOT REENTRANT, by construction. `var buf[N]` inside a fn is
+# STATIC data in Cyrius, not stack — consecutive calls share and
+# clobber it. samvada is single-threaded by design (see
+# public-api.md §Threading), so the scratch below is file-scope and
+# reused deliberately rather than accidentally.
+
+# ---- struct layouts (LP64; identical on x86_64 and aarch64) ----
+# struct iovec  { void *iov_base@0; size_t iov_len@8; }            16 bytes
+# struct msghdr { name@0 namelen@8 iov@16 iovlen@24
+#                 control@32 controllen@40 flags@48 }              56 bytes
+# struct cmsghdr{ size_t cmsg_len@0; int level@8; int type@12; }    16 bytes
+#                 followed by data at +16
+fn dbus_sys_iovec_size()    { return 16; }
+fn dbus_sys_msghdr_size()   { return 56; }
+fn dbus_sys_cmsghdr_size()  { return 16; }
+fn dbus_sys_cmsg_data_off() { return 16; }
+
+# CMSG_LEN(4) = cmsghdr(16) + 4 = 20  — the value that goes in cmsg_len
+# CMSG_SPACE(4) = 16 + align8(4) = 24 — the buffer size to reserve
+fn dbus_sys_cmsg_len_1fd()   { return 20; }
+fn dbus_sys_cmsg_space_1fd() { return 24; }
+
+# ---- constants ----
+fn dbus_sys_af_unix()     { return 1; }
+fn dbus_sys_sock_stream() { return 1; }
+fn dbus_sys_sol_socket()  { return 1; }
+fn dbus_sys_scm_rights()  { return 1; }
+fn dbus_sys_msg_ctrunc()  { return 8; }
+# MSG_CMSG_CLOEXEC — the received fd arrives with FD_CLOEXEC already
+# set, so it cannot leak across an execve. This is the receive-side
+# counterpart of the F_DUPFD_CLOEXEC fix in the C shim (0.5.1 MED-3);
+# doing it here means the native backend never has the window the
+# shim had to close by hand.
+fn dbus_sys_msg_cmsg_cloexec() { return 1073741824; }
+
+# ---- arch-selected syscall numbers ----
+# sendmsg/recvmsg are NOT in the same numeric slot across arches, and
+# getting this wrong is silent: on aarch64, 46 is `ftruncate`, so a
+# hardcoded x86_64 number does not fail — it truncates a file to a
+# garbage length. (cyrius-doom hardcodes `WL_SYS_SENDMSG = 46` with no
+# aarch64 branch and carries exactly that latent bug.)
+#
+# `sys_recvmsg` from the stdlib already resolves SYS_RECVMSG per-arch,
+# so it is used directly and this fn exists only to PIN the number the
+# tests assert against.
+fn dbus_sys_recvmsg_nr() {
+    #ifdef CYRIUS_ARCH_AARCH64
+    return 212;
+    #endif
+    return 47;
+}
+
+# ---- scratch (file-scope; see the non-reentrancy note above) ----
+var _dbus_iov  = 0;   # 16 bytes
+var _dbus_mh   = 0;   # 56 bytes
+var _dbus_ctrl = 0;   # 24 bytes (CMSG_SPACE(1 fd))
+var _dbus_sys_ready = 0;
+
+fn _dbus_sys_init() {
+    if (_dbus_sys_ready != 0) { return 0; }
+    _dbus_iov = alloc(dbus_sys_iovec_size());
+    if (_dbus_iov == 0) { return -12; }
+    _dbus_mh = alloc(dbus_sys_msghdr_size());
+    if (_dbus_mh == 0) { return -12; }
+    _dbus_ctrl = alloc(dbus_sys_cmsg_space_1fd());
+    if (_dbus_ctrl == 0) { return -12; }
+    _dbus_sys_ready = 1;
+    return 0;
+}
+
+fn _dbus_zero(p, n) {
+    var i = 0;
+    while (i < n) { store64(p + i, 0); i = i + 8; }
+    return 0;
+}
+
+# Extract a single SCM_RIGHTS descriptor from a control buffer.
+#
+# Split out from dbus_sys_recv_fd deliberately: the syscall half
+# cannot be driven through its own error paths from a test (the
+# kernel validates ancillary data before we ever see it, so a
+# forged cmsg never arrives), while the PARSING half is a pure
+# byte transform and every guard in it is reachable with a
+# hand-built buffer. This is the same "most of it needs no dbus"
+# principle the marshaller milestones rest on — applied here so the
+# guards are proven rather than merely present.
+#
+#   ctrl     — the control buffer recvmsg filled
+#   ctrllen  — msghdr.msg_controllen AFTER the call
+#   fd_out   — receives the fd, or is left untouched if none
+#
+#   returns >= 0  an fd was extracted and stored; the value is the
+#                  number of EXTRA descriptors that arrived in the
+#                  same cmsg and were closed here (normally 0)
+#           -2     no usable SCM_RIGHTS cmsg present
+fn dbus_sys_parse_scm_rights(ctrl, ctrllen, fd_out) {
+    if (ctrl == 0)   { return -2; }
+    if (fd_out == 0) { return -2; }
+    # Subsumed by the `clen > ctrllen` check below (mutation-tested:
+    # removing this alone does not fail the suite), but kept as a
+    # cheap early-out that does not depend on the header being
+    # readable at all.
+    if (ctrllen < dbus_sys_cmsg_len_1fd()) { return -2; }
+
+    var clen = load64(ctrl + 0);
+    if (clen < dbus_sys_cmsg_len_1fd()) { return -2; }
+    # A cmsg_len larger than the buffer the kernel says it filled
+    # would read past the end.
+    if (clen > ctrllen) { return -2; }
+    var level = load64(ctrl + 8) & 0xFFFFFFFF;
+    if (level != dbus_sys_sol_socket()) { return -2; }
+    var ctype = load64(ctrl + 12) & 0xFFFFFFFF;
+    if (ctype != dbus_sys_scm_rights()) { return -2; }
+
+    # The payload is an int32 fd. Read the low 32 bits and sign-extend
+    # the same way the C-shim path does, so a kernel-impossible
+    # negative cannot read as a huge positive fd.
+    var got = load64(ctrl + dbus_sys_cmsg_data_off()) & 0xFFFFFFFF;
+    var neg = got & 0x80000000;
+    if (neg != 0) { got = got - 0x100000000; }
+    store64(fd_out, got);
+
+    # A cmsg can carry MORE than one descriptor, and the kernel has
+    # already installed every one of them in our table — returning
+    # only the first leaks the rest for the process lifetime.
+    #
+    # This is not hypothetical padding-paranoia: CMSG_SPACE(1 fd) and
+    # CMSG_SPACE(2 fds) are BOTH 24 bytes (16 + align8(4) == 16 +
+    # align8(8)), so a two-fd message fits a one-fd buffer exactly and
+    # arrives WITHOUT MSG_CTRUNC. samvada only ever expects one fd
+    # (TakeDevice's reply), so close the surplus rather than hand back
+    # a descriptor the caller never asked for.
+    var extra = 0;
+    var off = dbus_sys_cmsg_data_off() + 4;
+    while (off + 4 <= clen) {
+        var x = load64(ctrl + off) & 0xFFFFFFFF;
+        var xneg = x & 0x80000000;
+        if (xneg != 0) { x = x - 0x100000000; }
+        if (x >= 0) { sys_close(x); }
+        extra = extra + 1;
+        off = off + 4;
+    }
+    return extra;
+}
+
+# Receive up to `buflen` bytes into `buf`, and a single SCM_RIGHTS fd
+# if one accompanies the message.
+#
+#   returns  >= 0  bytes received; the fd (or -1 if none came) is
+#                  stored at `fd_out` as a full 64-bit word
+#            <  0  negative errno from recvmsg, or:
+#                  -71 (-EPROTO)  ancillary data was TRUNCATED, so a
+#                                 descriptor may have been dropped by
+#                                 the kernel and silently lost
+#
+# The caller owns the fd and must close it.
+fn dbus_sys_recv_fd(fd, buf, buflen, fd_out) {
+    if (buf == 0)      { return -22; }
+    if (buflen <= 0)   { return -22; }
+    if (fd_out == 0)   { return -22; }
+    var rc = _dbus_sys_init();
+    if (rc < 0) { return rc; }
+    store64(fd_out, (0 - 1));
+
+    store64(_dbus_iov + 0, buf);
+    store64(_dbus_iov + 8, buflen);
+
+    # Zero the control buffer every call. Belt-and-braces: the
+    # ctrllen/cmsg_len/level/type guards below all run BEFORE
+    # CMSG_DATA is read, so a stale fd cannot actually surface
+    # through them — mutation-tested, removing this zeroing alone
+    # does not fail the suite. Kept because it costs two
+    # instructions and makes the buffer's state independent of the
+    # guard ordering the native marshaller will be extending.
+    _dbus_zero(_dbus_ctrl, dbus_sys_cmsg_space_1fd());
+    _dbus_zero(_dbus_mh, dbus_sys_msghdr_size());
+    store64(_dbus_mh + 16, _dbus_iov);
+    store64(_dbus_mh + 24, 1);
+    store64(_dbus_mh + 32, _dbus_ctrl);
+    store64(_dbus_mh + 40, dbus_sys_cmsg_space_1fd());
+
+    var n = sys_recvmsg(fd, _dbus_mh, dbus_sys_msg_cmsg_cloexec());
+    if (n < 0) { return n; }
+
+    # MSG_CTRUNC means the kernel had more ancillary data than our
+    # buffer held and DROPPED the excess — any fd in the dropped part
+    # is closed by the kernel and gone. Refuse rather than return a
+    # partial success the caller cannot detect.
+    var flags = load64(_dbus_mh + 48) & 0xFFFFFFFF;
+    var trunc = flags & dbus_sys_msg_ctrunc();
+    if (trunc != 0) { return -71; }
+
+    var ctrllen = load64(_dbus_mh + 40);
+    dbus_sys_parse_scm_rights(_dbus_ctrl, ctrllen, fd_out);
+    return n;
+}

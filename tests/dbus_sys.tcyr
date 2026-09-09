@@ -1,0 +1,477 @@
+# N1 — SCM_RIGHTS fd passing, proven over a socketpair.
+#
+# No dbus, no logind, no hardware. The whole point of doing fd
+# passing FIRST (ADR-0003 / roadmap N1) is that it is the one
+# Low-confidence module of the native pivot and it can be proven
+# in isolation, before anything is built on top of it.
+#
+# NOTE this file includes src/dbus_sys.cyr DIRECTLY rather than via
+# src/lib.cyr. dbus_sys is deliberately NOT in `[lib] modules` yet:
+# the roadmap's standing exit criterion for every pre-cutover
+# milestone is that dist/samvada.cyr's exported symbol set does not
+# change, so the native modules stay out of the consumer bundle
+# until the N6 cutover.
+
+include "src/dbus_sys.cyr"
+
+# ---- test-only sendmsg ----
+# samvada NEVER sends an fd in production — the only `h` it handles
+# is on the TakeDevice *reply*, received. So the send side is a
+# harness dependency and lives here, not in src/, and the exported
+# surface does not grow to satisfy a test.
+#
+# The arch split is load-bearing and is the reason this is not
+# copied verbatim from cyrius-doom: doom hardcodes 46, which is
+# sendmsg on x86_64 but **ftruncate** on aarch64 (verified against
+# asm-generic/unistd.h: __NR3264_ftruncate = 46). A hardcoded 46
+# there does not fail loudly on aarch64 — it truncates a file.
+fn t_sendmsg_nr() {
+    #ifdef CYRIUS_ARCH_AARCH64
+    return 211;
+    #endif
+    return 46;
+}
+
+var _t_iov  = 0;
+var _t_mh   = 0;
+var _t_ctrl = 0;
+var _t_byte = 0;
+var _t_ctrl2 = 0;
+
+fn t_send_init() {
+    if (_t_iov != 0) { return 0; }
+    _t_iov  = alloc(16);
+    _t_mh   = alloc(56);
+    _t_ctrl = alloc(24);
+    _t_byte = alloc(8);
+    return 0;
+}
+
+# Send one byte plus one fd over `sock`.
+fn t_send_fd(sock, payload_fd) {
+    t_send_init();
+    store64(_t_byte, 0x42);
+    store64(_t_iov + 0, _t_byte);
+    store64(_t_iov + 8, 1);
+
+    var i = 0;
+    while (i < 24) { store64(_t_ctrl + i, 0); i = i + 8; }
+    store64(_t_ctrl + 0, dbus_sys_cmsg_len_1fd());   # cmsg_len = 20
+    store64(_t_ctrl + 8, dbus_sys_sol_socket());     # level (low 32 bits)
+    store64(_t_ctrl + 12, dbus_sys_scm_rights());    # type  (low 32 bits)
+    store64(_t_ctrl + 16, payload_fd);               # the fd itself
+
+    i = 0;
+    while (i < 56) { store64(_t_mh + i, 0); i = i + 8; }
+    store64(_t_mh + 16, _t_iov);
+    store64(_t_mh + 24, 1);
+    store64(_t_mh + 32, _t_ctrl);
+    store64(_t_mh + 40, dbus_sys_cmsg_space_1fd());
+
+    return syscall(t_sendmsg_nr(), sock, _t_mh, 0);
+}
+
+# Send one byte plus a cmsg of the WRONG type. Used to prove the
+# receive path rejects on cmsg_type rather than blindly reading
+# whatever sits at CMSG_DATA.
+fn t_send_wrong_cmsg(sock) {
+    t_send_init();
+    store64(_t_byte, 0x42);
+    store64(_t_iov + 0, _t_byte);
+    store64(_t_iov + 8, 1);
+    var i = 0;
+    while (i < 24) { store64(_t_ctrl + i, 0); i = i + 8; }
+    store64(_t_ctrl + 0, dbus_sys_cmsg_len_1fd());
+    store64(_t_ctrl + 8, dbus_sys_sol_socket());
+    store64(_t_ctrl + 12, 2);              # SCM_CREDENTIALS, not SCM_RIGHTS
+    store64(_t_ctrl + 16, 0x7FFFFFFF);     # a plausible-looking fd number
+    i = 0;
+    while (i < 56) { store64(_t_mh + i, 0); i = i + 8; }
+    store64(_t_mh + 16, _t_iov);
+    store64(_t_mh + 24, 1);
+    store64(_t_mh + 32, _t_ctrl);
+    store64(_t_mh + 40, dbus_sys_cmsg_space_1fd());
+    return syscall(t_sendmsg_nr(), sock, _t_mh, 0);
+}
+
+# ---- layout pins ----
+# These freeze the ABI the whole native fd path is built on. Every
+# number was confirmed against glibc's own offsetof/sizeof/CMSG_*
+# on x86_64; struct msghdr/iovec/cmsghdr are LP64-identical on
+# aarch64, so one set covers both.
+fn test_dbus_sys_layout() {
+    test_group("dbus_sys: ABI layout pins");
+    assert_eq(dbus_sys_iovec_size(),      16, "sizeof(struct iovec)");
+    assert_eq(dbus_sys_msghdr_size(),     56, "sizeof(struct msghdr)");
+    assert_eq(dbus_sys_cmsghdr_size(),    16, "sizeof(struct cmsghdr)");
+    assert_eq(dbus_sys_cmsg_data_off(),   16, "CMSG_DATA - cmsghdr");
+    assert_eq(dbus_sys_cmsg_len_1fd(),    20, "CMSG_LEN(sizeof int)");
+    assert_eq(dbus_sys_cmsg_space_1fd(),  24, "CMSG_SPACE(sizeof int)");
+    assert_eq(dbus_sys_sol_socket(),       1, "SOL_SOCKET");
+    assert_eq(dbus_sys_scm_rights(),       1, "SCM_RIGHTS");
+    assert_eq(dbus_sys_msg_ctrunc(),       8, "MSG_CTRUNC");
+    assert_eq(dbus_sys_msg_cmsg_cloexec(), 1073741824, "MSG_CMSG_CLOEXEC");
+    assert_eq(dbus_sys_af_unix(),          1, "AF_UNIX");
+    assert_eq(dbus_sys_sock_stream(),      1, "SOCK_STREAM");
+    return 0;
+}
+
+# The syscall numbers are the one thing that is NOT arch-uniform,
+# and getting them wrong is silent rather than loud.
+fn test_dbus_sys_syscall_numbers() {
+    test_group("dbus_sys: arch-selected syscall numbers");
+    #ifdef CYRIUS_ARCH_AARCH64
+    assert_eq(dbus_sys_recvmsg_nr(), 212, "aarch64 recvmsg");
+    assert_eq(t_sendmsg_nr(),        211, "aarch64 sendmsg");
+    assert(t_sendmsg_nr() != 46, "aarch64 sendmsg is NOT 46 (that is ftruncate)");
+    return 0;
+    #endif
+    assert_eq(dbus_sys_recvmsg_nr(), 47, "x86_64 recvmsg");
+    assert_eq(t_sendmsg_nr(),        46, "x86_64 sendmsg");
+    return 0;
+}
+
+# ---- the real thing: an fd crosses a socketpair ----
+fn test_scm_rights_round_trip() {
+    test_group("SCM_RIGHTS: an fd crosses a socketpair intact");
+    var fds = alloc(8);
+    store64(fds, 0);
+    var rc = sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, fds);
+    assert_eq(rc, 0, "socketpair created");
+    var a = load64(fds) & 0xFFFFFFFF;
+    var b = (load64(fds) >> 32) & 0xFFFFFFFF;
+    assert(a > 2, "sock a is a real fd");
+    assert(b > 2, "sock b is a real fd");
+
+    # Send one END OF THE PAIR through the other — a real, open,
+    # statable fd with no filesystem dependency.
+    var pair2 = alloc(8);
+    store64(pair2, 0);
+    assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, pair2), 0,
+      "payload pair created");
+    var payload = load64(pair2) & 0xFFFFFFFF;
+    var payload_peer = (load64(pair2) >> 32) & 0xFFFFFFFF;
+
+    var sent = t_send_fd(a, payload);
+    assert_eq(sent, 1, "sendmsg wrote 1 byte");
+
+    var buf = alloc(64);
+    var out = alloc(8);
+    store64(out, 0);
+    var got = dbus_sys_recv_fd(b, buf, 64, out);
+    assert_eq(got, 1, "recvmsg read 1 byte");
+    var rfd = load64(out);
+    assert(rfd > 2, "an fd was received");
+    assert(rfd != payload, "and it is a NEW descriptor number");
+
+    # Prove it is the SAME open file: fstat dev/ino must match.
+    # st_dev@0 and st_ino@8 are at these offsets on x86_64 AND
+    # aarch64 (only st_mode differs between them), so no arch split.
+    var s1 = alloc(160);
+    var s2 = alloc(160);
+    assert_eq(sys_fstat(payload, s1), 0, "fstat original");
+    assert_eq(sys_fstat(rfd, s2), 0, "fstat received");
+    assert_eq(load64(s1 + 0), load64(s2 + 0), "st_dev matches");
+    assert_eq(load64(s1 + 8), load64(s2 + 8), "st_ino matches — same open file");
+
+    # MSG_CMSG_CLOEXEC must have taken effect. Assert it rather than
+    # trusting the flag: this is the receive-side counterpart of the
+    # 0.5.1 F_DUPFD_CLOEXEC fix, and a silently-ignored flag would
+    # leak a DRM master fd across execve.
+    var fl = syscall(SYS_FCNTL, rfd, 1, 0);      # F_GETFD
+    assert(fl >= 0, "F_GETFD succeeded");
+    assert_eq(fl & 1, 1, "FD_CLOEXEC is set on the received fd");
+
+    sys_close(rfd); sys_close(payload); sys_close(payload_peer);
+    sys_close(a); sys_close(b);
+    return 0;
+}
+
+# ---- guards ----
+fn test_dbus_sys_rejects_bad_args() {
+    test_group("dbus_sys: argument guards");
+    var out = alloc(8);
+    assert_eq(dbus_sys_recv_fd(0, 0, 64, out),   -22, "null buf rejected");
+    assert_eq(dbus_sys_recv_fd(0, 1024, 0, out), -22, "zero buflen rejected");
+    assert_eq(dbus_sys_recv_fd(0, 1024, (0 - 1), out), -22, "negative buflen rejected");
+    assert_eq(dbus_sys_recv_fd(0, 1024, 64, 0),  -22, "null fd_out rejected");
+    return 0;
+}
+
+# A message with NO ancillary data must report "no fd" via fd_out,
+# not leave stale bytes there, and must still return the byte count.
+fn test_recv_without_fd_reports_none() {
+    test_group("recv with no SCM_RIGHTS reports no fd");
+    var fds = alloc(8);
+    store64(fds, 0);
+    assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, fds), 0, "pair");
+    var a = load64(fds) & 0xFFFFFFFF;
+    var b = (load64(fds) >> 32) & 0xFFFFFFFF;
+
+    var msg = alloc(8);
+    store64(msg, 0x41);
+    assert_eq(sys_write(a, msg, 1), 1, "plain write");
+
+    var buf = alloc(64);
+    var out = alloc(8);
+    store64(out, 0x5A5A5A5A);                 # poison, must be overwritten
+    var n = dbus_sys_recv_fd(b, buf, 64, out);
+    assert_eq(n, 1, "one byte read");
+    assert_eq(load64(out), (0 - 1), "fd_out is -1, not the poison value");
+
+    sys_close(a); sys_close(b);
+    return 0;
+}
+
+# The receive path must reject ancillary data that is not
+# SCM_RIGHTS rather than reading CMSG_DATA regardless of type. A
+# missing type check would hand the caller 0x7FFFFFFF as an "fd".
+fn test_rejects_wrong_cmsg_type() {
+    test_group("recv rejects a non-SCM_RIGHTS cmsg");
+    var fds = alloc(8);
+    store64(fds, 0);
+    assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, fds), 0, "pair");
+    var a = load64(fds) & 0xFFFFFFFF;
+    var b = (load64(fds) >> 32) & 0xFFFFFFFF;
+
+    var sent = t_send_wrong_cmsg(a);
+    var buf = alloc(64);
+    var out = alloc(8);
+    store64(out, 0x5A5A5A5A);
+
+    # The kernel validates SCM_CREDENTIALS and refuses a forged one, so
+    # sendmsg may fail outright. Only read if something was actually
+    # queued — a blocking recvmsg on an empty queue hangs the suite,
+    # which is exactly what the first draft of this test did.
+    if (sent == 1) {
+        var n = dbus_sys_recv_fd(b, buf, 64, out);
+        assert_eq(n, 1, "byte still delivered");
+        assert_eq(load64(out), (0 - 1),
+          "fd_out is -1 — the wrong-type payload was NOT read as an fd");
+        assert(load64(out) != 0x7FFFFFFF, "the bogus payload never became an fd");
+    }
+    if (sent != 1) {
+        assert(sent < 0, "kernel refused the forged cmsg (also acceptable)");
+    }
+    sys_close(a); sys_close(b);
+    return 0;
+}
+
+# Send one byte plus TWO fds. The receiver reserves CMSG_SPACE for
+# one, so the kernel truncates and sets MSG_CTRUNC — and the fd in
+# the dropped part is closed by the kernel and gone. This is the
+# only way to reach that path, and it matters: silently returning
+# the first fd would hide that a descriptor was lost.
+fn t_send_two_fds(sock, fd_a, fd_b) {
+    t_send_init();
+    if (_t_ctrl2 == 0) { _t_ctrl2 = alloc(32); }
+    store64(_t_byte, 0x42);
+    store64(_t_iov + 0, _t_byte);
+    store64(_t_iov + 8, 1);
+    var i = 0;
+    while (i < 32) { store64(_t_ctrl2 + i, 0); i = i + 8; }
+    store64(_t_ctrl2 + 0, 24);                     # CMSG_LEN(2 * int) = 16 + 8
+    store64(_t_ctrl2 + 8, dbus_sys_sol_socket());
+    store64(_t_ctrl2 + 12, dbus_sys_scm_rights());
+    store64(_t_ctrl2 + 16, fd_a);                  # two int32 fds, packed
+    store64(_t_ctrl2 + 20, fd_b);
+    i = 0;
+    while (i < 56) { store64(_t_mh + i, 0); i = i + 8; }
+    store64(_t_mh + 16, _t_iov);
+    store64(_t_mh + 24, 1);
+    store64(_t_mh + 32, _t_ctrl2);
+    store64(_t_mh + 40, 32);                       # CMSG_SPACE(2 * int)
+    return syscall(t_sendmsg_nr(), sock, _t_mh, 0);
+}
+
+fn test_msg_ctrunc_is_refused() {
+    test_group("a surplus SCM_RIGHTS fd is closed, not leaked");
+    var fds = alloc(8);
+    store64(fds, 0);
+    assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, fds), 0, "pair");
+    var a = load64(fds) & 0xFFFFFFFF;
+    var b = (load64(fds) >> 32) & 0xFFFFFFFF;
+    var p2 = alloc(8);
+    store64(p2, 0);
+    assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, p2), 0, "payload pair");
+    var f1 = load64(p2) & 0xFFFFFFFF;
+    var f2 = (load64(p2) >> 32) & 0xFFFFFFFF;
+
+    var sent = t_send_two_fds(a, f1, f2);
+    var buf = alloc(64);
+    var out = alloc(8);
+    store64(out, (0 - 1));
+    if (sent == 1) {
+        # CMSG_SPACE(1 fd) and CMSG_SPACE(2 fds) are BOTH 24 bytes, so
+        # two fds fit our one-fd buffer exactly and arrive with NO
+        # MSG_CTRUNC. The surplus descriptor is real and installed; the
+        # module must close it rather than leak it.
+        var n = dbus_sys_recv_fd(b, buf, 64, out);
+        assert_eq(n, 1, "the byte was delivered");
+        var rfd = load64(out);
+        assert(rfd > 2, "the first fd was handed back");
+
+        # The kernel installs a cmsg's descriptors at the lowest free
+        # numbers, in order, so the surplus lands at rfd + 1. Probe it
+        # DIRECTLY: fstat must fail with -EBADF because the module
+        # closed it. (A lowest-free-fd probe cannot see this — closing
+        # rfd frees a lower number, so the probe reports the same value
+        # whether or not rfd+1 leaked.)
+        var st = alloc(160);
+        var surplus = rfd + 1;
+        var alive = sys_fstat(surplus, st);
+        assert(alive < 0, "the SURPLUS fd is closed, not leaked");
+        sys_close(rfd);
+    }
+    if (sent != 1) { assert(sent < 0, "kernel refused the two-fd send"); }
+    sys_close(f1); sys_close(f2); sys_close(a); sys_close(b);
+    return 0;
+}
+
+# ---- the parser guards, driven directly ----
+# The kernel validates ancillary data before recvmsg returns, so a
+# forged cmsg can never arrive through a socket — which means these
+# guards are unreachable from a round-trip test and would ship
+# unproven. Driving the parser directly is what makes them real.
+fn t_ctrl_build(ctrl, clen, level, ctype, payload) {
+    var i = 0;
+    while (i < 32) { store64(ctrl + i, 0); i = i + 8; }
+    store64(ctrl + 0, clen);
+    store64(ctrl + 8, level);
+    store64(ctrl + 12, ctype);
+    store64(ctrl + 16, payload);
+    return 0;
+}
+
+fn test_parser_guards() {
+    test_group("cmsg parser: every guard is reachable and rejects");
+    var ctrl = alloc(32);
+    var out  = alloc(8);
+    var GOOD = dbus_sys_cmsg_len_1fd();
+
+    # the accepting case first, so the rejections mean something
+    store64(out, 0);
+    t_ctrl_build(ctrl, GOOD, dbus_sys_sol_socket(), dbus_sys_scm_rights(), 9);
+    assert_eq(dbus_sys_parse_scm_rights(ctrl, 24, out), 0, "well-formed cmsg accepted");
+    assert_eq(load64(out), 9, "fd extracted");
+
+    # wrong cmsg_type (SCM_CREDENTIALS shape)
+    store64(out, (0 - 1));
+    t_ctrl_build(ctrl, GOOD, dbus_sys_sol_socket(), 2, 0x7FFFFFFF);
+    assert_eq(dbus_sys_parse_scm_rights(ctrl, 24, out), -2, "wrong cmsg_type rejected");
+    assert_eq(load64(out), (0 - 1), "fd_out untouched by a rejected cmsg");
+
+    # wrong level
+    t_ctrl_build(ctrl, GOOD, 41, dbus_sys_scm_rights(), 0x7FFFFFFF);
+    assert_eq(dbus_sys_parse_scm_rights(ctrl, 24, out), -2, "wrong cmsg_level rejected");
+
+    # cmsg_len below the floor — a truncated header
+    t_ctrl_build(ctrl, 12, dbus_sys_sol_socket(), dbus_sys_scm_rights(), 7);
+    assert_eq(dbus_sys_parse_scm_rights(ctrl, 24, out), -2, "short cmsg_len rejected");
+
+    # cmsg_len claiming MORE than the kernel says it filled — an
+    # over-read if believed
+    t_ctrl_build(ctrl, 4096, dbus_sys_sol_socket(), dbus_sys_scm_rights(), 7);
+    assert_eq(dbus_sys_parse_scm_rights(ctrl, 24, out), -2, "cmsg_len > controllen rejected");
+
+    # controllen below the floor
+    t_ctrl_build(ctrl, GOOD, dbus_sys_sol_socket(), dbus_sys_scm_rights(), 7);
+    assert_eq(dbus_sys_parse_scm_rights(ctrl, 8, out), -2, "short controllen rejected");
+    assert_eq(dbus_sys_parse_scm_rights(ctrl, 0, out), -2, "zero controllen rejected");
+
+    # null arguments
+    assert_eq(dbus_sys_parse_scm_rights(0, 24, out), -2, "null ctrl rejected");
+    assert_eq(dbus_sys_parse_scm_rights(ctrl, 24, 0), -2, "null fd_out rejected");
+    return 0;
+}
+
+# The fd is an int32 on the wire. Sign-extension has to be explicit
+# because Cyrius `>>` is logical and there is no unsigned type, so a
+# kernel-impossible negative must not read back as a huge positive.
+fn test_parser_sign_extension() {
+    test_group("cmsg parser: int32 fd sign-extension");
+    var ctrl = alloc(32);
+    var out  = alloc(8);
+    var L = dbus_sys_cmsg_len_1fd();
+    t_ctrl_build(ctrl, L, dbus_sys_sol_socket(), dbus_sys_scm_rights(), 0);
+    assert_eq(dbus_sys_parse_scm_rights(ctrl, 24, out), 0, "fd 0 parsed");
+    assert_eq(load64(out), 0, "fd 0");
+    t_ctrl_build(ctrl, L, dbus_sys_sol_socket(), dbus_sys_scm_rights(), 0x7FFFFFFF);
+    dbus_sys_parse_scm_rights(ctrl, 24, out);
+    assert_eq(load64(out), 2147483647, "INT32_MAX");
+    t_ctrl_build(ctrl, L, dbus_sys_sol_socket(), dbus_sys_scm_rights(), 0xFFFFFFFF);
+    dbus_sys_parse_scm_rights(ctrl, 24, out);
+    assert_eq(load64(out), (0 - 1), "0xFFFFFFFF -> -1, not 4294967295");
+    t_ctrl_build(ctrl, L, dbus_sys_sol_socket(), dbus_sys_scm_rights(), 0x80000000);
+    dbus_sys_parse_scm_rights(ctrl, 24, out);
+    assert_eq(load64(out), (0 - 2147483648), "INT32_MIN");
+    return 0;
+}
+
+# fd-leak regression pin. The cmsg path is exactly where descriptors
+# go missing: a dropped fd is invisible until the process hits
+# RLIMIT_NOFILE. Run the round trip many times and assert the
+# allocator hands back the SAME fd numbers at the end as at the
+# start — which it cannot do if any were leaked.
+fn test_scm_rights_no_fd_leak() {
+    test_group("SCM_RIGHTS: 200 round trips leak no descriptors");
+    var probe = alloc(8);
+    store64(probe, 0);
+    assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, probe), 0, "probe");
+    var base = load64(probe) & 0xFFFFFFFF;
+    sys_close(base);
+    sys_close((load64(probe) >> 32) & 0xFFFFFFFF);
+
+    var buf = alloc(64);
+    var out = alloc(8);
+    var fds = alloc(8);
+    var pair2 = alloc(8);
+    var i = 0;
+    var failures = 0;
+    while (i < 200) {
+        store64(fds, 0);
+        var r1 = sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, fds);
+        if (r1 != 0) { failures = failures + 1; }
+        var a = load64(fds) & 0xFFFFFFFF;
+        var b = (load64(fds) >> 32) & 0xFFFFFFFF;
+        store64(pair2, 0);
+        sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, pair2);
+        var p = load64(pair2) & 0xFFFFFFFF;
+        var pp = (load64(pair2) >> 32) & 0xFFFFFFFF;
+        t_send_fd(a, p);
+        store64(out, 0);
+        dbus_sys_recv_fd(b, buf, 64, out);
+        var rfd = load64(out);
+        if (rfd > 2) { sys_close(rfd); }
+        sys_close(p); sys_close(pp); sys_close(a); sys_close(b);
+        i = i + 1;
+    }
+    assert_eq(failures, 0, "every socketpair in the loop succeeded");
+
+    store64(probe, 0);
+    assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, probe), 0,
+      "probe pair after the loop");
+    var after = load64(probe) & 0xFFFFFFFF;
+    assert_eq(after, base, "fd numbers unchanged after 200 round trips — nothing leaked");
+    sys_close(after);
+    sys_close((load64(probe) >> 32) & 0xFFFFFFFF);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_dbus_sys_layout();
+    test_dbus_sys_syscall_numbers();
+    test_dbus_sys_rejects_bad_args();
+    test_scm_rights_round_trip();
+    test_recv_without_fd_reports_none();
+    test_rejects_wrong_cmsg_type();
+    test_msg_ctrunc_is_refused();
+    test_parser_guards();
+    test_parser_sign_extension();
+    test_scm_rights_no_fd_leak();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

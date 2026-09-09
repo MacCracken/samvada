@@ -114,6 +114,7 @@ it.
 | **P(-1) audit** | 0.5.1 | ✅ 2026-09-09. 2 CRITICAL, 10 MEDIUM, 16 LOW fixed; tests 38 → 114. |
 | — Toolchain patch | 0.5.2 | ✅ cyrius 6.6.2, carrying samvada's own upstream symbol-visibility fix. |
 | **N0** — signal-visibility contract | 0.6.0 | ✅ 2026-09-09. ADR-0004; `TakeControl` scoped to device ownership (0.5.1 console regression); no new slot. |
+| **N1** — SCM_RIGHTS fd passing | 0.7.0 | ✅ 2026-09-09. `src/dbus_sys.cyr`; fd proven across a socketpair; surplus-fd leak found and fixed. |
 
 **M2 — "generalize beyond logind"** (Properties, Introspectable,
 session bus, generic method dispatch, async variants) is
@@ -175,7 +176,7 @@ slots stay reserved. See ADR-0004 for the evidence.
   the bus close, but `public-api.md` tells the caller *"the fd's
   lifetime is the caller's"*. Document the real contract.
 
-### N1 — SCM_RIGHTS fd passing, before any dbus byte (0.7.0)
+### N1 — SCM_RIGHTS fd passing, before any dbus byte (0.7.0) — ✅ SHIPPED
 
 **Why first among the build milestones.** It is the one module
 proposal 0001 rates Low-confidence, and the fallback is cheap
@@ -215,8 +216,19 @@ the milestone drops from 2–3 sessions to ~1.
   `FD_CLOEXEC` actually set rather than trusting
   `MSG_CMSG_CLOEXEC`. Run the round-trip 1000× and assert the
   process descriptor count is unchanged — an fd-leak pin.
-- **Exit**: an fd crosses a socketpair and is provably the same
-  file; layout pins green on x86_64 **and** aarch64.
+- **Exit**: ✅ an fd crosses a socketpair and is provably the same
+  open file (`fstat` dev/ino); layout pins green; `FD_CLOEXEC`
+  asserted, not trusted; 200 round trips leak nothing.
+  `src/dbus_sys.cyr` + `tests/dbus_sys.tcyr` (63 asserts).
+  Bundle unchanged — still 26 exported fns, `dbus_sys` excluded
+  until N6.
+- **What it found**: `CMSG_SPACE(1 fd)` and `CMSG_SPACE(2 fds)` are
+  both 24 bytes, so a two-fd message fits a one-fd buffer with no
+  `MSG_CTRUNC` — the first draft leaked the surplus descriptor.
+  Fixed and pinned.
+- **Risk re-rating confirmed**: Low → Medium was right. The
+  sibling references made this ~1 session rather than 2-3, and the
+  module is ~90 LoC rather than the estimated 80-130.
 
 ### N2 — Capture the golden corpus (0.7.1)
 

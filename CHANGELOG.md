@@ -4,6 +4,82 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-09
+
+**N1 — SCM_RIGHTS fd passing, proven before any dbus byte exists.**
+The first executable module of the native Cyrius backend
+([ADR-0003](docs/adr/0003-native-cyrius-dbus.md)). Deliberately
+first: proposal 0001 rates fd passing the pivot's only
+Low-confidence module, and its fallback is cheap *only* while
+nothing is built on top of it.
+
+No public API change, and **no change to the consumer bundle** —
+`dist/samvada.cyr` still exports exactly 26 fns and does not
+contain `dbus_sys`. The native modules stay out of `[lib] modules`
+until the N6 cutover, which is the roadmap's standing exit
+criterion for every pre-cutover milestone.
+
+### Added
+- **`src/dbus_sys.cyr`** — receives a file descriptor over a unix
+  socket via `SCM_RIGHTS`, in pure Cyrius. Two entry points:
+  `dbus_sys_recv_fd()` (the `recvmsg` half) and
+  `dbus_sys_parse_scm_rights()` (the cmsg-walk half).
+
+  The split is not cosmetic. The kernel validates ancillary data
+  before `recvmsg` returns, so a malformed cmsg can never arrive
+  through a real socket — every bounds and type guard would have
+  shipped **unreachable from any test**. Splitting the pure byte
+  transform out makes all of them provable with a hand-built
+  buffer, which is the same "most of it needs no dbus" principle
+  the later marshaller milestones rest on.
+- **`tests/dbus_sys.tcyr`** — 63 asserts, no bus, no logind, no
+  hardware. An fd crosses a real `socketpair` and is proven to be
+  the *same open file* by `fstat` dev/ino; `FD_CLOEXEC` is asserted
+  via `F_GETFD` rather than trusted; every ABI constant is pinned;
+  and 200 round trips leave the descriptor table unchanged.
+
+### Fixed (found by writing the tests)
+- **A surplus `SCM_RIGHTS` descriptor was silently leaked.**
+  `CMSG_SPACE(1 fd)` and `CMSG_SPACE(2 fds)` are **both 24 bytes**
+  (`16 + align8(4)` == `16 + align8(8)`), so a two-fd message fits
+  a one-fd control buffer *exactly* and arrives with **no
+  `MSG_CTRUNC`**. The first draft returned the first descriptor and
+  left the second installed in the process's table for its
+  lifetime. The parser now walks the remaining `cmsg_len` and
+  closes every surplus fd. Pinned by probing `rfd + 1` with `fstat`
+  and requiring `-EBADF`.
+
+### Notes
+- **Diffed, not derived.** The cmsg layout was taken from working
+  in-language implementations —
+  `kybernet/src/lib/notify.cyr:182-235` (receive walk with
+  `MSG_CTRUNC` and bounds checks),
+  `argonaut/src/notify.cyr:176-207`,
+  `cyrius-doom/.../client.cyr:206-228` (send side) — then every
+  constant was re-confirmed against glibc's own
+  `offsetof`/`sizeof`/`CMSG_*` on x86_64. This is why proposal
+  0001's Low confidence rating for this module was too pessimistic.
+- **The aarch64 trap is real and is avoided.** `cyrius-doom`
+  hardcodes `WL_SYS_SENDMSG = 46` with no aarch64 branch. 46 is
+  `sendmsg` on x86_64 but **`ftruncate`** on aarch64 (verified:
+  `__NR3264_ftruncate = 46` in `asm-generic/unistd.h`), so copying
+  it verbatim would not fail loudly there — it would truncate a
+  file. samvada arch-selects (`sendmsg` 46/211, `recvmsg` 47/212)
+  and pins both numbers in a test.
+- **`MSG_CMSG_CLOEXEC` is used on receive**, so the descriptor
+  arrives with `FD_CLOEXEC` already set. That is the receive-side
+  counterpart of 0.5.1's `F_DUPFD_CLOEXEC` fix (MED-3) — the
+  native backend never has the window the C shim had to close by
+  hand.
+- **Non-reentrant by construction, and stated rather than
+  discovered**: the scratch is file-scope because `var buf[N]`
+  inside a Cyrius fn is STATIC data, not stack. samvada is
+  single-threaded by design.
+- Every guard is mutation-proven: removing the type check, the
+  level check, either `cmsg_len` bound, the sign-extension,
+  `MSG_CMSG_CLOEXEC`, the surplus-fd close, or corrupting
+  `CMSG_DATA`'s offset each fails the suite.
+
 ## [0.6.0] — 2026-09-09
 
 **N0 — the first milestone of the road to native Cyrius dbus.**

@@ -5,6 +5,24 @@
 
 ## Version
 
+**0.7.0** — 2026-09-09. **N1** — the first executable module of the
+native Cyrius dbus backend. `src/dbus_sys.cyr` receives an fd over
+a unix socket via `SCM_RIGHTS`, proven over a real `socketpair`
+with no bus, no logind and no hardware: the received descriptor is
+shown to be the *same open file* by `fstat` dev/ino, `FD_CLOEXEC`
+is asserted via `F_GETFD`, and 200 round trips leak nothing.
+Writing the tests found a real defect — `CMSG_SPACE(1 fd)` and
+`CMSG_SPACE(2 fds)` are both 24 bytes, so a two-fd message fits a
+one-fd buffer without `MSG_CTRUNC` and the surplus descriptor was
+silently leaked; the parser now closes it. The cmsg walk is split
+from the syscall so every guard is reachable from a test (the
+kernel validates ancillary data before `recvmsg` returns, so a
+forged cmsg can never arrive through a socket). No public API
+change and **no bundle change** — still 26 exported fns, with
+`dbus_sys` deliberately out of `[lib] modules` until the N6
+cutover. 63 new asserts (225 total across both suites), every
+guard mutation-proven.
+
 **0.6.0** — 2026-09-09. **N0** — the first milestone of the road to
 native Cyrius dbus. Ratifies
 [ADR-0004](../adr/0004-session-control-lifecycle-and-signal-visibility.md)
@@ -210,7 +228,7 @@ Live-bus end-to-end validation pending mabda's
   helpers.
 - `src/samvada.cyr` — public API surface (v0.x stable). Full
   surface map in `docs/architecture/public-api.md`.
-  - `samvada_version()` → packed u32 (0.6.0).
+  - `samvada_version()` → packed u32 (0.7.0).
   - `samvada_init(table)` → 0 | -err (opens bus, looks up
     session, **takes session control**). Returns `-EBUSY` (`-16`)
     on re-init without release as of 0.2.2; self-cleans on every
@@ -227,6 +245,11 @@ Live-bus end-to-end validation pending mabda's
     revokes devices taken via `TakeDevice` when control is
     released, so outstanding consumer fds become invalid.
   - `samvada_main(table)` → 0 | -err (C-shim entry point).
+- `src/dbus_sys.cyr` — **native backend, N1**. `SCM_RIGHTS` fd
+  receive: `dbus_sys_recv_fd()` (the `recvmsg` half) and
+  `dbus_sys_parse_scm_rights()` (the cmsg walk). NOT in
+  `[lib] modules` — native modules stay out of the consumer bundle
+  until N6.
 - `src/test.cyr` — top-level test entry referenced by
   `cyrius.cyml [build].test`.
 - `deps/samvada_main.c` — libsystemd C shim. Not linked by
