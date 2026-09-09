@@ -180,6 +180,19 @@ mattered. Every gate was green while the product did not work.
   admission.
 - [`docs/adr/0003-native-cyrius-dbus.md`](docs/adr/0003-native-cyrius-dbus.md)
   — see below.
+- **CI: the C-shim job no longer depends on apt sources samvada does
+  not use.** The runner image ships third-party repos (Google
+  Chrome, Microsoft prod), and `apt-get update` exits 100 if *any*
+  configured source fails — even when it reports "they have been
+  ignored" and every package we need resolved fine. A hash-sum
+  mismatch in Google's Chrome index (a stale `Packages.gz` against
+  a fresh `Release` on their CDN) failed the job on 2026-09-09 for
+  a repo samvada never reads. Those sources are now removed before
+  `apt-get update`, which also gains `Acquire::Retries=3` and a
+  `pkg-config --modversion libsystemd` confirmation. Scoped
+  deliberately: the Ubuntu archive is untouched, so a genuine
+  failure to fetch `libsystemd-dev` still fails loudly rather than
+  being masked with `|| true`.
 
 ### Changed
 - **`docs/development/roadmap.md` is rewritten as *the road to

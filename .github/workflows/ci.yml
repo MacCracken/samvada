@@ -183,9 +183,33 @@ jobs:
         # point at a superseded point-release .deb that the mirror has
         # already pruned (404 on fetch). Refreshing resolves the
         # current version before the install.
+        #
+        # The runner image also ships third-party apt sources samvada has no
+        # use for (Google Chrome, Microsoft prod). `apt-get update` exits 100
+        # if ANY configured source fails — even when it reports "they have
+        # been ignored, or old ones used instead" and every package we
+        # actually need resolved fine. On 2026-09-09 a hash-sum mismatch in
+        # Google's Chrome index (a stale Packages.gz against a fresh Release
+        # on their CDN) failed this job for a repo we never read.
+        #
+        # So: drop the sources we don't use, then update. This is scoped
+        # deliberately — the Ubuntu archive is left alone, so a genuine
+        # failure to fetch libsystemd-dev still fails the job loudly rather
+        # than being masked with `|| true`.
         run: |
-          sudo apt-get update
+          set -euo pipefail
+          for f in /etc/apt/sources.list.d/google-chrome.list \
+                   /etc/apt/sources.list.d/microsoft-prod.list \
+                   /etc/apt/sources.list.d/google-chrome.sources \
+                   /etc/apt/sources.list.d/microsoft-prod.sources; do
+            if [ -e "$f" ]; then
+              echo "removing unused apt source: $f"
+              sudo rm -f "$f"
+            fi
+          done
+          sudo apt-get update -o Acquire::Retries=3
           sudo apt-get install -y --no-install-recommends libsystemd-dev pkg-config
+          pkg-config --modversion libsystemd
 
       - name: Compile-check deps/samvada_main.c
         # samvada itself doesn't link libsystemd — the consumer builds the
