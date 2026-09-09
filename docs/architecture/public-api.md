@@ -296,7 +296,7 @@ Each public symbol's structural pin in `tests/samvada.tcyr`:
 
 | Fn | Test group | Asserts |
 |---|---|---|
-| `samvada_version` | `v0.4.0 packed triple` | 4 (packed + 3 lanes) |
+| `samvada_version` | `v0.5.0 packed triple` | 4 (packed + 3 lanes) |
 | `samvada_init` (null) | `init rejects null table` | 1 |
 | `samvada_init` (NULL kind) | `init rejects NULL-kind table` | 2 (alloc + reject) |
 | `samvada_init` (double-init) | `init rejects double-init without release` | 6 (re-init `-EBUSY` + release clears the guard) |

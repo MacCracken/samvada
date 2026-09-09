@@ -38,15 +38,15 @@ fn test_ffi_alloc_and_set_get() {
     assert(t != 0, "alloc returns non-null");
     # All slots zero on alloc.
     assert_eq(samvada_ffi_get_slot(t, samvada_slot_open_system_bus()), 0,
-    "fresh slot is 0");
+      "fresh slot is 0");
     assert_eq(samvada_ffi_kind(t), 0, "fresh kind is 0");
     # Set / get round-trips.
     samvada_ffi_set_slot(t, samvada_slot_kind(),
-    samvada_backend_kind_libsystemd());
+      samvada_backend_kind_libsystemd());
     assert_eq(samvada_ffi_kind(t), 1, "kind round-trips");
     samvada_ffi_set_slot(t, samvada_slot_take_device(), 0xCAFEBABE);
     assert_eq(samvada_ffi_get_slot(t, samvada_slot_take_device()),
-    0xCAFEBABE, "fnptr round-trips");
+      0xCAFEBABE, "fnptr round-trips");
     return 0;
 }
 
@@ -95,7 +95,7 @@ fn test_init_rejects_double_init() {
     var t = samvada_ffi_alloc();
     assert(t != 0, "table alloc OK");
     samvada_ffi_set_slot(t, samvada_slot_kind(),
-    samvada_backend_kind_libsystemd());
+      samvada_backend_kind_libsystemd());
     # First init: kind passes, but every slot is null, so it fails
     # at the open_system_bus dispatch with -ENOSYS. _samvada_table
     # is set before that point (the EBUSY guard).
@@ -115,15 +115,15 @@ fn test_init_rejects_double_init() {
 
 # ---- version triple ----
 fn test_samvada_version() {
-    test_group("v0.4.1 packed triple");
+    test_group("v0.5.0 packed triple");
     # Bumps lock-step with VERSION. Component asserts catch the
     # bit-shift reorder bug.
-    assert_eq(samvada_version(), (0 << 16) | (4 << 8) | 1,
-    "v0.4.1 packed triple");
+    assert_eq(samvada_version(), (0 << 16) | (5 << 8) | 0,
+      "v0.5.0 packed triple");
     var v = samvada_version();
     assert_eq((v >> 16) & 0xFF, 0, "major");
-    assert_eq((v >> 8)  & 0xFF, 4, "minor");
-    assert_eq(v         & 0xFF, 1, "patch");
+    assert_eq((v >> 8)  & 0xFF, 5, "minor");
+    assert_eq(v         & 0xFF, 0, "patch");
     return 0;
 }
 

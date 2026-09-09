@@ -62,6 +62,7 @@ cyrius build src/main.cyr build/samvada     # smoke build
 cyrius test                                 # auto-discovers tests/*.tcyr
 cyrius distlib                              # regenerate dist/samvada.cyr
 cyrius lint src/*.cyr                       # static checks
+cyrius vet src/main.cyr                     # dep audit (file arg required)
 CYRIUS_DCE=1 cyrius build ...               # release build (CI default)
 
 # Consumer build (with C shim + libsystemd):
@@ -196,6 +197,7 @@ Run as the last patch of the current minor (e.g. `0.2.5` before
 - No negative literals — write `(0 - N)` not `-N`
 - Max limits per compilation unit: 4,096 variables, 1,024 functions, 4,096 initialized globals
 - Counting rule: only a top-level `var NAME = <non-literal>;` (call / identifier / expression initializer) consumes an initialized-globals slot; a bare integer-literal init (`var x = 42;`) takes the static-init fast path and enum members are const-folded, so neither counts. See the cyrius guide's **Global Initializers** section (`docs/guides/cyrius-guide.md` in the cyrius repo)
+- Continuation lines inside a call get **2 spaces per open paren** (4 is also accepted) — `cyrfmt` enforces this from the 6.6.x line on, and a continuation wrapped at the statement indent is drift
 - `println(s)` is single-arg + newline; `print(s, len)` is two-arg explicit-length — there is **no** `print(s)` single-arg form
 - `print_num(n)` (string.cyr) and `fmt_int(n)` (fmt.cyr) print integers — interchangeable
 
@@ -286,9 +288,14 @@ Thumbs.db
 *.key
 ```
 
-**Note**: `dist/samvada.cyr` is **tracked** so `[deps.samvada]`
-consumers fetch the bundled API surface directly via the
-release tag. Do **not** add `/dist/` to `.gitignore`.
+**Note**: everything `cyrius distlib` writes into `dist/` is
+**tracked** — `dist/samvada.cyr` (the bundled API surface) and
+`dist/samvada.deps` (the stdlib-leaf sidecar the 6.6.x distlib
+emits alongside it, which `cyrius deps` consumes downstream) —
+so `[deps.samvada]` consumers fetch both directly via the
+release tag. Do **not** add `/dist/` to `.gitignore`. Siblings
+follow the same rule (yukti ships `dist/yukti.deps`, mabda
+`dist/mabda.deps`).
 
 ## CHANGELOG Format
 

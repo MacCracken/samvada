@@ -4,6 +4,101 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-09
+
+Toolchain update release. The pinned Cyrius toolchain moves
+from `6.2.6` to `6.6.1` — four minor lines within the 6.x
+series, no major-line jump. The full local gate sweep (lint,
+fmt --check, vet, distlib, build, C-shim compile-check, test,
+bench) passes clean with no source-logic change. Minor bump
+(0.4.1 → 0.5.0) rather than a patch: the pin moves four minor
+lines and the move is *measurable* — `CYRIUS_DCE=1` eliminates
+for the first time (the pass padded rather than eliminated
+before cyrius 6.5.72), cutting the release binary 81 %, and
+`ffi_alloc` halves. No new protocol surface and no public API
+change: the exported symbol set in `dist/samvada.cyr` is
+identical to 0.4.1 (26 fns, same names, same signatures, same
+error-code contracts). `samvada_version()` packed triple bumps
+`(0,5,0)`.
+
+### Changed
+- **Toolchain pin** `cyrius.cyml [package].cyrius` bumped
+  `6.2.6` → `6.6.1`. CI and release both read this pin; no
+  hardcoded version strings in YAML, so no workflow edits were
+  needed.
+- **Stdlib re-resolved** under 6.6.1 — `lib/` wiped and
+  repopulated via `cyrius deps` from the same ten declared
+  leaves (`string`, `fmt`, `alloc`, `io`, `vec`, `str`,
+  `syscalls`, `assert`, `tagged`, `fnptr`). `[deps].stdlib` is
+  unchanged; the vendored module bodies are 6.6.1's. samvada
+  uses none of `Result` / `Option` / `Either`, so 6.6.0's
+  value-form flip for those types is a no-op here.
+- **Continuation-line reformat** — the 6.6.x `cyrfmt` enforces
+  a canonical continuation indent (2 spaces per open paren, 4
+  also accepted); the pre-6.6 tree wrapped continuations at the
+  statement indent. `src/samvada.cyr` (2 call sites) and
+  `tests/samvada.tcyr` (4 call sites) reformatted by
+  `cyrius fmt`. Whitespace only — no token changed.
+- `samvada_version()` packed triple `(0,4,1)` → `(0,5,0)` in
+  `src/samvada.cyr`; the version-triple pin in
+  `tests/samvada.tcyr` (`test_samvada_version`) updated
+  lock-step.
+- `dist/samvada.cyr` regenerated under 6.6.1's `cyrius distlib`
+  emitter — 269 lines, unchanged shape. The only diffs are the
+  version stamp, the `samvada_version()` triple, and the two
+  reformatted continuation lines.
+
+### Added
+- `dist/samvada.deps` — 6.6.x's `cyrius distlib` emits a dep
+  sidecar next to the bundle listing the stdlib leaves the fold
+  needs in scope (the same ten from `[deps].stdlib`);
+  `cyrius deps` consumes it downstream. **Tracked**, matching
+  the sibling repos (yukti ships `dist/yukti.deps`, mabda
+  `dist/mabda.deps`) — a `[deps.samvada]` consumer that fetches
+  the release tag gets the sidecar with the bundle.
+
+### Performance
+- **`CYRIUS_DCE=1` now eliminates.** The dead-code pass NOP-ed
+  and padded rather than compacting before cyrius 6.5.72; under
+  6.6.1 the release build drops **80,904 B → 15,368 B
+  (−81.0 %)** on the standalone smoke binary, with 362
+  unreachable fns (63,814 B) removed. The default (non-DCE)
+  build is unchanged at 80,904 B. CI's release path already
+  sets `CYRIUS_DCE=1`, so this lands with no workflow edit.
+- **CPU bench baselines improve on 6.6.1 codegen** (AMD Ryzen 7
+  5800H, 1,000,000 iters, three runs — `ffi_alloc` measured
+  28 / 28 / 29 ns, the other three identical across all three;
+  deltas vs the last recorded row, `0.3.0` under cyrius
+  6.0.40):
+  `ffi_alloc` **63 ns → 28 ns (−55.6 %)**,
+  `ffi_get_slot` **11 ns → 9 ns (−18.2 %)**,
+  `init_reject_null` **7 ns → 6 ns**,
+  `release_idempotent` **7 ns → 6 ns**.
+  The last two are inside this host's documented jitter floor;
+  `ffi_alloc` is not — it is a real codegen win on the
+  `alloc(72)` + 9-`store64` zero-fill path. Appended to
+  [`docs/benchmarks.md`](docs/benchmarks.md) as Run 4.
+
+### Notes
+- No source-logic change. 38 tcyr asserts pass (unchanged
+  count); the live-bus scaffold still runs as the separate CI
+  skip-path smoke and still takes the SKIP path. FFI slot
+  offsets (9 slots / 72 bytes, kind pinned at +64) and the v0.x
+  stability contract are untouched.
+- `docs/benchmarks.md` gained no rows for 0.4.0 or 0.4.1
+  despite the every-release cadence in CLAUDE.md. Rather than
+  backfill numbers that were never captured, Run 4 states its
+  deltas against Run 3 (`0.3.0`) and the gap is recorded in the
+  doc.
+- **Downstream not re-verified against 0.5.0.** mabda pins
+  `[deps.samvada] tag = "0.4.1"` and resolves the bundle from
+  the git tag, so a real 0.5.0 downstream build needs the tag
+  to exist first. What *was* verified: mabda's smoke build is
+  green, and the 0.5.0 bundle's exported symbol set is
+  identical to the 0.4.1 bundle mabda vendors — mabda calls
+  only `samvada_session_take_device` /
+  `samvada_session_release_device`, both unchanged.
+
 ## [0.4.1] — 2026-06-14
 
 Toolchain update release. The pinned Cyrius toolchain moves

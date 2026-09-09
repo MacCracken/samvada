@@ -283,3 +283,14 @@ in one C shim + one Cyrius FFI module.
   pure-Cyrius-from-v0.x earlier the same day; revised after
   realizing the wgpu-native parallel made the C shim the better
   stop-gap).
+- **2026-09-09** — `0.5.0`, toolchain-only: cyrius pin
+  `6.2.6` → `6.6.1`. No criterion above moves; M1's gate is
+  still the consumer e2e and M2 is still unscoped pending a
+  second AGNOS consumer. Recorded here because the release
+  changes two numbers the v1.0 benchmark criterion will be
+  read against: `CYRIUS_DCE=1` eliminates for the first time
+  (release binary −81.0 %) and `ffi_alloc` drops −55.6 %. Both
+  land in `docs/benchmarks.md` Run 4, which also records that
+  `0.4.0` and `0.4.1` skipped the every-release row — the
+  benchmark criterion's audit trail has a two-release gap that
+  is documented rather than backfilled.
