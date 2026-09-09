@@ -260,6 +260,24 @@ jobs:
           ./build/consumer-link-test
           echo "consumer-owned main() links against the shim"
 
+      - name: Verify the dbus golden corpus decodes
+        # 0.7.1 (roadmap N2). These bytes are the reference the native
+        # marshaller is built against, and they were captured while the
+        # libsystemd C shim still exists — the shim is deleted at the v1.0
+        # cutover and the reference goes with it. Gate them so a corrupted
+        # or truncated fixture fails here rather than silently becoming
+        # "what the protocol looks like".
+        run: |
+          python3 tools/dbus_decode.py tests/fixtures/dbus/*.bin > /tmp/decode.txt
+          echo "decoded $(ls tests/fixtures/dbus/*.bin | wc -l) fixtures"
+          # Every fixture must be REAL unless its name says otherwise, and
+          # exactly one is allowed to be synthetic (the TakeDevice reply,
+          # which needs a seated session to capture).
+          syn=$(ls tests/fixtures/dbus/*.bin | grep -c SYNTHETIC || true)
+          [ "$syn" -eq 1 ] || { echo "expected exactly 1 SYNTHETIC fixture, found $syn"; exit 1; }
+          grep -q 'Exit criterion NOT met' tests/fixtures/dbus/MANIFEST.md || {
+            echo "MANIFEST must keep stating the unmet second-host criterion"; exit 1; }
+
       - name: Verify slot offsets agree between C and Cyrius
         # 0.5.1 (audit LOW-15): ADR-0002 and public-api.md both claim the
         # test pin freezes the C-to-Cyrius contract. It does not — the pin

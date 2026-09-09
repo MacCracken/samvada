@@ -5,6 +5,23 @@
 
 ## Version
 
+**0.7.1** — 2026-09-09. **N2** — the golden byte corpus. 15 fixtures
+of real dbus wire traffic in `tests/fixtures/dbus/`, captured with
+the new `tools/dbus_tap.py` relay while the libsystemd C shim still
+exists (it is deleted at the v1.0 cutover, and the reference goes
+with it), decoded and gated by `tools/dbus_decode.py`. The capture
+**corrected our own `dbus-marshalling.md`**: SASL is one pipelined
+48-byte write answered by three lines in a single read, not the
+six-step ping-pong documented — a reader built to the old text
+hangs. Also established: one read can carry two messages and end
+mid-message; alignment is per-message, not per-buffer; header field
+order is arbitrary; the bus's first reply carries serial
+`0xFFFFFFFF`. The one SYNTHETIC fixture (a successful `TakeDevice`
+reply, uncapturable without a seated session) is derived from a
+REAL fd-bearing `Manager.Inhibit` reply rather than from prose. The
+second-host capture criterion is **outstanding** and says so in the
+MANIFEST. No public API or bundle change.
+
 **0.7.0** — 2026-09-09. **N1** — the first executable module of the
 native Cyrius dbus backend. `src/dbus_sys.cyr` receives an fd over
 a unix socket via `SCM_RIGHTS`, proven over a real `socketpair`
@@ -228,7 +245,7 @@ Live-bus end-to-end validation pending mabda's
   helpers.
 - `src/samvada.cyr` — public API surface (v0.x stable). Full
   surface map in `docs/architecture/public-api.md`.
-  - `samvada_version()` → packed u32 (0.7.0).
+  - `samvada_version()` → packed u32 (0.7.1).
   - `samvada_init(table)` → 0 | -err (opens bus, looks up
     session, **takes session control**). Returns `-EBUSY` (`-16`)
     on re-init without release as of 0.2.2; self-cleans on every

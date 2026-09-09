@@ -432,15 +432,44 @@ this; the pure-Cyrius marshaller has to mirror it.)
 ## SASL EXTERNAL auth (connect path)
 
 Before any method calls, the client speaks dbus's tiny SASL
-profile to authenticate to the bus. Wire bytes for the
-`EXTERNAL` mechanism (which uses the connecting uid as the
-credential — sufficient for system bus on Linux):
+profile to authenticate to the bus.
+
+> **Corrected in 0.7.1 against captured bytes.** The ping-pong
+> exchange this section described until now is *legal*, but it is
+> not what the reference client emits, and a reader built to it
+> **hangs against a real bus**. See
+> [`tests/fixtures/dbus/MANIFEST.md`](../../tests/fixtures/dbus/MANIFEST.md).
+
+What libsystemd actually sends is **one pipelined 48-byte write**,
+with an *empty-credential* `DATA` step rather than an inline
+hex-encoded uid:
 
 ```
-client -> server: <NUL>                         ; one zero byte
-client -> server: AUTH EXTERNAL <hex(uid)>\r\n
+client -> server:                                ; ONE write, 48 bytes
+  <NUL> AUTH EXTERNAL\r\n DATA\r\n NEGOTIATE_UNIX_FD\r\n BEGIN\r\n
+
+server -> client:                                ; ONE read, 58 bytes
+  DATA\r\n OK <guid>\r\n AGREE_UNIX_FD\r\n
+```
+
+Two consequences for the native reader, both load-bearing:
+
+1. **The server's three lines arrive in a single read.** A reader
+   that issues one read per expected line blocks forever on the
+   second one. The reply parser must be **line-oriented over a
+   buffer**, not read-oriented.
+2. **The client need not wait between steps.** Pipelining the
+   whole handshake is what the reference implementation does, and
+   it removes three round trips.
+
+The older form remains valid and is kept here because a server
+may still be driven that way:
+
+```
+client -> server: <NUL>
+client -> server: AUTH EXTERNAL <hex(ascii(uid))>\r\n
 server -> client: OK <guid>\r\n
-client -> server: NEGOTIATE_UNIX_FD\r\n          ; required for h
+client -> server: NEGOTIATE_UNIX_FD\r\n
 server -> client: AGREE_UNIX_FD\r\n
 client -> server: BEGIN\r\n
 ```

@@ -4,6 +4,77 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-09-09
+
+**N2 — the golden byte corpus.** Fifteen fixtures of real dbus wire
+traffic, captured while the libsystemd C shim still exists, because
+the shim is deleted at the v1.0 cutover (roadmap N7) and the
+reference implementation goes with it. No source change to the
+public API or the bundle; `dist/samvada.cyr` still exports 26 fns.
+
+### Added
+- **`tools/dbus_tap.py`** — a transparent AF_UNIX relay. Point any
+  client at it with `DBUS_SYSTEM_BUS_ADDRESS` and it dumps both
+  directions, preserving chunk boundaries and forwarding
+  `SCM_RIGHTS` ancillary data. No C, no libsystemd, no privileges.
+- **`tools/dbus_decode.py`** — a message decoder written against
+  the D-Bus specification rather than samvada's own
+  `dbus-marshalling.md`, deliberately: the corpus exists to *check*
+  that document, so a decoder derived from it would agree with its
+  errors.
+- **`tests/fixtures/dbus/`** — 15 fixtures plus a `MANIFEST.md`
+  carrying host, systemd version, date, sha256s, and a REAL /
+  SYNTHETIC marker per file.
+- **CI gate**: every fixture must decode, exactly one may be
+  SYNTHETIC, and the MANIFEST must keep stating its unmet criterion.
+
+### Fixed
+- **`dbus-marshalling.md`'s SASL section was wrong.** It documented
+  a six-step ping-pong. The captured reality is **one pipelined
+  48-byte write** — `\0AUTH EXTERNAL\r\nDATA\r\nNEGOTIATE_UNIX_FD\r\nBEGIN\r\n`
+  with an *empty-credential* `DATA` step — answered by **three
+  lines in a single 58-byte read**. Both forms are legal, but a
+  reader built to the documented one **hangs against a real bus**
+  waiting for lines that already arrived. Corrected, with the older
+  form retained as the valid alternative it is.
+
+### Notes
+- **The synthetic fixture is derived from captured bytes, not from
+  prose.** A successful `TakeDevice` reply cannot be captured here
+  — it needs an active seated session, and this host has none, so
+  the real `AccessDenied` error reply is what got captured. Rather
+  than hand-assemble it from our own documentation (which would put
+  the same error into the fixture *and* the implementation at
+  once), `Manager.Inhibit` was used: it returns `h` with a real
+  `SCM_RIGHTS` cmsg and needs no seat. The synthetic is that REAL
+  message with `h` -> `hb` and the body extended by the boolean,
+  and the two decode identically apart from those fields. It is
+  still marked SYNTHETIC.
+- **Eight findings the capture established**, each previously an
+  assumption. Beyond the SASL correction: one read can carry two
+  messages *and end mid-message* (the very first exchange does
+  both); alignment is relative to the start of **each message**,
+  not the buffer — the decoder got this wrong at first and
+  mis-read the second message's header, a bug invisible until a
+  multi-message buffer appears; header field order is neither
+  ascending nor stable across message kinds (`[1,3,2,6]`,
+  `[5,7,6,8]`, `[5,6,8,9,7]` all observed); the bus's own first
+  `METHOD_RETURN` carries serial **`0xFFFFFFFF`**, which in a
+  language with no unsigned type and a logical `>>` will fire a
+  signed-comparison bug on *message one*.
+- **Byte stability, measured over two runs.** Client -> bus is
+  byte-identical except the pid argument in `GetSessionByPID`
+  (2 bytes). So request-side fixtures can be compared directly.
+  Reply-side cannot: they carry the connection's unique name and
+  bus-assigned serials, which must be masked.
+- **One exit criterion is NOT met and says so.** The roadmap asks
+  for a second capture on a *different host / systemd version* to
+  prove the corpus is not over-fitted. Only one host is available,
+  so this is outstanding and recorded in the MANIFEST. Until then
+  the corpus is a regression fixture for samvada's own encoder,
+  **not** a conformance oracle — the oracle is the bus itself
+  (N4).
+
 ## [0.7.0] — 2026-09-09
 
 **N1 — SCM_RIGHTS fd passing, proven before any dbus byte exists.**

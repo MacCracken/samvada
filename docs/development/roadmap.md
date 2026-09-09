@@ -115,6 +115,7 @@ it.
 | — Toolchain patch | 0.5.2 | ✅ cyrius 6.6.2, carrying samvada's own upstream symbol-visibility fix. |
 | **N0** — signal-visibility contract | 0.6.0 | ✅ 2026-09-09. ADR-0004; `TakeControl` scoped to device ownership (0.5.1 console regression); no new slot. |
 | **N1** — SCM_RIGHTS fd passing | 0.7.0 | ✅ 2026-09-09. `src/dbus_sys.cyr`; fd proven across a socketpair; surplus-fd leak found and fixed. |
+| **N2** — golden byte corpus | 0.7.1 | ✅ 2026-09-09. 15 fixtures + tap/decoder tools; corrected our own SASL docs. Second-host capture outstanding. |
 
 **M2 — "generalize beyond logind"** (Properties, Introspectable,
 session bus, generic method dispatch, async variants) is
@@ -230,7 +231,7 @@ the milestone drops from 2–3 sessions to ~1.
   sibling references made this ~1 session rather than 2-3, and the
   module is ~90 LoC rather than the estimated 80-130.
 
-### N2 — Capture the golden corpus (0.7.1)
+### N2 — Capture the golden corpus (0.7.1) — ✅ SHIPPED (one criterion outstanding)
 
 Do this **while the shim still exists** — the reference dies with
 it.
@@ -255,9 +256,23 @@ it.
   an error in the test and the implementation *simultaneously*.
   Mitigate by re-deriving it independently from the D-Bus spec,
   not from our own doc.
-- **Exit**: corpus committed; every fixture marked REAL or
-  SYNTHETIC; **captured a second time on a different host /
-  systemd version** to prove it is not over-fitted to one machine.
+- **Exit**: ✅ corpus committed (15 fixtures + MANIFEST with
+  provenance); ✅ every fixture marked REAL or SYNTHETIC (14 real,
+  1 synthetic); ⚠️ **second-host capture OUTSTANDING** — only one
+  host is available. A same-host repeat was done instead, which
+  establishes which bytes are volatile (client -> bus is
+  byte-identical except the pid) but cannot establish which are
+  host-specific. Recorded in the MANIFEST rather than quietly
+  dropped.
+- **What it found**: our own SASL documentation was wrong in a way
+  that would hang the native reader; one read carries two messages
+  and can end mid-message; alignment is per-message, not
+  per-buffer; header field order is arbitrary; the bus's first
+  reply uses serial `0xFFFFFFFF`.
+- **The synthetic fixture is derived from a REAL fd-bearing reply**
+  (`Manager.Inhibit` returns `h` and needs no seat), not
+  hand-assembled from prose — which is the mitigation this
+  milestone asked for.
 
 ### N3 — Transport, auth and framing (0.8.0)
 
