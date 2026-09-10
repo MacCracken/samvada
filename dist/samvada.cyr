@@ -1438,6 +1438,59 @@ fn dbus_session_max_serial() { return 4294967295; }
 var _dbs_serial = 0;
 var _dbs_last_err = 0;      # last ERROR_NAME mapped errno
 
+# ---- our own unique name, and why it is worth storing ----
+# The bus assigns it in the Hello reply, which samvada used to read
+# and throw away. Keeping it is what makes a provenance check
+# possible at all: without it there is nothing to compare a reply's
+# DESTINATION against.
+#
+# A word on what canNOT be checked. The obvious guard — "require
+# SENDER to be org.freedesktop.login1" — is WRONG and would reject
+# every genuine reply. The broker rewrites SENDER to the sender's
+# UNIQUE id on every message it forwards (message_stitch_sender), so
+# a real logind reply arrives with SENDER=":1.5". Verified against
+# all four captured logind replies in tests/fixtures/dbus/: every
+# one carries a unique name, never the well-known one. Only the bus
+# driver is special-cased, sending as "org.freedesktop.DBus".
+#
+# Pinning logind's unique name on first use was considered and
+# REJECTED: logind can restart and come back with a different id,
+# which would strand a long-lived consumer with a stale pin and fail
+# every subsequent call. That is a self-inflicted availability bug
+# traded for very little — the DESTINATION check below already
+# refuses anything not addressed to us.
+var _dbs_uniq  = 0;         # copied out of the frame buffer, which moves
+var _dbs_uniqn = 0;
+
+fn dbus_session_unique_len() { return _dbs_uniqn; }
+fn dbus_session_unique()     { return _dbs_uniq; }
+
+# Copy, never alias: the name arrives inside the framer's buffer and
+# dbus_frame_advance / maybe_compact will move or overwrite it.
+fn dbus_session_set_unique(p, n) {
+    if (p == 0)  { return -22; }
+    if (n <= 0)  { return -22; }
+    if (n > 255) { return -22; }          # dbus caps any bus name at 255
+    if (_dbs_uniq == 0) { _dbs_uniq = alloc(256); }
+    if (_dbs_uniq == 0) { return -12; }
+    var i = 0;
+    while (i < n) { store8(_dbs_uniq + i, load8(p + i)); i = i + 1; }
+    _dbs_uniqn = n;
+    return 0;
+}
+
+fn _dbs_bytes_eq(a, an, b, bn) {
+    if (an != bn) { return 0; }
+    var i = 0;
+    while (i < an) {
+        var x = load8(a + i);
+        var y = load8(b + i);
+        if (x != y) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 # Pure, so the wrap is reachable from a test. Driving
 # next_serial() to the u32 ceiling would take four billion calls;
 # this makes the one branch that matters a one-line assertion.
@@ -1456,6 +1509,7 @@ fn dbus_session_next_serial() {
 fn dbus_session_reset() {
     _dbs_serial = 0;
     _dbs_last_err = 0;
+    _dbs_uniqn = 0;
     return 0;
 }
 
@@ -1489,6 +1543,39 @@ fn dbus_session_map_error(p, n) {
     return -5;                                   # -EIO for anything unmapped
 }
 
+# Two small scratch words, reused rather than alloc'd per message:
+# the reply matcher can examine many messages per call and alloc()
+# never frees.
+var _dbs_scr = 0;
+fn _dbs_scratch() {
+    if (_dbs_scr == 0) { _dbs_scr = alloc(16); }
+    return _dbs_scr;
+}
+
+# Is this reply addressed to US?
+#
+# This mirrors sd-bus's async guard (sd-bus.c:2790,
+# `m->destination && bus->unique_name && !streq(...)` -> drop) and
+# is deliberately the ONLY provenance check samvada makes, because
+# it is the only one that is both correct and stateless. See the
+# note on SENDER above for the two checks that look attractive and
+# are not.
+#
+# Permissive when the field is ABSENT, exactly as sd-bus is. That is
+# not laxity, it is required: the Hello reply is matched BEFORE the
+# bus has told us our own name, so there is nothing to compare
+# against yet — _dbs_uniqn is still 0 and this returns 1.
+fn dbus_session_dest_ok(p) {
+    if (_dbs_uniqn <= 0) { return 1; }        # name not learned yet
+    var sc = _dbs_scratch();
+    var off = dbus_unmarshal_find_field(p, dbus_marshal_f_dest(), sc);
+    if (off == dbus_unmarshal_notfound()) { return 1; }
+    if (off < 0) { return 0; }                # malformed field array
+    var n = dbus_unmarshal_str_at(p, off, sc + 8);
+    if (n < 0) { return 0; }
+    return _dbs_bytes_eq(load64(sc + 8), n, _dbs_uniq, _dbs_uniqn);
+}
+
 # ---- the call/reply cycle ----
 # Send whatever the marshaller has built, then read until the reply
 # whose REPLY_SERIAL matches. Unsolicited traffic is DISCARDED, not
@@ -1500,6 +1587,22 @@ fn dbus_session_map_error(p, n) {
 # via dbus_frame_base()), or a negative errno on an ERROR reply or
 # transport failure.
 fn dbus_session_call(fd, serial) {
+    # SEND-TIME WATERMARK, captured before the request goes out.
+    # Bytes already sitting in the buffer cannot be a reply to a
+    # request that has not been sent yet — no peer can answer before
+    # it receives. sd-bus gets this for free by remembering the
+    # receive queue's length at send time (sd-bus.c:2448); samvada's
+    # framer is a byte buffer, so the equivalent is the count of
+    # bytes already pending, decremented as they are consumed.
+    #
+    # A COUNT, not an offset, on purpose: dbus_frame_maybe_compact()
+    # slides the buffer contents and would invalidate any absolute
+    # position. The count of outstanding bytes survives it.
+    #
+    # This closes the pre-plant window that sequential serials would
+    # otherwise leave open: an attacker who can get bytes into the
+    # buffer early cannot have them answer a later call.
+    var stale = dbus_frame_have();
     var total = dbus_marshal_len();
     var w = dbus_socket_write_all(fd, dbus_marshal_buf(), total);
     if (w < 0) { return w; }
@@ -1521,6 +1624,18 @@ fn dbus_session_call(fd, serial) {
             if (rs_off > 0) {
                 if (dbus_unmarshal_u32(p, rs_off) == serial) { mine = 1; }
             }
+            # Predates the request: it was in the buffer before we
+            # wrote, so whatever it is answering, it is not this.
+            # A message that straddles the watermark started arriving
+            # before the request left, so it counts as stale too.
+            if (mine == 1) {
+                if (stale > 0) { mine = 0; }
+            }
+            # Addressed to someone else, whatever its REPLY_SERIAL says.
+            if (mine == 1) {
+                var dok = dbus_session_dest_ok(p);
+                if (dok == 0) { mine = 0; }
+            }
             if (mine == 1) {
                 if (ty == dbus_marshal_type_return()) { return 0; }
                 if (ty == dbus_marshal_type_error()) {
@@ -1536,7 +1651,12 @@ fn dbus_session_call(fd, serial) {
                     return rc;
                 }
             }
-            # Not ours — a signal, or a reply to something else.
+            # Not ours — a signal, a pre-existing message, or a
+            # reply to something else.
+            if (stale > 0) {
+                stale = stale - r;
+                if (stale < 0) { stale = 0; }
+            }
             dbus_frame_advance(r);
             r = dbus_frame_next();
         }
@@ -1656,7 +1776,30 @@ fn dbus_native_open_system_bus(bus_out) {
     dbus_marshal_finish();
     var rc = dbus_session_call(fd, serial);
     if (rc < 0) { sys_close(fd); return rc; }
-    dbus_frame_advance(dbus_frame_next());
+
+    # KEEP the assigned unique name. The Hello reply's body is a
+    # single STRING and samvada used to advance straight past it —
+    # which is precisely why it could not tell whether any later
+    # reply was addressed to it. Everything dbus_session_dest_ok()
+    # does rests on this one string.
+    var hlen = dbus_frame_next();
+    dbus_unmarshal_set_limit(hlen);
+    var hp = dbus_frame_base();
+    dbus_unmarshal_body_begin(hp);
+    var uptr = alloc(8);
+    var un = dbus_unmarshal_next_str(uptr);
+    if (un < 0) {
+        dbus_frame_advance(hlen);
+        sys_close(fd);
+        return -71;                               # -EPROTO: no unique name
+    }
+    var sr = dbus_session_set_unique(load64(uptr), un);
+    if (sr < 0) {
+        dbus_frame_advance(hlen);
+        sys_close(fd);
+        return sr;
+    }
+    dbus_frame_advance(hlen);
 
     store64(bus_out, fd);
     return 0;

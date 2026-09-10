@@ -27,9 +27,12 @@ backend** against the real bus, `kind = PURE_CYRIUS`, no libsystemd:
 `samvada_init -> 0` (connect + SASL + Hello + GetSessionByPID +
 TakeControl, all native) and `take_device -> -13` — `AccessDenied`,
 a **device-level** error, not the `-22` `NotInControl` that meant
-the call never got that far. `src/dbus_session.cyr` plus 58 asserts
-(45 at N5; +13 from the 1.0.0 reply-forgery audit, which pinned both
-the `SCM_RIGHTS` reply path and the reply matcher's type gate).
+the call never got that far. `src/dbus_session.cyr` plus 71 asserts
+(45 at N5; +13 from the 1.0.0 reply-forgery audit, which pinned the
+`SCM_RIGHTS` reply path and the reply matcher's type gate; +13 more
+for the provenance hardening — `DESTINATION` must be us, absent
+destination stays permitted, and a pre-planted reply cannot answer a
+later call). **508 asserts across the suite.**
 Every native fn is written to the C shim's ABI including the
 vestigial `bus` argument and out-pointer pairs; the tests call each
 one directly at its declared arity so a wrong arity fails the BUILD

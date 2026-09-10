@@ -52,7 +52,39 @@ replacing a C dependency at every consumer's edge.
   (mutation-tested: restoring `sys_read` fails it).
 
 ### Security
-Three defects found and fixed, all the same class — **the
+**Reply provenance — samvada now checks, instead of trusting the
+bus to.** Two guards added to `dbus_session_call`, both of which
+**exceed** the synchronous `sd_bus_call` path they replace (it
+checked neither):
+- **`DESTINATION` must be us.** `open_system_bus` now retains the
+  unique name the bus assigns in the `Hello` reply body — which
+  samvada previously read and discarded — and a matching reply is
+  accepted only if its `DESTINATION` equals it. Mirrors sd-bus's
+  async guard (`sd-bus.c:2790`). Deliberately permissive when the
+  field is **absent**, exactly as sd-bus is, and that is
+  load-bearing rather than lax: the `Hello` reply is matched before
+  the bus has told us our own name. Making it strict does not fail
+  the connect path, it **deadlocks** it.
+- **Send-time watermark.** Bytes already pending when the request
+  is written cannot be a reply to it — no peer answers before it
+  receives. Mirrors sd-bus's `i = bus->rqueue_size`
+  (`sd-bus.c:2448`) and closes the pre-plant window that sequential
+  serials would otherwise leave open. A byte *count*, not an offset,
+  because `maybe_compact()` slides the buffer.
+
+**No `SENDER` check, deliberately.** The intuitive guard — require
+`SENDER == org.freedesktop.login1` — would reject **every genuine
+reply**: the broker rewrites `SENDER` to the sender's *unique* id,
+so real logind replies arrive as `:1.5`. Confirmed against all four
+captured logind replies in `tests/fixtures/dbus/`. Pinning logind's
+unique id instead was rejected because a logind restart would
+strand a long-lived consumer with a stale pin.
+
+Live-verified end to end (unique name learned, `GetSessionByPID`
+accepted, `Inhibit` fd intact) and mutation-tested: removing either
+guard fails its own pin.
+
+Three further defects found and fixed, all the same class — **the
 unmarshaller trusted wire-supplied lengths without checking them
 against the bytes present**:
 - **AUDIT-1 (HIGH)** — a string field claiming `0xFFFFFFF0` bytes
@@ -104,9 +136,9 @@ caller. Pinned by regression tests.
   `/org/freedesktop/PWNED1/session/_99`. Second, **this is not a
   regression from libsystemd**: `sd_bus_call` checks neither field
   either, so "we match sd-bus" is true here and worth nothing. Any
-  real fix must exceed it. The reliance is now stated in
-  `SECURITY.md`; the hardening (a `DESTINATION` check plus a
-  send-time watermark) is scheduled for 1.0.x.
+  real fix must exceed it — **and both were implemented before this
+  tag** (see *Security* above). The bus remains the primary defence,
+  but it is no longer the only one.
 
   Predictable serials turned out to be **irrelevant** — the broker
   rejects on sender identity, not serial secrecy — so serial

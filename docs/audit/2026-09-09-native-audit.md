@@ -65,7 +65,7 @@ anything else in this document.
 | HIGH | 2 | Fixed in 1.0.0 |
 | MEDIUM | 1 | Fixed in 1.0.0 |
 | **HIGH (functional)** | **1** | **Fixed in 1.0.0 — AUDIT-4** |
-| LOW (defence-in-depth) | 1 | Documented, scheduled 1.0.x |
+| LOW (defence-in-depth) | 1 | **Hardened in 1.0.0** — wall-clock timeout still outstanding |
 | **Total** | **5** | |
 
 AUDIT-1..3 are one defect class: **the unmarshaller trusted
@@ -300,14 +300,18 @@ pinned by `test_forged_signal_cannot_impersonate_a_reply` —
 **mutation-tested**: widening the type gate to admit signals fails
 it with `got 4, expected 2`.
 
-### The residual risk, stated plainly
+### The residual risk as found — and what was done about it
 
-samvada performs **no independent authenticity validation of its
-own**. It matches on `REPLY_SERIAL` and nothing else: it never
-reads `DESTINATION` (field 6) or `SENDER` (field 7)
-(`dbus_marshal_f_sender()` is defined and never called), it never
-learns its own unique name (the Hello reply body is discarded), and
-it does not watermark the buffer at send time.
+**As audited**, samvada performed no independent authenticity
+validation at all. It matched on `REPLY_SERIAL` and nothing else:
+it never read `DESTINATION` (field 6) or `SENDER` (field 7), never
+learned its own unique name (the Hello reply body was discarded),
+and did not watermark the buffer at send time.
+
+**Both of the top-priority items were then implemented before the
+1.0.0 tag** — see § Hardening applied. What follows describes the
+state the audit found, which is what the MITM demonstration below
+was run against.
 
 The consequence was demonstrated against the **real binary**. Put a
 rewriting relay on the socket and samvada accepts whatever it is
@@ -335,25 +339,78 @@ arbitrary AGNOS buses, though, and it currently *relies* on a
 property of the bus it does not verify — so the reliance is now
 stated in `SECURITY.md` rather than left implicit.
 
-### Scheduled hardening (1.0.x, API-preserving)
+### Hardening applied before the tag
 
-In priority order, all internal to `src/dbus_session.cyr`:
+Both top-priority items were implemented, live-verified and
+mutation-tested. All of it is internal to `src/dbus_session.cyr`;
+the public API, the FFI slot layout and ADR-0003's scope fence are
+untouched, and no new round-trip was added.
 
-1. **Provenance check.** Retain the unique name from the Hello
-   reply body (currently discarded) and require a matching reply's
-   `DESTINATION` to equal it — this is sd-bus's async guard, needs
-   no new round-trip, and so does not breach ADR-0003's scope
-   fence. Additionally require `SENDER` to equal the addressed
-   destination; this *exceeds* sd-bus and is reliable precisely
-   because the broker stitches `SENDER` to the true id.
-2. **Send-time watermark.** Record the frame-buffer position before
-   `dbus_socket_write_all` and refuse any message sitting below it,
-   mirroring sd-bus's `i = bus->rqueue_size`. Closes the pre-plant
-   window that sequential serials otherwise leave open.
-3. **A real wall-clock timeout.** `64 spins` is a message budget,
-   not a clock; samvada currently has no time-based bound at all.
+**1. Provenance check — `DESTINATION` must be us.**
+`dbus_native_open_system_bus` now retains the unique name the bus
+assigns in the Hello reply body (previously read and thrown away),
+and `dbus_session_call` requires a matching reply's `DESTINATION`
+to equal it. This mirrors sd-bus's async guard (`sd-bus.c:2790`)
+and therefore **exceeds the synchronous path samvada replaced**,
+which checked nothing.
 
-Serial randomisation is explicitly *not* on this list as a fix.
+It is deliberately **permissive when the field is absent**, exactly
+as sd-bus is — and this is load-bearing, not lax: the Hello reply
+is matched *before* the bus has told us our own name, so there is
+nothing to compare against yet. Making it strict deadlocks the
+connect path. That is pinned by
+`test_absent_destination_is_permitted`; the mutation that makes an
+absent destination fatal does not merely fail the suite, it **hangs
+it**.
+
+**2. Send-time watermark.** `dbus_session_call` records how many
+bytes are already pending before it writes the request, and refuses
+to match any message drawn from them. Bytes that were in the buffer
+before the request went out cannot be a reply to it — no peer can
+answer before it receives. This mirrors sd-bus's
+`i = bus->rqueue_size` (`sd-bus.c:2448`) and closes the pre-plant
+window that sequential serials would otherwise leave open.
+
+It is a **byte count, not an offset**, because
+`dbus_frame_maybe_compact()` slides the buffer and would invalidate
+any absolute position. A message straddling the watermark counts as
+stale: it began arriving before the request left.
+
+**What was NOT done, and why.**
+
+- **A `SENDER` check.** The adjudicator recommended requiring
+  `SENDER` to equal the addressed destination
+  (`org.freedesktop.login1`). **That recommendation is wrong as
+  stated and was not implemented.** The broker rewrites `SENDER` to
+  the sender's *unique* id on every forwarded message
+  (`message_stitch_sender`), so a genuine logind reply arrives with
+  `SENDER=":1.5"`. Checked against all four captured logind replies
+  in `tests/fixtures/dbus/`: every one carries a unique name, never
+  the well-known one. Implementing it literally would reject **every
+  genuine reply**.
+
+  Pinning logind's unique name on first use was the obvious repair
+  and was also rejected: logind can restart with a different id,
+  stranding a long-lived consumer with a stale pin and failing every
+  later call. That trades a real availability bug for very little,
+  since the `DESTINATION` check already refuses anything not
+  addressed to us.
+
+- **A wall-clock timeout.** Still outstanding, and mutation C above
+  is the evidence for why it matters: `64 spins` is a *message*
+  budget, not a clock, the socket is blocking, and nothing calls
+  `setsockopt`. A bus that accepts a request and never answers hangs
+  the caller indefinitely. **Carried forward as the top 1.0.x
+  item.**
+
+- **Serial randomisation.** Explicitly not a fix. The broker rejects
+  on sender identity, not serial secrecy.
+
+Pinned by `test_reply_addressed_elsewhere_is_refused`,
+`test_absent_destination_is_permitted` and
+`test_preplanted_reply_cannot_answer_a_later_call`. Mutation-tested:
+removing either guard fails its own pin with `got 34, expected 35`
+— the forged path length against the real one.
 
 ---
 
@@ -426,17 +483,26 @@ code, and now demonstrably receives a file descriptor.
 
 The reply-forgery question is **closed**: a hostile bus peer cannot
 forge a reply samvada accepts, verified structurally and live. What
-that audit also established is less comfortable and is recorded
-above — the protection is entirely the bus's, samvada's one
-contribution was incidental, and matching libsystemd here buys
-nothing because libsystemd does not check either.
+that audit established beyond the yes/no was less comfortable — the
+protection was entirely the bus's, samvada's one contribution was
+incidental, and matching libsystemd here buys nothing because
+libsystemd does not check either.
+
+**That is no longer the state of the code.** samvada now makes its
+own provenance check (`DESTINATION` must be us) and refuses replies
+that predate their request (send-time watermark). Both exceed the
+synchronous sd-bus path they replace, which checked nothing. The
+bus is still the primary defence and should be — but it is no
+longer the *only* one, and `SECURITY.md` no longer has to describe
+reply authenticity as wholly trusted.
 
 **1.0.0 remains a first stable release, not an audited-hardened
 one.** Resource exhaustion and build/supply-chain were still not
-covered, the consumer-validation lane never cleared, and the
-defence-in-depth work is scheduled rather than done. `SECURITY.md`
-says so, and the C shim is retained as a fallback for exactly this
-reason.
+covered, the consumer-validation lane never cleared, and samvada
+still has **no wall-clock timeout of any kind** — a bus that accepts
+a request and never answers hangs the caller indefinitely.
+`SECURITY.md` says so, and the C shim is retained as a fallback for
+exactly this reason.
 
 The strongest argument for that caution is AUDIT-4 itself: a defect
 that survived five releases, a full hand audit, a differential

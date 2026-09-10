@@ -384,6 +384,164 @@ fn test_forged_signal_cannot_impersonate_a_reply() {
     return 0;
 }
 
+# Build a METHOD_RETURN addressed to `dest`, answering `rser`,
+# carrying `path` as its body. Returns its length; bytes are in the
+# marshal buffer.
+fn s_build_reply(rser, dest, destn, path, pathn) {
+    dbus_marshal_begin(dbus_marshal_type_return(), 1, 5000);
+    dbus_marshal_field_u32(dbus_marshal_f_replyser(), rser);
+    dbus_marshal_field_str(dbus_marshal_f_dest(), 115, dest, destn);
+    var sg = alloc(8);
+    var sn = t_put(sg, "o");
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sg, sn);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_str(path, pathn);
+    dbus_marshal_finish();
+    return dbus_marshal_len();
+}
+
+# ---- THE DESTINATION PIN ----
+# sd-bus's async guard (sd-bus.c:2790) and the one provenance check
+# samvada makes. A reply whose REPLY_SERIAL matches but which is
+# addressed to a DIFFERENT unique name is not ours, and must be
+# skipped rather than accepted.
+fn test_reply_addressed_elsewhere_is_refused() {
+    test_group("native: a reply addressed to someone else is NOT ours");
+    var pair = alloc(8);
+    store64(pair, 0);
+    assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, pair), 0,
+      "socketpair created");
+    var a = load64(pair) & 0xFFFFFFFF;
+    var b = (load64(pair) >> 32) & 0xFFFFFFFF;
+
+    dbus_session_reset();
+    var me = alloc(32);
+    var men = t_put(me, ":1.99");
+    assert_eq(dbus_session_set_unique(me, men), 0, "our unique name is known");
+
+    var them = alloc(32);
+    var wire = alloc(1024);
+    var txt = alloc(64);
+    var at = 0;
+
+    # (1) same serial, addressed to a DIFFERENT peer.
+    var thn = t_put(them, ":1.500");
+    var tn = t_put(txt, "/org/freedesktop/PWNED/session/_99");
+    at = at + s_copy(wire + at, dbus_marshal_buf(),
+      s_build_reply(11, them, thn, txt, tn));
+    # (2) same serial, addressed to US.
+    thn = t_put(them, ":1.99");
+    tn = t_put(txt, "/org/freedesktop/login1/session/_32");
+    at = at + s_copy(wire + at, dbus_marshal_buf(),
+      s_build_reply(11, them, thn, txt, tn));
+
+    assert_eq(sys_write(a, wire, at), at, "both replies planted");
+
+    dbus_frame_init();
+    var rc = dbus_session_call(b, 11);
+    assert_eq(rc, 0, "the call completed");
+    var p = dbus_frame_base();
+    dbus_unmarshal_set_limit(dbus_frame_next());
+    dbus_unmarshal_body_begin(p);
+    var ptr = alloc(8);
+    var n = dbus_unmarshal_next_str(ptr);
+    assert_eq(n, strlen("/org/freedesktop/login1/session/_32"),
+      "THE PIN: it skipped the misaddressed reply and took the one meant for us");
+
+    dbus_session_reset();
+    sys_close(a);
+    sys_close(b);
+    return 0;
+}
+
+# The same guard must not fire when the field is ABSENT, or the
+# Hello reply — matched before the bus has told us our own name —
+# would be rejected and no connection could ever be established.
+fn test_absent_destination_is_permitted() {
+    test_group("native: a reply with NO destination field is still accepted");
+    var pair = alloc(8);
+    store64(pair, 0);
+    assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, pair), 0,
+      "socketpair created");
+    var a = load64(pair) & 0xFFFFFFFF;
+    var b = (load64(pair) >> 32) & 0xFFFFFFFF;
+
+    dbus_session_reset();
+    var me = alloc(32);
+    var men = t_put(me, ":1.99");
+    dbus_session_set_unique(me, men);
+
+    dbus_marshal_begin(dbus_marshal_type_return(), 1, 5001);
+    dbus_marshal_field_u32(dbus_marshal_f_replyser(), 13);
+    dbus_marshal_end_fields();
+    dbus_marshal_finish();
+    var mlen = dbus_marshal_len();
+    var wire = alloc(256);
+    s_copy(wire, dbus_marshal_buf(), mlen);
+    assert_eq(sys_write(a, wire, mlen), mlen, "destination-less reply planted");
+
+    dbus_frame_init();
+    assert_eq(dbus_session_call(b, 13), 0,
+      "THE PIN: absent DESTINATION is permitted, as in sd-bus — the Hello reply depends on it");
+
+    dbus_session_reset();
+    sys_close(a);
+    sys_close(b);
+    return 0;
+}
+
+# ---- THE WATERMARK PIN ----
+# Bytes already in the buffer when the request goes out cannot be a
+# reply to it. Without this, an attacker who can get a well-formed
+# reply into the buffer EARLY answers a call that has not been made
+# yet — and samvada's serials are sequential, so the serial to use
+# is not a secret.
+fn test_preplanted_reply_cannot_answer_a_later_call() {
+    test_group("native: a reply buffered BEFORE the request cannot answer it");
+    var pair = alloc(8);
+    store64(pair, 0);
+    assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, pair), 0,
+      "socketpair created");
+    var a = load64(pair) & 0xFFFFFFFF;
+    var b = (load64(pair) >> 32) & 0xFFFFFFFF;
+
+    dbus_session_reset();
+    dbus_frame_init();
+
+    # Pre-plant a perfectly valid reply DIRECTLY into the framer's
+    # buffer, as an earlier pump_signals would have left it there.
+    var me = alloc(32);
+    var men = t_put(me, ":1.99");
+    var txt = alloc(64);
+    var tn = t_put(txt, "/org/freedesktop/PWNED/session/_99");
+    var flen = s_build_reply(12, me, men, txt, tn);
+    s_copy(dbus_frame_tail(), dbus_marshal_buf(), flen);
+    dbus_frame_commit(flen);
+    assert_eq(dbus_frame_have(), flen, "the forged reply is buffered before the call");
+
+    # The genuine reply, same serial, arrives on the wire afterwards.
+    tn = t_put(txt, "/org/freedesktop/login1/session/_32");
+    var rlen = s_build_reply(12, me, men, txt, tn);
+    var wire = alloc(512);
+    s_copy(wire, dbus_marshal_buf(), rlen);
+    assert_eq(sys_write(a, wire, rlen), rlen, "genuine reply planted on the wire");
+
+    var rc = dbus_session_call(b, 12);
+    assert_eq(rc, 0, "the call completed");
+    var p = dbus_frame_base();
+    dbus_unmarshal_set_limit(dbus_frame_next());
+    dbus_unmarshal_body_begin(p);
+    var ptr = alloc(8);
+    var n = dbus_unmarshal_next_str(ptr);
+    assert_eq(n, strlen("/org/freedesktop/login1/session/_32"),
+      "THE PIN: the pre-planted reply was skipped; the one that arrived after the send won");
+
+    dbus_session_reset();
+    sys_close(a);
+    sys_close(b);
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_native_populates_the_same_table();
@@ -394,6 +552,9 @@ fn main() {
     test_release_control_has_no_signature_field();
     test_reply_fd_survives_the_call_path();
     test_forged_signal_cannot_impersonate_a_reply();
+    test_reply_addressed_elsewhere_is_refused();
+    test_absent_destination_is_permitted();
+    test_preplanted_reply_cannot_answer_a_later_call();
     return assert_summary();
 }
 
