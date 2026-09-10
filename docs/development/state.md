@@ -5,6 +5,18 @@
 
 ## Version
 
+**0.9.0** — 2026-09-09. **N4** — marshal and unmarshal. **Native
+Cyrius now speaks dbus end to end**: connect, SASL, build a `Hello`
+byte-identical to libsystemd's (128/128 bytes against the capture),
+send it, and decode the reply — the bus accepted our bytes and
+answered with `:1.20566`. One read carried two messages (101 + 181)
+and the framer split them correctly; the `0xFFFFFFFF` serial read
+back positive. This also closes **N3's deferred exit criterion**.
+Two modules: `src/dbus_marshal.cyr` and `src/dbus_unmarshal.cyr`,
+48 new asserts. Field order is never assumed — fields are located
+by code, and a test builds the same message in a different order to
+prove it. No public API or bundle change.
+
 **0.8.0** — 2026-09-09. **N3** — transport, auth and framing.
 **Native Cyrius code now authenticates to a real dbus daemon**:
 connect to `/run/dbus/system_bus_socket`, the 48-byte pipelined SASL
@@ -261,7 +273,7 @@ Live-bus end-to-end validation pending mabda's
   helpers.
 - `src/samvada.cyr` — public API surface (v0.x stable). Full
   surface map in `docs/architecture/public-api.md`.
-  - `samvada_version()` → packed u32 (0.8.0).
+  - `samvada_version()` → packed u32 (0.9.0).
   - `samvada_init(table)` → 0 | -err (opens bus, looks up
     session, **takes session control**). Returns `-EBUSY` (`-16`)
     on re-init without release as of 0.2.2; self-cleans on every
@@ -278,6 +290,9 @@ Live-bus end-to-end validation pending mabda's
     revokes devices taken via `TakeDevice` when control is
     released, so outstanding consumer fds become invalid.
   - `samvada_main(table)` → 0 | -err (C-shim entry point).
+- `src/dbus_marshal.cyr` — **native backend, N4**. Message encoder.
+- `src/dbus_unmarshal.cyr` — **native backend, N4**. Field lookup
+  by code + an aligned body cursor.
 - `src/dbus_frame.cyr` — **native backend, N3**. Message framing;
   owns THE receive buffer that `dbus_auth` borrows.
 - `src/dbus_socket.cyr` — **native backend, N3**. `sockaddr_un`

@@ -1,0 +1,162 @@
+# @internal — native-dbus message decoder
+# dbus_unmarshal.cyr — reads header fields and body values out of a
+# framed message.
+#
+# Operates on a message the framer has already declared COMPLETE, so
+# it never has to deal with a partial tail — that separation is why
+# neither module needs the other's edge cases.
+#
+# Two rules govern everything here, and both were paid for:
+#
+# 1. **Alignment is relative to the START OF THE MESSAGE.** Every
+#    offset below is message-relative and `p` is the message base.
+#    The N2 decoder aligned against the buffer origin, which works
+#    for the first message in a read and silently mis-reads the
+#    second.
+#
+# 2. **Header u32s are read with load32, which zero-extends.**
+#    `load64` swallows the neighbouring field: on the bus's very
+#    first reply, `load64(p + 4)` returns -4294967283 because the
+#    0xFFFFFFFF serial sits in the high half. Note this is the
+#    OPPOSITE of dbus_sys.cyr, which sign-extends correctly because
+#    an SCM_RIGHTS payload really is a signed int32 fd.
+#
+# Field ORDER is never assumed. The corpus shows [1,3,2,6] on a
+# call, [5,7,6,8] on its reply and [5,6,8,9,7] on an fd-bearing
+# reply — it is an implementation choice, so fields are always
+# located by scanning for their code.
+
+fn dbus_unmarshal_ok()       { return 0; }
+fn dbus_unmarshal_notfound() { return -1200; }
+fn dbus_unmarshal_malformed(){ return -1201; }
+
+fn dbus_unmarshal_align(n, a) {
+    return (n + a - 1) & (0 - a);
+}
+
+fn dbus_unmarshal_u32(p, off) {
+    return load32(p + off);
+}
+
+fn dbus_unmarshal_body_len(p)   { return dbus_unmarshal_u32(p, 4); }
+fn dbus_unmarshal_serial(p)     { return dbus_unmarshal_u32(p, 8); }
+fn dbus_unmarshal_fields_len(p) { return dbus_unmarshal_u32(p, 12); }
+fn dbus_unmarshal_type(p)       { return load8(p + 1); }
+fn dbus_unmarshal_flags(p)      { return load8(p + 2); }
+
+fn dbus_unmarshal_body_off(p) {
+    return dbus_unmarshal_align(16 + dbus_unmarshal_fields_len(p), 8);
+}
+
+# Locate a header field by code. Returns the message-relative offset
+# of its VALUE, or notfound. `sig_out` receives the signature's
+# first byte so the caller can tell `s` from `o` from `u` from `g`.
+#
+# Each field is a (yv) struct: 8-aligned, then code(u8) siglen(u8)
+# sig NUL, then the value at its own natural alignment.
+fn dbus_unmarshal_find_field(p, code, sig_out) {
+    var flen = dbus_unmarshal_fields_len(p);
+    var end = 16 + flen;
+    var at = 16;
+    while (at < end) {
+        at = dbus_unmarshal_align(at, 8);
+        if (at >= end) { return dbus_unmarshal_notfound(); }
+        var c = load8(p + at);
+        var siglen = load8(p + at + 1);
+        if (siglen == 0) { return dbus_unmarshal_malformed(); }
+        var sig0 = load8(p + at + 2);
+        var vo = at + 2 + siglen + 1;
+
+        var nxt = 0;
+        if (sig0 == 115) { nxt = 1; }        # 's'
+        if (sig0 == 111) { nxt = 1; }        # 'o'
+        if (nxt == 1) {
+            vo = dbus_unmarshal_align(vo, 4);
+            var n = dbus_unmarshal_u32(p, vo);
+            nxt = vo + 4 + n + 1;
+        }
+        if (sig0 == 117) {                   # 'u'
+            vo = dbus_unmarshal_align(vo, 4);
+            nxt = vo + 4;
+        }
+        if (sig0 == 103) {                   # 'g'
+            var gn = load8(p + vo);
+            nxt = vo + 1 + gn + 1;
+        }
+        if (nxt <= at) { return dbus_unmarshal_malformed(); }
+
+        if (c == code) {
+            if (sig_out != 0) { store64(sig_out, sig0); }
+            return vo;
+        }
+        at = nxt;
+    }
+    return dbus_unmarshal_notfound();
+}
+
+# Read a string-shaped value (`s` or `o`) at a message-relative
+# offset. Returns its length and stores a pointer to the first byte.
+# The bytes are NOT copied — they live in the framer's buffer and
+# stay valid until dbus_frame_advance moves past this message.
+fn dbus_unmarshal_str_at(p, off, ptr_out) {
+    var n = dbus_unmarshal_u32(p, off);
+    if (ptr_out != 0) { store64(ptr_out, p + off + 4); }
+    return n;
+}
+
+# Read a signature value (`g`) — ONE length byte, not four. Treating
+# it like `s` reads the signature text as a length.
+fn dbus_unmarshal_sig_at(p, off, ptr_out) {
+    var n = load8(p + off);
+    if (ptr_out != 0) { store64(ptr_out, p + off + 1); }
+    return n;
+}
+
+# ---- body ----
+# A cursor, because body values are positional and each is aligned
+# relative to the message start.
+var _dbu_p   = 0;
+var _dbu_at  = 0;
+var _dbu_end = 0;
+
+fn dbus_unmarshal_body_begin(p) {
+    _dbu_p = p;
+    _dbu_at = dbus_unmarshal_body_off(p);
+    _dbu_end = _dbu_at + dbus_unmarshal_body_len(p);
+    return 0;
+}
+
+fn dbus_unmarshal_body_remaining() { return _dbu_end - _dbu_at; }
+
+fn dbus_unmarshal_next_u32() {
+    _dbu_at = dbus_unmarshal_align(_dbu_at, 4);
+    if (_dbu_at + 4 > _dbu_end) { return dbus_unmarshal_malformed(); }
+    var v = dbus_unmarshal_u32(_dbu_p, _dbu_at);
+    _dbu_at = _dbu_at + 4;
+    return v;
+}
+
+# `b` is a u32 on the wire; anything but 0 or 1 is malformed.
+fn dbus_unmarshal_next_bool() {
+    var v = dbus_unmarshal_next_u32();
+    if (v == dbus_unmarshal_malformed()) { return v; }
+    if (v > 1) { return dbus_unmarshal_malformed(); }
+    return v;
+}
+
+fn dbus_unmarshal_next_str(ptr_out) {
+    _dbu_at = dbus_unmarshal_align(_dbu_at, 4);
+    if (_dbu_at + 4 > _dbu_end) { return dbus_unmarshal_malformed(); }
+    var n = dbus_unmarshal_u32(_dbu_p, _dbu_at);
+    if (_dbu_at + 4 + n + 1 > _dbu_end) { return dbus_unmarshal_malformed(); }
+    if (ptr_out != 0) { store64(ptr_out, _dbu_p + _dbu_at + 4); }
+    _dbu_at = _dbu_at + 4 + n + 1;
+    return n;
+}
+
+# `h` is a 4-byte INDEX into the SCM_RIGHTS array, not an fd. The
+# descriptor itself arrives out of band and is queued by
+# dbus_frame; this returns the index to look up there.
+fn dbus_unmarshal_next_fd_index() {
+    return dbus_unmarshal_next_u32();
+}

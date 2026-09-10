@@ -117,6 +117,7 @@ it.
 | **N1** — SCM_RIGHTS fd passing | 0.7.0 | ✅ 2026-09-09. `src/dbus_sys.cyr`; fd proven across a socketpair; surplus-fd leak found and fixed. |
 | **N2** — golden byte corpus | 0.7.1 | ✅ 2026-09-09. 15 fixtures + tap/decoder tools; corrected our own SASL docs. Second-host capture outstanding. |
 | **N3** — transport, auth, framing | 0.8.0 | ✅ 2026-09-09. Native SASL against the real bus; framer proven by drip-feed. `Hello` round-trip deferred to N4 (needs the marshaller). |
+| **N4** — marshal / unmarshal | 0.9.0 | ✅ 2026-09-09. `Hello` byte-identical to libsystemd's and ACCEPTED by the bus; reply decoded; closes N3's deferred criterion. |
 
 **M2 — "generalize beyond logind"** (Properties, Introspectable,
 session bus, generic method dispatch, async variants) is
@@ -318,7 +319,7 @@ time, and carries a partial tail across reads.
   262-byte blob **one byte at a time** yields the same two
   messages as feeding it whole, with zero residual bytes.
 
-### N4 — Marshal and unmarshal (0.9.0)
+### N4 — Marshal and unmarshal (0.9.0) — ✅ SHIPPED
 
 Modules: `dbus_marshal.cyr`, `dbus_unmarshal.cyr`.
 
@@ -350,9 +351,15 @@ would fail a naive byte-equality gate. So:
   carries serial `0xFFFFFFFF`. `>>` is logical and there is no
   unsigned type, so a signed-comparison bug fires on **message
   one**, not in a fuzz corner. Use that literal as the fixture.
-- **Exit**: all six requests encode to accepted bytes; the
-  captured replies decode to the right values; the `0xFFFFFFFF`
-  serial fixture passes.
+- **Exit**: ✅ `Hello` encodes **byte-identically** to the capture
+  (128/128) and the **bus accepted it and replied**; ✅ the reply
+  decodes and yields the unique name; ✅ the `0xFFFFFFFF` serial
+  reads back positive. ⚠️ The other five requests are encodable
+  (`uu`, `b`, empty-body and `hb` shapes all pinned) but only
+  `Hello` has been sent live — the logind calls need the session
+  layer, which is N5.
+- **This also closes N3's deferred criterion**: `Hello` now
+  round-trips against the real bus and prints `:1.NNNNN`.
 
 ### N5 — The logind session layer (0.10.0)
 

@@ -1,0 +1,198 @@
+# @internal — native-dbus message encoder
+# dbus_marshal.cyr — builds a dbus message into a buffer.
+#
+# Scope is the fence in ADR-0003: the types samvada's frozen API
+# actually exercises — `u`, `s`, `o`, `g`, `b`, and `h` as a body
+# index. Not `y n q i x t d a (...) v`.
+#
+# ALIGNMENT IS RELATIVE TO THE START OF THE MESSAGE. Every message
+# here begins at offset 0 of its own buffer, so buffer offset and
+# message offset coincide — which is a convenience, not a licence.
+# The moment that stops being true (a second message appended into
+# the same buffer) every align call must take the message base. The
+# N2 decoder shipped that bug and it cost a false "truncated" claim.
+#
+# Layout, from tests/fixtures/dbus/02-hello-call.bin:
+#   +0  endian 'l'      +1 type      +2 flags     +3 proto=1
+#   +4  body_len(u32)   +8 serial    +12 fields_len(u32)
+#   +16 header fields — each a (yv) struct, 8-ALIGNED:
+#          code(u8) siglen(u8) sig NUL   then the value at ITS
+#          own natural alignment (4 for u/s/o, 1 for g)
+#   fields_len EXCLUDES the trailing pad; the body starts at
+#   align8(16 + fields_len).
+
+fn dbus_marshal_cap() { return 4096; }
+
+fn dbus_marshal_type_call()   { return 1; }
+fn dbus_marshal_type_return() { return 2; }
+fn dbus_marshal_type_error()  { return 3; }
+fn dbus_marshal_type_signal() { return 4; }
+
+# Header field codes.
+fn dbus_marshal_f_path()      { return 1; }
+fn dbus_marshal_f_interface() { return 2; }
+fn dbus_marshal_f_member()    { return 3; }
+fn dbus_marshal_f_errname()   { return 4; }
+fn dbus_marshal_f_replyser()  { return 5; }
+fn dbus_marshal_f_dest()      { return 6; }
+fn dbus_marshal_f_sender()    { return 7; }
+fn dbus_marshal_f_signature() { return 8; }
+fn dbus_marshal_f_unixfds()   { return 9; }
+
+var _dbm_buf   = 0;
+var _dbm_at    = 0;   # write cursor
+var _dbm_fend  = 0;   # where the header-fields array ended
+var _dbm_ready = 0;
+
+fn dbus_marshal_align(n, a) {
+    return (n + a - 1) & (0 - a);
+}
+
+fn _dbm_pad_to(a) {
+    var want = dbus_marshal_align(_dbm_at, a);
+    while (_dbm_at < want) {
+        store8(_dbm_buf + _dbm_at, 0);
+        _dbm_at = _dbm_at + 1;
+    }
+    return 0;
+}
+
+fn _dbm_u8(v) {
+    store8(_dbm_buf + _dbm_at, v & 0xFF);
+    _dbm_at = _dbm_at + 1;
+    return 0;
+}
+
+# Little-endian u32. samvada always emits 'l': both target arches
+# are little-endian, and emitting native order is what every dbus
+# implementation does.
+fn _dbm_u32(v) {
+    store8(_dbm_buf + _dbm_at + 0, v & 0xFF);
+    store8(_dbm_buf + _dbm_at + 1, (v >> 8) & 0xFF);
+    store8(_dbm_buf + _dbm_at + 2, (v >> 16) & 0xFF);
+    store8(_dbm_buf + _dbm_at + 3, (v >> 24) & 0xFF);
+    _dbm_at = _dbm_at + 4;
+    return 0;
+}
+
+fn _dbm_bytes(p, n) {
+    var i = 0;
+    while (i < n) {
+        store8(_dbm_buf + _dbm_at + i, load8(p + i));
+        i = i + 1;
+    }
+    _dbm_at = _dbm_at + n;
+    return 0;
+}
+
+# Start a message. `flags` is 0 for a normal call — the captured
+# Hello uses 0x00, and replies use 0x01 (NO_REPLY_EXPECTED).
+fn dbus_marshal_begin(mtype, flags, serial) {
+    if (_dbm_ready == 0) {
+        _dbm_buf = alloc(dbus_marshal_cap());
+        if (_dbm_buf == 0) { return -12; }
+        _dbm_ready = 1;
+    }
+    _dbm_at = 0;
+    _dbm_u8(108);              # 'l'
+    _dbm_u8(mtype);
+    _dbm_u8(flags);
+    _dbm_u8(1);                # protocol version
+    _dbm_u32(0);               # body_len, backfilled
+    _dbm_u32(serial);
+    _dbm_u32(0);               # fields_len, backfilled
+    _dbm_fend = 0;
+    return 0;
+}
+
+# A (yv) header field carrying a string-shaped value: `s` or `o`.
+fn dbus_marshal_field_str(code, sigch, str, len) {
+    _dbm_pad_to(8);
+    _dbm_u8(code);
+    _dbm_u8(1);                # signature length
+    _dbm_u8(sigch);
+    _dbm_u8(0);                # signature NUL
+    _dbm_pad_to(4);
+    _dbm_u32(len);
+    _dbm_bytes(str, len);
+    _dbm_u8(0);                # string NUL, not counted in len
+    return 0;
+}
+
+fn dbus_marshal_field_u32(code, val) {
+    _dbm_pad_to(8);
+    _dbm_u8(code);
+    _dbm_u8(1);
+    _dbm_u8(117);              # 'u'
+    _dbm_u8(0);
+    _dbm_pad_to(4);
+    _dbm_u32(val);
+    return 0;
+}
+
+# A signature-valued field (code 8). `g` is length-prefixed by ONE
+# byte and needs no alignment — the trap is treating it like `s`.
+fn dbus_marshal_field_sig(code, sig, len) {
+    _dbm_pad_to(8);
+    _dbm_u8(code);
+    _dbm_u8(1);
+    _dbm_u8(103);              # 'g'
+    _dbm_u8(0);
+    _dbm_u8(len);
+    _dbm_bytes(sig, len);
+    _dbm_u8(0);
+    return 0;
+}
+
+# Close the fields array. fields_len EXCLUDES the pad that follows,
+# so it is recorded before padding to the body's 8-alignment.
+fn dbus_marshal_end_fields() {
+    _dbm_fend = _dbm_at;
+    var flen = _dbm_at - 16;
+    store8(_dbm_buf + 12, flen & 0xFF);
+    store8(_dbm_buf + 13, (flen >> 8) & 0xFF);
+    store8(_dbm_buf + 14, (flen >> 16) & 0xFF);
+    store8(_dbm_buf + 15, (flen >> 24) & 0xFF);
+    _dbm_pad_to(8);
+    return 0;
+}
+
+# ---- body ----
+fn dbus_marshal_body_u32(v) {
+    _dbm_pad_to(4);
+    _dbm_u32(v);
+    return 0;
+}
+
+# `b` is a uint32 on the wire, strictly 0 or 1 — one byte
+# semantically, four bytes physically.
+fn dbus_marshal_body_bool(v) {
+    var b = 0;
+    if (v != 0) { b = 1; }
+    _dbm_pad_to(4);
+    _dbm_u32(b);
+    return 0;
+}
+
+fn dbus_marshal_body_str(str, len) {
+    _dbm_pad_to(4);
+    _dbm_u32(len);
+    _dbm_bytes(str, len);
+    _dbm_u8(0);
+    return 0;
+}
+
+# Finish: backfill body_len and return the total on-wire length.
+fn dbus_marshal_finish() {
+    var body_start = dbus_marshal_align(_dbm_fend, 8);
+    var blen = _dbm_at - body_start;
+    if (blen < 0) { blen = 0; }
+    store8(_dbm_buf + 4, blen & 0xFF);
+    store8(_dbm_buf + 5, (blen >> 8) & 0xFF);
+    store8(_dbm_buf + 6, (blen >> 16) & 0xFF);
+    store8(_dbm_buf + 7, (blen >> 24) & 0xFF);
+    return _dbm_at;
+}
+
+fn dbus_marshal_buf() { return _dbm_buf; }
+fn dbus_marshal_len() { return _dbm_at; }

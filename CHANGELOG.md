@@ -4,6 +4,64 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-09-09
+
+**N4 — marshal and unmarshal.** Native Cyrius now speaks dbus end
+to end: connect, SASL, build a `Hello` **byte-identical** to
+libsystemd's, send it, and decode the bus's reply. No libsystemd in
+that path. This also closes N3's deferred exit criterion.
+
+```
+SASL ok
+Hello is 128 bytes
+  msg type 2  serial 4294967295  len 101
+  UNIQUE NAME = :1.20566
+  msg type 4  serial 4294967295  len 181
+```
+
+One read, two messages, the unique name extracted, and the
+`0xFFFFFFFF` serial read back POSITIVE. No public API change; the
+consumer bundle is untouched (26 exported fns, no native module).
+
+### Added
+- **`src/dbus_marshal.cyr`** — header, `(yv)` field array and body
+  for `u` / `s` / `o` / `g` / `b` / `h`. Reproduces the captured
+  `Hello` **byte for byte, all 128 of them**.
+- **`src/dbus_unmarshal.cyr`** — locates header fields BY CODE and
+  pops body values through an aligned cursor.
+- `tests/dbus_codec.tcyr` — 48 asserts.
+
+### Notes
+- **Field order is never assumed.** The corpus shows `[1,3,2,6]` on
+  a call, `[5,7,6,8]` on its reply and `[5,6,8,9,7]` on an
+  fd-bearing reply — it is an implementation choice, not a spec
+  requirement. Fields are located by scanning for their code, and a
+  test builds the same message with a deliberately different field
+  order to prove extraction is unaffected.
+- **The corpus is a regression fixture; the BUS is the correctness
+  oracle.** Byte-equality against a golden buffer tests "did you
+  reproduce libsystemd's arbitrary ordering". What actually proves
+  correctness is that the daemon accepted our 128 bytes and
+  answered — which it did.
+- **`fields_len` EXCLUDES the trailing pad.** Hello's is 109, and
+  the body starts at `align8(16 + 109)` = 128. Encoding the pad
+  into the length is the obvious off-by-three.
+- **`g` is length-prefixed by ONE byte, not four.** Treating it
+  like `s` reads the signature text as a length. Pinned.
+- **`b` is a u32 on the wire** — one byte semantically, four
+  physically, strictly 0 or 1. The decoder rejects 2; the encoder
+  normalises 99 to 1.
+- **`h` is an INDEX**, not a descriptor: the fd arrives out of band
+  via `SCM_RIGHTS` and is queued by `dbus_frame`. The body carries
+  only a u32 into that array.
+- **Every header u32 goes through `load32`**, which zero-extends —
+  and a test asserts on our OWN encoding that `load64(b + 4)` is
+  negative, so the reason the rule exists stays visible. This is
+  the opposite of `dbus_sys.cyr`, which sign-extends correctly
+  because an `SCM_RIGHTS` payload really is a signed int32 fd.
+- A malformed field array (signature length 0) is refused rather
+  than walked forever.
+
 ## [0.8.0] — 2026-09-09
 
 **N3 — transport, auth and framing.** Native Cyrius code now

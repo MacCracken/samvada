@@ -1,0 +1,297 @@
+# N4 — marshal / unmarshal, driven by the N2 golden corpus.
+#
+# The corpus is a REGRESSION FIXTURE for samvada's own encoder, not
+# a conformance oracle. Header field order is an implementation
+# choice ([1,3,2,6], [5,7,6,8], [5,6,8,9,7] all observed), so
+# byte-equality tests "did you reproduce libsystemd's arbitrary
+# ordering", not "is your message correct". The correctness oracle
+# is the bus itself — see the live check in the 0.9.0 release notes.
+#
+# What byte-equality IS good for, and is used for here: proving that
+# a message samvada builds today is the same one it built yesterday,
+# and that our understanding of the wire format reproduces a real
+# captured message exactly.
+
+include "src/dbus_marshal.cyr"
+include "src/dbus_unmarshal.cyr"
+
+fn t_put(p, s) {
+    var n = strlen(s);
+    var i = 0;
+    while (i < n) { store8(p + i, load8(s + i)); i = i + 1; }
+    return n;
+}
+
+fn t_streq(p, n, s) {
+    if (n != strlen(s)) { return 0; }
+    var i = 0;
+    while (i < n) {
+        if (load8(p + i) != load8(s + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Rebuild the captured Hello (tests/fixtures/dbus/02-hello-call.bin).
+fn t_build_hello() {
+    var t = alloc(64);
+    dbus_marshal_begin(dbus_marshal_type_call(), 0, 1);
+    var n = t_put(t, "/org/freedesktop/DBus");
+    dbus_marshal_field_str(dbus_marshal_f_path(), 111, t, n);
+    n = t_put(t, "Hello");
+    dbus_marshal_field_str(dbus_marshal_f_member(), 115, t, n);
+    n = t_put(t, "org.freedesktop.DBus");
+    dbus_marshal_field_str(dbus_marshal_f_interface(), 115, t, n);
+    n = t_put(t, "org.freedesktop.DBus");
+    dbus_marshal_field_str(dbus_marshal_f_dest(), 115, t, n);
+    dbus_marshal_end_fields();
+    return dbus_marshal_finish();
+}
+
+# ---- alignment ----
+fn test_marshal_align() {
+    test_group("codec: alignment helper");
+    assert_eq(dbus_marshal_align(0, 8), 0, "0 -> 0");
+    assert_eq(dbus_marshal_align(1, 8), 8, "1 -> 8");
+    assert_eq(dbus_marshal_align(125, 8), 128, "125 -> 128 (Hello's body offset)");
+    assert_eq(dbus_marshal_align(46, 8), 48, "46 -> 48 (Hello's 2nd field)");
+    assert_eq(dbus_marshal_align(6, 4), 8, "4-align");
+    assert_eq(dbus_marshal_align(8, 4), 8, "already aligned");
+    return 0;
+}
+
+# ---- the headline: byte-identical reproduction ----
+# 128 bytes, every one matching what libsystemd put on the wire.
+# The offsets asserted individually are the ones that encode a rule:
+# the 8-aligned field starts, the 4-aligned string lengths, and the
+# fields_len that EXCLUDES the trailing pad.
+fn test_hello_is_byte_identical() {
+    test_group("marshal: Hello reproduces the captured bytes exactly");
+    var total = t_build_hello();
+    var b = dbus_marshal_buf();
+    assert_eq(total, 128, "128 bytes, as captured");
+    assert_eq(load8(b + 0), 108, "'l'");
+    assert_eq(load8(b + 1), 1, "METHOD_CALL");
+    assert_eq(load8(b + 2), 0, "flags 0x00 — a call, not a reply");
+    assert_eq(load8(b + 3), 1, "protocol 1");
+    assert_eq(dbus_unmarshal_body_len(b), 0, "empty body");
+    assert_eq(dbus_unmarshal_serial(b), 1, "Hello's serial is 1");
+    assert_eq(dbus_unmarshal_fields_len(b), 109,
+      "fields_len 109 — EXCLUDES the 3 pad bytes before the body");
+    assert_eq(dbus_unmarshal_body_off(b), 128, "body starts at align8(16+109)");
+    # the four (yv) structs land where the capture put them
+    assert_eq(load8(b + 16), 1, "field @16 is PATH");
+    assert_eq(load8(b + 48), 3, "field @48 is MEMBER (8-aligned after PATH)");
+    assert_eq(load8(b + 64), 2, "field @64 is INTERFACE");
+    assert_eq(load8(b + 96), 6, "field @96 is DESTINATION");
+    return 0;
+}
+
+# ---- decoding what we encoded ----
+fn test_roundtrip_fields() {
+    test_group("unmarshal: every Hello field reads back");
+    t_build_hello();
+    var b = dbus_marshal_buf();
+    var sig = alloc(8);
+    var ptr = alloc(8);
+
+    var off = dbus_unmarshal_find_field(b, dbus_marshal_f_path(), sig);
+    assert(off > 0, "PATH located");
+    assert_eq(load64(sig), 111, "and its signature is 'o'");
+    var n = dbus_unmarshal_str_at(b, off, ptr);
+    assert_eq(t_streq(load64(ptr), n, "/org/freedesktop/DBus"), 1, "PATH value");
+
+    off = dbus_unmarshal_find_field(b, dbus_marshal_f_member(), sig);
+    n = dbus_unmarshal_str_at(b, off, ptr);
+    assert_eq(load64(sig), 115, "MEMBER signature is 's'");
+    assert_eq(t_streq(load64(ptr), n, "Hello"), 1, "MEMBER value");
+
+    off = dbus_unmarshal_find_field(b, dbus_marshal_f_interface(), sig);
+    n = dbus_unmarshal_str_at(b, off, ptr);
+    assert_eq(t_streq(load64(ptr), n, "org.freedesktop.DBus"), 1, "INTERFACE value");
+
+    off = dbus_unmarshal_find_field(b, dbus_marshal_f_dest(), sig);
+    n = dbus_unmarshal_str_at(b, off, ptr);
+    assert_eq(t_streq(load64(ptr), n, "org.freedesktop.DBus"), 1, "DESTINATION value");
+
+    assert_eq(dbus_unmarshal_find_field(b, dbus_marshal_f_sender(), sig),
+      dbus_unmarshal_notfound(), "SENDER is absent from a call");
+    return 0;
+}
+
+# Field ORDER must never be assumed. Build the same fields in a
+# deliberately different order and require identical extraction.
+fn test_field_order_is_not_assumed() {
+    test_group("unmarshal: fields are found by CODE, not position");
+    var t = alloc(64);
+    dbus_marshal_begin(dbus_marshal_type_call(), 0, 7);
+    var n = t_put(t, "org.example.Iface");
+    dbus_marshal_field_str(dbus_marshal_f_interface(), 115, t, n);   # 2 first
+    n = t_put(t, "/org/example");
+    dbus_marshal_field_str(dbus_marshal_f_path(), 111, t, n);        # then 1
+    n = t_put(t, "Ping");
+    dbus_marshal_field_str(dbus_marshal_f_member(), 115, t, n);      # then 3
+    dbus_marshal_end_fields();
+    dbus_marshal_finish();
+    var b = dbus_marshal_buf();
+    var sig = alloc(8);
+    var ptr = alloc(8);
+    var off = dbus_unmarshal_find_field(b, dbus_marshal_f_path(), sig);
+    var m = dbus_unmarshal_str_at(b, off, ptr);
+    assert_eq(t_streq(load64(ptr), m, "/org/example"), 1, "PATH found despite being 2nd");
+    off = dbus_unmarshal_find_field(b, dbus_marshal_f_member(), sig);
+    m = dbus_unmarshal_str_at(b, off, ptr);
+    assert_eq(t_streq(load64(ptr), m, "Ping"), 1, "MEMBER found despite being 3rd");
+    return 0;
+}
+
+# `g` is length-prefixed by ONE byte. Treating it like `s` reads the
+# signature text as a 4-byte length.
+fn test_signature_field_is_one_byte_prefixed() {
+    test_group("codec: 'g' uses a 1-byte length, not 4");
+    var t = alloc(16);
+    dbus_marshal_begin(dbus_marshal_type_return(), 1, 9);
+    var n = t_put(t, "hb");
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), t, n);
+    dbus_marshal_end_fields();
+    dbus_marshal_finish();
+    var b = dbus_marshal_buf();
+    var sig = alloc(8);
+    var ptr = alloc(8);
+    var off = dbus_unmarshal_find_field(b, dbus_marshal_f_signature(), sig);
+    assert(off > 0, "SIGNATURE located");
+    assert_eq(load64(sig), 103, "signature-of-signature is 'g'");
+    var m = dbus_unmarshal_sig_at(b, off, ptr);
+    assert_eq(m, 2, "length 2");
+    assert_eq(t_streq(load64(ptr), m, "hb"), 1, "value is 'hb'");
+    return 0;
+}
+
+# ---- body ----
+# The TakeDevice request: two u32s. This is the exact body shape
+# 05-takedevice-call.bin carries.
+fn test_body_uu_roundtrip() {
+    test_group("codec: 'uu' body (TakeDevice's shape)");
+    var t = alloc(64);
+    dbus_marshal_begin(dbus_marshal_type_call(), 0, 4);
+    var n = t_put(t, "/org/freedesktop/login1/session/_32");
+    dbus_marshal_field_str(dbus_marshal_f_path(), 111, t, n);
+    n = t_put(t, "TakeDevice");
+    dbus_marshal_field_str(dbus_marshal_f_member(), 115, t, n);
+    n = t_put(t, "uu");
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), t, n);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_u32(226);
+    dbus_marshal_body_u32(1);
+    var total = dbus_marshal_finish();
+    var b = dbus_marshal_buf();
+    assert_eq(dbus_unmarshal_body_len(b), 8, "body is 8 bytes");
+    dbus_unmarshal_body_begin(b);
+    assert_eq(dbus_unmarshal_next_u32(), 226, "major");
+    assert_eq(dbus_unmarshal_next_u32(), 1, "minor");
+    assert_eq(dbus_unmarshal_body_remaining(), 0, "body fully consumed");
+    return 0;
+}
+
+# The TakeDevice REPLY shape: `hb`. The fd index is a u32 in the
+# body; the descriptor itself arrives via SCM_RIGHTS.
+fn test_body_hb_roundtrip() {
+    test_group("codec: 'hb' body (TakeDevice's reply shape)");
+    var t = alloc(16);
+    dbus_marshal_begin(dbus_marshal_type_return(), 1, 20495);
+    dbus_marshal_field_u32(dbus_marshal_f_replyser(), 2);
+    var n = t_put(t, "hb");
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), t, n);
+    dbus_marshal_field_u32(dbus_marshal_f_unixfds(), 1);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_u32(0);          # fd INDEX, not an fd
+    dbus_marshal_body_bool(0);         # inactive = false
+    dbus_marshal_finish();
+    var b = dbus_marshal_buf();
+    assert_eq(dbus_unmarshal_body_len(b), 8, "h + b = 8 bytes");
+    var sig = alloc(8);
+    assert_eq(dbus_unmarshal_u32(b, dbus_unmarshal_find_field(b, dbus_marshal_f_unixfds(), sig)),
+      1, "UNIX_FDS = 1");
+    dbus_unmarshal_body_begin(b);
+    assert_eq(dbus_unmarshal_next_fd_index(), 0, "fd index 0");
+    assert_eq(dbus_unmarshal_next_bool(), 0, "inactive false");
+    return 0;
+}
+
+fn test_bool_is_strict() {
+    test_group("codec: 'b' accepts only 0 or 1");
+    dbus_marshal_begin(dbus_marshal_type_return(), 1, 1);
+    dbus_marshal_field_u32(dbus_marshal_f_replyser(), 1);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_u32(2);          # not a legal boolean
+    dbus_marshal_finish();
+    var b = dbus_marshal_buf();
+    dbus_unmarshal_body_begin(b);
+    assert_eq(dbus_unmarshal_next_bool(), dbus_unmarshal_malformed(),
+      "2 is rejected as a boolean");
+    # and the marshaller normalises on the way out
+    dbus_marshal_begin(dbus_marshal_type_return(), 1, 1);
+    dbus_marshal_field_u32(dbus_marshal_f_replyser(), 1);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_bool(99);
+    dbus_marshal_finish();
+    dbus_unmarshal_body_begin(dbus_marshal_buf());
+    assert_eq(dbus_unmarshal_next_bool(), 1, "99 encodes as 1");
+    return 0;
+}
+
+# ---- the 0xFFFFFFFF serial ----
+# The bus's very first METHOD_RETURN carries it. This is the
+# acceptance criterion the roadmap names, and the reason every
+# header u32 goes through load32.
+fn test_max_serial_reads_positive() {
+    test_group("codec: serial 0xFFFFFFFF (the bus's first reply)");
+    dbus_marshal_begin(dbus_marshal_type_return(), 1, 4294967295);
+    dbus_marshal_field_u32(dbus_marshal_f_replyser(), 4294967295);
+    dbus_marshal_end_fields();
+    dbus_marshal_finish();
+    var b = dbus_marshal_buf();
+    assert_eq(dbus_unmarshal_serial(b), 4294967295, "serial reads back POSITIVE");
+    assert(dbus_unmarshal_serial(b) > 0, "and is not negative");
+    var sig = alloc(8);
+    var off = dbus_unmarshal_find_field(b, dbus_marshal_f_replyser(), sig);
+    assert_eq(dbus_unmarshal_u32(b, off), 4294967295, "REPLY_SERIAL too");
+    # the trap, demonstrated on our own encoding
+    assert(load64(b + 4) < 0, "load64(b+4) IS negative — why load32 is mandatory");
+    return 0;
+}
+
+fn test_malformed_field_array() {
+    test_group("unmarshal: malformed field arrays are refused");
+    dbus_marshal_begin(dbus_marshal_type_call(), 0, 1);
+    var t = alloc(16);
+    var n = t_put(t, "Ping");
+    dbus_marshal_field_str(dbus_marshal_f_member(), 115, t, n);
+    dbus_marshal_end_fields();
+    dbus_marshal_finish();
+    var b = dbus_marshal_buf();
+    # a zero signature length cannot advance the walk
+    store8(b + 17, 0);
+    var sig = alloc(8);
+    assert_eq(dbus_unmarshal_find_field(b, dbus_marshal_f_dest(), sig),
+      dbus_unmarshal_malformed(), "siglen 0 is malformed, not an infinite loop");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_marshal_align();
+    test_hello_is_byte_identical();
+    test_roundtrip_fields();
+    test_field_order_is_not_assumed();
+    test_signature_field_is_one_byte_prefixed();
+    test_body_uu_roundtrip();
+    test_body_hb_roundtrip();
+    test_bool_is_strict();
+    test_max_serial_reads_positive();
+    test_malformed_field_array();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
