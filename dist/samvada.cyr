@@ -1505,6 +1505,7 @@ fn dbus_session_call(fd, serial) {
     if (w < 0) { return w; }
 
     var spins = 0;
+    var fdslot = alloc(8);
     while (spins < 64) {
         var r = dbus_frame_next();
         while (r > 0) {
@@ -1545,10 +1546,32 @@ fn dbus_session_call(fd, serial) {
         if (r == dbus_frame_badproto())  { return -71; }
 
         dbus_frame_maybe_compact();
-        var got = sys_read(fd, dbus_frame_tail(), dbus_frame_space());
-        if (got == 0) { dbus_frame_set_eof(); }
-        if (got < 0)  { return got; }
-        if (got > 0)  { dbus_frame_commit(got); }
+        # THE REPLY IS AN FD-BEARING MESSAGE, so this read must be a
+        # recvmsg. TakeDevice's entire purpose is the descriptor, and
+        # Inhibit returns one too. sys_read() delivers the BYTES and
+        # lets the kernel discard the SCM_RIGHTS payload: the reply
+        # parses perfectly, its UNIX_FDS field still says 1, the body
+        # still carries a valid index, and the descriptor is simply
+        # gone. Nothing downstream can tell.
+        #
+        # This was the one message samvada could never receive. It
+        # survived five releases because an unseated host answers
+        # TakeDevice with AccessDenied, and an ERROR reply carries no
+        # fd — so the fd path was never once exercised. Measured on
+        # the live bus via Inhibit: UNIX_FDS=1, take_fd() == -1.
+        # The pump path always used recvmsg; this one did not.
+        var space = dbus_frame_space();
+        if (space <= 0) { dbus_frame_set_eof(); }
+        if (space > 0) {
+            store64(fdslot, (0 - 1));
+            var got = dbus_sys_recv_fd_flags(fd, dbus_frame_tail(), space,
+              fdslot, 0);
+            if (got == 0) { dbus_frame_set_eof(); }
+            if (got < 0)  { return got; }
+            if (got > 0)  { dbus_frame_commit(got); }
+            var qfd = load64(fdslot);
+            if (qfd >= 0) { dbus_frame_push_fd(qfd); }
+        }
         spins = spins + 1;
     }
     return -110;                                  # -ETIMEDOUT

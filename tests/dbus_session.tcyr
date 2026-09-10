@@ -205,6 +205,185 @@ fn test_release_control_has_no_signature_field() {
     return 0;
 }
 
+# ---- socketpair plumbing for the reply-path pins ----
+# sendmsg is 46 on x86_64 but **ftruncate** on aarch64; hardcoding it
+# would not fail loudly there, it would truncate a file.
+fn s_sendmsg_nr() {
+    #ifdef CYRIUS_ARCH_AARCH64
+    return 211;
+    #endif
+    return 46;
+}
+
+var _s_iov  = 0;
+var _s_mh   = 0;
+var _s_ctrl = 0;
+
+fn s_send_init() {
+    if (_s_iov != 0) { return 0; }
+    _s_iov  = alloc(16);
+    _s_mh   = alloc(56);
+    _s_ctrl = alloc(24);
+    return 0;
+}
+
+# Send `len` bytes plus one SCM_RIGHTS fd. Planting a whole framed
+# reply this way is the only way to exercise the call path's read
+# with a descriptor actually riding on it.
+fn s_send_with_fd(sock, buf, len, payload_fd) {
+    s_send_init();
+    store64(_s_iov + 0, buf);
+    store64(_s_iov + 8, len);
+    var i = 0;
+    while (i < 24) { store64(_s_ctrl + i, 0); i = i + 8; }
+    store64(_s_ctrl + 0, dbus_sys_cmsg_len_1fd());
+    store64(_s_ctrl + 8, dbus_sys_sol_socket());
+    store64(_s_ctrl + 12, dbus_sys_scm_rights());
+    store64(_s_ctrl + 16, payload_fd);
+    i = 0;
+    while (i < 56) { store64(_s_mh + i, 0); i = i + 8; }
+    store64(_s_mh + 16, _s_iov);
+    store64(_s_mh + 24, 1);
+    store64(_s_mh + 32, _s_ctrl);
+    store64(_s_mh + 40, dbus_sys_cmsg_space_1fd());
+    return syscall(s_sendmsg_nr(), sock, _s_mh, 0);
+}
+
+fn s_copy(dst, src, n) {
+    var i = 0;
+    while (i < n) { store8(dst + i, load8(src + i)); i = i + 1; }
+    return n;
+}
+
+# ---- THE FD PIN ----
+# dbus_session_call must read with recvmsg, not read(). A plain
+# read() delivers the reply's BYTES and lets the kernel discard the
+# SCM_RIGHTS payload: the message parses perfectly, its UNIX_FDS
+# field still says 1, the body still carries a valid index, and the
+# descriptor is gone. Nothing downstream can tell.
+#
+# That was true of every release through 0.11.0 and no test caught
+# it, because an unseated host answers TakeDevice with AccessDenied
+# and an ERROR reply carries no fd — so the fd path never ran. This
+# plants a real fd on a real reply over a socketpair, which needs no
+# bus and no seat.
+fn test_reply_fd_survives_the_call_path() {
+    test_group("native: an fd riding on a METHOD_RETURN survives the call path");
+    var pair = alloc(8);
+    store64(pair, 0);
+    assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, pair), 0,
+      "socketpair created");
+    var a = load64(pair) & 0xFFFFFFFF;
+    var b = (load64(pair) >> 32) & 0xFFFFFFFF;
+
+    # A TakeDevice-shaped reply: UNIX_FDS=1, signature 'h', body index 0.
+    dbus_marshal_begin(dbus_marshal_type_return(), 1, 4242);
+    dbus_marshal_field_u32(dbus_marshal_f_replyser(), 7);
+    var sg = alloc(8);
+    var sn = t_put(sg, "h");
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sg, sn);
+    dbus_marshal_field_u32(dbus_marshal_f_unixfds(), 1);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_u32(0);
+    dbus_marshal_finish();
+    var mlen = dbus_marshal_len();
+    var wire = alloc(512);
+    s_copy(wire, dbus_marshal_buf(), mlen);
+
+    # The payload fd is one end of a second socketpair — a real open
+    # descriptor with no filesystem dependency.
+    var pair2 = alloc(8);
+    store64(pair2, 0);
+    assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, pair2), 0,
+      "payload pair created");
+    var payload = load64(pair2) & 0xFFFFFFFF;
+    var payload_peer = (load64(pair2) >> 32) & 0xFFFFFFFF;
+
+    assert_eq(s_send_with_fd(a, wire, mlen, payload), mlen, "reply + fd planted");
+
+    dbus_frame_init();
+    assert_eq(dbus_frame_fd_count(), 0, "fd queue starts empty");
+    var rc = dbus_session_call(b, 7);
+    assert_eq(rc, 0, "the reply matched and was accepted");
+    assert_eq(dbus_frame_fd_count(), 1,
+      "THE PIN: the descriptor arrived — a plain read() would leave this 0");
+    var got = dbus_frame_take_fd();
+    assert(got > 2, "and it is a usable descriptor");
+    assert(got != payload, "a NEW descriptor number, not the sender's");
+
+    sys_close(got);
+    sys_close(payload);
+    sys_close(payload_peer);
+    sys_close(a);
+    sys_close(b);
+    return 0;
+}
+
+# ---- THE TYPE-GATE PIN ----
+# The 2026-09-09 reply-forgery audit found that the ONE frame type a
+# hostile bus peer can actually push to samvada is a directed SIGNAL
+# — the broker delivers those to any destination, and a peer can
+# bolt a matching REPLY_SERIAL onto one. samvada discards it only
+# because dbus_session_call returns for message type 2/3 and nothing
+# else. That guard reads as spec-correctness (ignore NameAcquired),
+# so its anti-forgery value is incidental and undocumented. Pinned
+# here so it is never "simplified" away.
+fn test_forged_signal_cannot_impersonate_a_reply() {
+    test_group("native: a SIGNAL carrying a matching REPLY_SERIAL is NOT the reply");
+    var pair = alloc(8);
+    store64(pair, 0);
+    assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, pair), 0,
+      "socketpair created");
+    var a = load64(pair) & 0xFFFFFFFF;
+    var b = (load64(pair) >> 32) & 0xFFFFFFFF;
+
+    var sg = alloc(8);
+    var txt = alloc(64);
+    var wire = alloc(1024);
+    var at = 0;
+
+    # (1) the forgery: a SIGNAL whose REPLY_SERIAL matches ours.
+    dbus_marshal_begin(dbus_marshal_type_signal(), 1, 9001);
+    dbus_marshal_field_u32(dbus_marshal_f_replyser(), 9);
+    var sn = t_put(sg, "o");
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sg, sn);
+    dbus_marshal_end_fields();
+    var tn = t_put(txt, "/org/freedesktop/PWNED/session/_99");
+    dbus_marshal_body_str(txt, tn);
+    dbus_marshal_finish();
+    at = at + s_copy(wire + at, dbus_marshal_buf(), dbus_marshal_len());
+
+    # (2) the genuine reply, same serial, arriving second.
+    dbus_marshal_begin(dbus_marshal_type_return(), 1, 9002);
+    dbus_marshal_field_u32(dbus_marshal_f_replyser(), 9);
+    sn = t_put(sg, "o");
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sg, sn);
+    dbus_marshal_end_fields();
+    tn = t_put(txt, "/org/freedesktop/login1/session/_32");
+    dbus_marshal_body_str(txt, tn);
+    dbus_marshal_finish();
+    at = at + s_copy(wire + at, dbus_marshal_buf(), dbus_marshal_len());
+
+    assert_eq(sys_write(a, wire, at), at, "forged signal + real reply planted");
+
+    dbus_frame_init();
+    var rc = dbus_session_call(b, 9);
+    assert_eq(rc, 0, "the call completed");
+    var p = dbus_frame_base();
+    assert_eq(dbus_unmarshal_type(p), dbus_marshal_type_return(),
+      "THE PIN: what it accepted is the METHOD_RETURN, not the SIGNAL");
+    dbus_unmarshal_set_limit(dbus_frame_next());
+    dbus_unmarshal_body_begin(p);
+    var ptr = alloc(8);
+    var n = dbus_unmarshal_next_str(ptr);
+    assert_eq(n, strlen("/org/freedesktop/login1/session/_32"),
+      "and it carries the REAL session path, not the forged one");
+
+    sys_close(a);
+    sys_close(b);
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_native_populates_the_same_table();
@@ -213,6 +392,8 @@ fn main() {
     test_error_name_mapping();
     test_captured_error_reply_maps_to_eacces();
     test_release_control_has_no_signature_field();
+    test_reply_fd_survives_the_call_path();
+    test_forged_signal_cannot_impersonate_a_reply();
     return assert_summary();
 }
 

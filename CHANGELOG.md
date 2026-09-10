@@ -21,6 +21,36 @@ replacing a C dependency at every consumer's edge.
   **494 µs**; `pump_signals` **2138 ns** idle. The `TakeDevice`
   round-trip row stays empty and says why.
 
+### Fixed
+- **AUDIT-4 (HIGH, functional) — the reply path could not receive a
+  file descriptor at all.** `dbus_session_call` read replies with
+  plain `sys_read`; on an `AF_UNIX` socket the kernel delivers a
+  message's bytes and **discards its `SCM_RIGHTS` payload** unless
+  the reader uses `recvmsg` with a control buffer. The reply framed
+  and parsed correctly, its header still said `UNIX_FDS = 1`, its
+  body still held a valid index — and the descriptor was gone.
+  `take_device` could therefore only ever return `-EBADF`, or an
+  unrelated fd left over from an earlier `pump_signals`. **Handing
+  a DRM-master fd to a compositor is samvada's headline 1.0
+  capability, and it did not work.**
+
+  Measured end to end on the live bus via `Inhibit` (an fd-bearing
+  logind reply that needs no seated session):
+  `frame_take_fd()` **-1 → 4**.
+
+  It survived five releases, the hand audit, the differential
+  harness and 400-plus passing tests because an unseated host
+  answers `TakeDevice` with `AccessDenied` and **an ERROR reply
+  carries no fd** — so the fd branch was never once executed.
+  `pump_signals` had always used `recvmsg` correctly; only the
+  request/reply path did not, and that is the path descriptors
+  arrive on.
+
+  Fixed by reading through `dbus_sys_recv_fd_flags` and queueing the
+  descriptor. The SASL reader keeps `sys_read` — no fds cross during
+  authentication. Pinned by `test_reply_fd_survives_the_call_path`
+  (mutation-tested: restoring `sys_read` fails it).
+
 ### Security
 Three defects found and fixed, all the same class — **the
 unmarshaller trusted wire-supplied lengths without checking them
@@ -48,16 +78,47 @@ module (`dbus_unmarshal_set_limit`) rather than assumed of the
 caller. Pinned by regression tests.
 
 ### Notes — read these before treating 1.0.0 as hardened
-- **The planned multi-agent audit FAILED.** All eight agents
-  terminated on a session limit with zero findings. What shipped was
-  performed by hand instead: real byte sequences driven through the
-  real modules. It found three genuine defects — but it covered
-  **three of seven planned dimensions fully**. **Resource
-  exhaustion, reply forgery, and build/supply-chain were NOT
-  audited**, and the audit document lists them as outstanding rather
-  than omitting them. The most valuable next question is reply
-  forgery: samvada correlates on `REPLY_SERIAL` alone and does not
-  check `SENDER`.
+- **The first multi-agent audit FAILED; the reply-forgery re-run
+  succeeded.** All eight agents of the original sweep terminated on
+  a session limit with zero findings, so that pass was performed by
+  hand instead and covered **three of seven planned dimensions**.
+  The question it named as most valuable — reply forgery — was then
+  re-run as a three-lane workflow with an adversarial adjudicator,
+  and **that is where AUDIT-4 was found**. **Resource exhaustion and
+  build/supply-chain remain NOT audited**, and the audit document
+  lists them as outstanding rather than omitting them.
+- **Reply forgery: audited, answer is no.** A hostile peer on the
+  system bus **cannot** forge a reply samvada accepts. Verified
+  structurally in dbus-broker's source and live as uid 1000 with the
+  attacker given the victim's exact unique name, the correct serial
+  and a spoofed `SENDER` — forged `METHOD_RETURN` and `ERROR` were
+  both delivered zero times. **Severity LOW; it does not gate this
+  release.**
+
+  Two honest caveats. First, **the protection is the bus's, not
+  samvada's**: samvada matches on `REPLY_SERIAL` alone and checks
+  neither `SENDER` nor `DESTINATION`, so on a permissive or
+  non-tracking bus — or against an attacker interposed on the
+  socket — a forged reply is accepted unconditionally. A relay that
+  rewrote a reply in flight made the real binary return
+  `/org/freedesktop/PWNED1/session/_99`. Second, **this is not a
+  regression from libsystemd**: `sd_bus_call` checks neither field
+  either, so "we match sd-bus" is true here and worth nothing. Any
+  real fix must exceed it. The reliance is now stated in
+  `SECURITY.md`; the hardening (a `DESTINATION` check plus a
+  send-time watermark) is scheduled for 1.0.x.
+
+  Predictable serials turned out to be **irrelevant** — the broker
+  rejects on sender identity, not serial secrecy — so serial
+  randomisation is explicitly not the fix.
+- **samvada's one in-code defence was an accident, and is now
+  pinned.** The only frame a hostile peer can push to samvada is a
+  directed `SIGNAL` carrying a matching `REPLY_SERIAL`; it is
+  discarded solely because the reply matcher returns for message
+  type 2/3 and nothing else. That guard read as spec-correctness
+  (ignore `NameAcquired`), so its anti-forgery value was incidental
+  and undocumented. Pinned by
+  `test_forged_signal_cannot_impersonate_a_reply`.
 - **The C shim is NOT deleted.** N7 planned to delete it; that is
   **deferred to 1.1.0** because the CG lane never cleared — mabda
   has never run the native backend and no seated session exists
