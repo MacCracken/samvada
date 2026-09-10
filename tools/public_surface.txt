@@ -1,0 +1,37 @@
+# samvada — the frozen public API surface. One "name/arity" per line,
+# plus an ffi-leak rule column.
+#
+# This file is the mechanical form of two CLAUDE.md invariants that
+# were enforced by review only until 1.0.1:
+#
+#   * "Public API frozen — every exported symbol documented + tested"
+#   * "Do not expose FFI types in public function signatures"
+#
+# tools/surface_check.py diffs dist/samvada.cyr — the bundle a
+# [deps.samvada] consumer actually links — against this list, and CI
+# fails on any difference. Adding, removing or re-signing a public fn
+# therefore requires editing this file, which is what makes "frozen"
+# mean something rather than describing an intention.
+#
+# Rules:
+#   clean           the signature must not name a fn-table parameter
+#   leaks-fn-table  it does, deliberately, and public-api.md says why
+#
+# SCOPE: only `samvada_*` names are frozen here, minus the
+# samvada_ffi_ / samvada_slot_ / samvada_backend_kind_ plumbing. The
+# bundle exports ~198 functions in total (the dbus_* internals among
+# them) because Cyrius has no visibility mechanism; that larger
+# surface is documented as UNSTABLE in docs/architecture/public-api.md
+# and is deliberately not frozen.
+#
+# samvada_init and samvada_main take a fn-table because they are the
+# C-shim entry points and predate the invariant; samvada_native_init
+# exists precisely so a native consumer never handles one.
+samvada_version/0                clean
+samvada_init/1                   leaks-fn-table
+samvada_main/1                   leaks-fn-table
+samvada_native_init/0            clean
+samvada_session_take_device/2    clean
+samvada_session_release_device/2 clean
+samvada_pump_signals/0           clean
+samvada_release/0                clean

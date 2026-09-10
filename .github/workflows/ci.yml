@@ -131,6 +131,25 @@ jobs:
           fi
           echo "dist/ matches src/"
 
+      - name: Verify the public API surface has not drifted
+        # Runs immediately after the distlib freshness gate ON PURPOSE:
+        # it reads dist/samvada.cyr, so it is only meaningful once that
+        # bundle is known to match src/.
+        #
+        # CLAUDE.md states two invariants that were, until 1.0.1,
+        # enforced by REVIEW ONLY — "public API frozen" and "do not
+        # expose FFI types in public function signatures". The A-6
+        # audit showed both were unenforced: a public fn returning the
+        # raw FFI fn-table, and another accepting one, passed lint,
+        # fmt, vet, distlib, build, smoke, the slot cross-check and
+        # every test assert. Review is what AUDIT-4 survived.
+        #
+        # Mutation-verified before wiring: a new export, a re-signed
+        # export, a removed export, and a "clean" fn that gains a
+        # fn-table parameter each exit 1; the pristine bundle exits 0.
+        run: |
+          python3 tools/surface_check.py . tools/public_surface.txt
+
       - name: Build
         run: |
           mkdir -p build

@@ -650,17 +650,25 @@ directions, including `kind` moving off +64 with both sides
 consistent. A null session path segfaulted all four fns that take
 one — **fixed in two passes, the first covering only two of the
 four**, which is recorded because it is the failure mode this whole
-lane exists to catch. **Still open**: the two invariants CLAUDE.md
-states are enforced by *review only* — "no FFI types in public
-signatures" and "the exported symbol set is unchanged". A working
-manifest gate was demonstrated (it catches both a new export and a
-re-signed one) but is **not wired into CI**. And
-`dist/samvada.cyr` exports 198 functions against a documented
-surface of eight, because `@public`/`@internal` are comments with no
-mechanical meaning and Cyrius has no visibility mechanism.
+lane exists to catch. **Closed in 1.0.1**: the two invariants CLAUDE.md
+states — "no FFI types in public signatures" and "the exported symbol
+set is unchanged" — were enforced by *review only*, and the audit
+proved it by sneaking both past every gate. `tools/surface_check.py`
+now diffs `dist/samvada.cyr` against `tools/public_surface.txt` in
+CI, immediately after the distlib freshness check so it never reads a
+stale bundle. Mutation-verified: new export, re-signed export,
+removed export, and a `clean` fn gaining a fn-table parameter all
+exit 1; pristine exits 0.
 
-**Carried to a future release**: the CI manifest gate, distlib
-reproducibility, signed tags, and the A-1/A-4 items above.
+**Still open**: `dist/samvada.cyr` exports 198 functions against a
+documented surface of eight, because `@public`/`@internal` are
+comments with no mechanical meaning and Cyrius has no visibility
+mechanism. The gate freezes the `samvada_*` surface; the `dbus_*`
+internals remain reachable and are documented as unstable rather
+than pretended away.
+
+**Carried to a future release**: distlib reproducibility, signed
+tags, and the A-1/A-4 items above.
 
 ### A-1 — Resource exhaustion / DoS *(highest value, nothing is known)*
 

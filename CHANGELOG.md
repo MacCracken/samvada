@@ -8,7 +8,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 **The A lane, closed.** 1.0.0 shipped with four of seven audit
 dimensions covered and the rest tracked as the A lane. This release
-works through them and fixes **ten** defects — two of which meant
+works through them and fixes **ten** defects and makes the frozen API frozen — two of which meant
 samvada handed the consumer the *wrong descriptor* or the *wrong
 device*, silently, and returned success.
 
@@ -143,6 +143,23 @@ device*, silently, and returned success.
   pin, while removing the wall-clock deadline does not fail the suite
   — it **hangs** it (exit 124). When mutation-testing blocking I/O,
   run under `timeout` and treat exit 124 as a positive result.
+- **`tools/surface_check.py` + `tools/public_surface.txt`, wired into
+  CI** — the public API surface is now frozen **mechanically**. Two
+  CLAUDE.md invariants were enforced by review only until now:
+  *"public API frozen"* and *"do not expose FFI types in public
+  function signatures"*. The A-6 audit proved both were unenforced by
+  adding a public fn that returns the raw FFI fn-table and another
+  that accepts one — lint, fmt, vet, distlib, build, smoke, the slot
+  cross-check and every test assert passed. **Review is what AUDIT-4
+  survived.**
+
+  The gate diffs `dist/samvada.cyr` — the bundle a `[deps.samvada]`
+  consumer actually links, not `src/` — against a checked-in manifest,
+  and runs immediately after the distlib freshness check so it is
+  never reading a stale bundle. Mutation-verified before wiring: a new
+  export, a re-signed export, a removed export, and a `clean` fn that
+  gains a fn-table parameter each exit 1; the pristine bundle exits 0.
+  Adding or re-signing a public fn now requires editing the manifest.
 - A hostile-input pass over the SASL reader (unterminated lines, an
   8000-byte line with no CRLF, binary garbage, `REJECTED`, `ERROR`,
   a line split across reads). No defect found; the bounds hold.

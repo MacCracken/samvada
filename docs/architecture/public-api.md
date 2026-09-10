@@ -123,6 +123,15 @@ init/release cycles.
 > any release without notice. This is stated because the alternative
 > is implying a boundary that is not enforced; it is also the premise
 > AUDIT-1 rests on.
+>
+> **The eight above ARE enforced.** `tools/surface_check.py` diffs
+> this surface out of `dist/samvada.cyr` against
+> `tools/public_surface.txt` on every CI run, and fails on a new
+> export, a removed one, a re-signature, or a `clean` fn that gains a
+> fn-table parameter. Changing any of them requires editing the
+> manifest and this document. Before 1.0.1 both invariants were
+> enforced by review, and the A-6 audit walked a fn-table-returning
+> public export past every existing gate.
 
 
 All seven live in `src/samvada.cyr`.
