@@ -37,6 +37,7 @@ var _t_mh   = 0;
 var _t_ctrl = 0;
 var _t_byte = 0;
 var _t_ctrl2 = 0;
+var _t_ctrl3 = 0;
 
 fn t_send_init() {
     if (_t_iov != 0) { return 0; }
@@ -328,6 +329,93 @@ fn test_msg_ctrunc_is_refused() {
     return 0;
 }
 
+# Count currently-open descriptors by probing F_GETFD across the low fd
+# range. Crude, but it is the only leak probe in this suite that actually
+# works: the lowest-free-fd probe passed against a version that leaked two
+# descriptors per call.
+fn t_count_open_fds() {
+    var n = 0;
+    var i = 0;
+    while (i < 256) {
+        var r = syscall(SYS_FCNTL, i, 1, 0);      # F_GETFD
+        if (r >= 0) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+# Send one byte plus THREE fds. CMSG_SPACE(3 ints) = 16 + 16 = 32 > the
+# 24-byte control buffer dbus_sys_recv_fd reserves, so the kernel DOES
+# truncate here and sets MSG_CTRUNC — while still installing the two
+# descriptors that fit. Those two are real, open, and ours.
+fn t_send_three_fds(sock, f1, f2, f3) {
+    t_send_init();
+    if (_t_ctrl3 == 0) { _t_ctrl3 = alloc(40); }
+    store64(_t_byte, 0x42);
+    store64(_t_iov + 0, _t_byte);
+    store64(_t_iov + 8, 1);
+    var i = 0;
+    while (i < 40) { store64(_t_ctrl3 + i, 0); i = i + 8; }
+    store64(_t_ctrl3 + 0, 28);                     # CMSG_LEN(3 * int) = 16 + 12
+    store64(_t_ctrl3 + 8, dbus_sys_sol_socket());
+    store64(_t_ctrl3 + 12, dbus_sys_scm_rights());
+    store64(_t_ctrl3 + 16, f1);
+    store64(_t_ctrl3 + 20, f2);
+    store64(_t_ctrl3 + 24, f3);
+    i = 0;
+    while (i < 56) { store64(_t_mh + i, 0); i = i + 8; }
+    store64(_t_mh + 16, _t_iov);
+    store64(_t_mh + 24, 1);
+    store64(_t_mh + 32, _t_ctrl3);
+    store64(_t_mh + 40, 32);                       # CMSG_SPACE(3 * int)
+    return syscall(t_sendmsg_nr(), sock, _t_mh, 0);
+}
+
+# MSG_CTRUNC must not leak the descriptors that DID fit. The kernel has
+# already installed them in our table by the time recvmsg returns; an
+# early error return without closing them leaks an fd per truncated
+# message, unbounded, in a compositor.
+fn test_msg_ctrunc_closes_what_arrived() {
+    test_group("MSG_CTRUNC does not leak the fds that fit");
+    var fds = alloc(8);
+    store64(fds, 0);
+    assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, fds), 0, "pair");
+    var a = load64(fds) & 0xFFFFFFFF;
+    var b = (load64(fds) >> 32) & 0xFFFFFFFF;
+    var pa = alloc(8);
+    store64(pa, 0);
+    sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, pa);
+    var f1 = load64(pa) & 0xFFFFFFFF;
+    var f2 = (load64(pa) >> 32) & 0xFFFFFFFF;
+    var pb = alloc(8);
+    store64(pb, 0);
+    sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, pb);
+    var f3 = load64(pb) & 0xFFFFFFFF;
+    var f4 = (load64(pb) >> 32) & 0xFFFFFFFF;
+
+    var sent = t_send_three_fds(a, f1, f2, f3);
+    var buf = alloc(64);
+    var out = alloc(8);
+    store64(out, (0 - 1));
+    var before = t_count_open_fds();
+    var after = before;
+    if (sent == 1) {
+        var n = dbus_sys_recv_fd(b, buf, 64, out);
+        assert_eq(n, -71, "EPROTO reported on truncated ancillary data");
+        after = t_count_open_fds();
+        # Count open descriptors, exactly as the C proof of this defect
+        # did. A lowest-free-fd probe is NOT sufficient here (it was tried
+        # and silently passed against the leaking version): the kernel
+        # installs the surviving fds at the lowest free numbers, so closing
+        # anything below them hides the leak.
+        assert_eq(after, before, "MSG_CTRUNC closed every descriptor the kernel installed");
+    }
+    if (sent != 1) { assert(sent < 0, "kernel refused the three-fd send"); }
+    sys_close(f1); sys_close(f2); sys_close(f3); sys_close(f4);
+    sys_close(a); sys_close(b);
+    return 0;
+}
+
 # ---- the parser guards, driven directly ----
 # The kernel validates ancillary data before recvmsg returns, so a
 # forged cmsg can never arrive through a socket — which means these
@@ -467,6 +555,7 @@ fn main() {
     test_recv_without_fd_reports_none();
     test_rejects_wrong_cmsg_type();
     test_msg_ctrunc_is_refused();
+    test_msg_ctrunc_closes_what_arrived();
     test_parser_guards();
     test_parser_sign_extension();
     test_scm_rights_no_fd_leak();

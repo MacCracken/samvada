@@ -1,0 +1,151 @@
+# @internal — native-dbus transport
+# dbus_socket.cyr — connect to the bus, and read/write reliably.
+#
+# Two things here are not obvious and both were measured rather
+# than assumed:
+#
+# 1. THE SEND PATH MUST NOT BE sys_write. Writing to a socket whose
+#    peer has gone raises SIGPIPE, whose default disposition kills
+#    the process. samvada is a library inside a compositor; killing
+#    mabda because logind restarted is not an acceptable failure
+#    mode. `sendto(..., MSG_NOSIGNAL, 0, 0)` suppresses it at the
+#    call, which is the only mechanism that is neither
+#    process-global nor inherited across execve (SIG_IGN is both,
+#    and samvada does not own the process's signal policy).
+#
+# 2. THE STDLIB HAS NO SEND-SIDE SOCKET CALL AT ALL. `sys_recvmsg`
+#    and `sys_recvfrom` exist; there is no `sys_sendto`,
+#    `sys_sendmsg` or `sys_send`, and no SYS_SENDTO constant on
+#    either arch. So the number is pinned here, WITH both arches.
+#    Filed upstream — the asymmetry is the defect, not the absence.
+
+# ---- arch-selected syscall numbers ----
+# Hardcoding ONE number with no arch branch is the bug class that
+# bit four sibling repos (they pin SYS_SENDMSG = 46, which is
+# `ftruncate` on aarch64). An #ifdef pin supplying BOTH numbers is
+# the house exception, already used in src/dbus_sys.cyr.
+fn dbus_socket_sendto_nr() {
+    #ifdef CYRIUS_ARCH_AARCH64
+    return 206;
+    #endif
+    return 44;
+}
+
+fn dbus_socket_msg_nosignal() { return 16384; }
+
+# ---- sockaddr_un ----
+# struct sockaddr_un { u16 sun_family@0; char sun_path[108]@2; }
+# sizeof == 110. AF_UNIX == 1.
+#
+# The two address forms need DIFFERENT addrlen rules, and conflating
+# them is the mistake this file exists to prevent:
+#
+#   filesystem: sun_path holds a NUL-terminated path
+#               addrlen = 2 + strlen(path) + 1
+#   abstract:   sun_path[0] is a LITERAL NUL, then the name, and
+#               there is NO trailing NUL
+#               addrlen = 2 + 1 + namelen
+#
+# Applying the filesystem rule to an abstract name is wrong twice:
+# it omits the leading NUL and adds a trailing one, so the kernel
+# looks up a filesystem path that does not exist.
+fn dbus_socket_sockaddr_un_size() { return 110; }
+fn dbus_socket_af_unix()          { return 1; }
+fn dbus_socket_sock_stream()      { return 1; }
+
+fn _dbus_sock_zero(p, n) {
+    var i = 0;
+    while (i < n) { store8(p + i, 0); i = i + 1; }
+    return 0;
+}
+
+# Build a filesystem-path sockaddr_un at `sa`. Returns addrlen, or
+# -22 if the path does not fit (it is REFUSED, never clamped —
+# a truncated socket path silently connects somewhere else).
+fn dbus_socket_addr_path(sa, path, pathlen) {
+    if (sa == 0)      { return -22; }
+    if (path == 0)    { return -22; }
+    if (pathlen <= 0) { return -22; }
+    if (pathlen > 107) { return -22; }        # 108 minus the NUL
+    _dbus_sock_zero(sa, dbus_socket_sockaddr_un_size());
+    store8(sa + 0, dbus_socket_af_unix());
+    store8(sa + 1, 0);
+    var i = 0;
+    while (i < pathlen) {
+        store8(sa + 2 + i, load8(path + i));
+        i = i + 1;
+    }
+    store8(sa + 2 + pathlen, 0);
+    return 2 + pathlen + 1;
+}
+
+# Build an ABSTRACT-namespace sockaddr_un at `sa`. Returns addrlen.
+fn dbus_socket_addr_abstract(sa, name, namelen) {
+    if (sa == 0)      { return -22; }
+    if (name == 0)    { return -22; }
+    if (namelen <= 0) { return -22; }
+    if (namelen > 107) { return -22; }
+    _dbus_sock_zero(sa, dbus_socket_sockaddr_un_size());
+    store8(sa + 0, dbus_socket_af_unix());
+    store8(sa + 1, 0);
+    store8(sa + 2, 0);                        # the leading NUL
+    var i = 0;
+    while (i < namelen) {
+        store8(sa + 3 + i, load8(name + i));
+        i = i + 1;
+    }
+    return 2 + 1 + namelen;                   # NO trailing NUL
+}
+
+# ---- connect ----
+# Returns the connected fd, or a negative errno. The socket is
+# CLOEXEC: samvada hands DRM master fds to a compositor that spawns
+# clients, and the bus connection has no business surviving into
+# them.
+fn dbus_socket_sock_cloexec() { return 524288; }   # SOCK_CLOEXEC
+
+fn dbus_socket_connect(sa, addrlen) {
+    if (sa == 0)      { return -22; }
+    if (addrlen <= 0) { return -22; }
+    var t = dbus_socket_sock_stream() | dbus_socket_sock_cloexec();
+    var fd = sys_socket(dbus_socket_af_unix(), t, 0);
+    if (fd < 0) { return fd; }
+    var rc = sys_connect(fd, sa, addrlen);
+    if (rc < 0) {
+        sys_close(fd);
+        return rc;
+    }
+    return fd;
+}
+
+# ---- reliable write ----
+# A unix STREAM socket may accept fewer bytes than offered, so the
+# loop is required: a torn request desynchronises the connection and
+# the bus drops it.
+#
+# Honest caveat, so a future closeout does not "prove" this with a
+# test that cannot fail: at samvada's message sizes (48-238 bytes,
+# against a default SO_SNDBUF of hundreds of KB) a short write does
+# not occur. The loop is correct and permanently unexercised unless
+# a test forces SO_SNDBUF small.
+#
+# EINTR (-4) is retried. It has never been observed here, because
+# installing a non-SA_RESTART handler needs an SA_RESTORER trampoline
+# the stdlib does not provide — so this branch is handled but not
+# claimed to be tested.
+fn dbus_socket_write_all(fd, buf, len) {
+    if (buf == 0)  { return -22; }
+    if (len < 0)   { return -22; }
+    var sent = 0;
+    while (sent < len) {
+        var n = syscall(dbus_socket_sendto_nr(), fd, buf + sent, len - sent,
+          dbus_socket_msg_nosignal(), 0, 0);
+        if (n < 0) {
+            if (n == -4) { continue; }        # EINTR
+            return n;
+        }
+        if (n == 0) { return -32; }           # -EPIPE: no progress possible
+        sent = sent + n;
+    }
+    return sent;
+}

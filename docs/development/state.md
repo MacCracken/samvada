@@ -5,6 +5,22 @@
 
 ## Version
 
+**0.8.0** — 2026-09-09. **N3** — transport, auth and framing.
+**Native Cyrius code now authenticates to a real dbus daemon**:
+connect to `/run/dbus/system_bus_socket`, the 48-byte pipelined SASL
+blob, handshake complete, zero residual, and no libsystemd anywhere
+in that path. Three modules — `src/dbus_frame.cyr` (owns the single
+receive buffer; the framer), `src/dbus_socket.cyr` (both
+`sockaddr_un` forms, connect, `sendto`+`MSG_NOSIGNAL` write-all),
+`src/dbus_auth.cyr` (line-oriented SASL over the shared buffer).
+210 new asserts. Also fixed **two live defects in 0.7.0's
+`dbus_sys.cyr`**: `MSG_CTRUNC` leaked every descriptor the kernel
+had installed (measured: 3 fds sent -> `MSG_CTRUNC` set *and* 2
+installed, both leaked), and a 4-byte read past the control buffer.
+`Hello` does not round-trip yet — that needs the marshaller (N4).
+No public API or bundle change; native modules stay out of
+`[lib] modules` until the N6 cutover.
+
 **0.7.1** — 2026-09-09. **N2** — the golden byte corpus. 15 fixtures
 of real dbus wire traffic in `tests/fixtures/dbus/`, captured with
 the new `tools/dbus_tap.py` relay while the libsystemd C shim still
@@ -13,8 +29,8 @@ with it), decoded and gated by `tools/dbus_decode.py`. The capture
 **corrected our own `dbus-marshalling.md`**: SASL is one pipelined
 48-byte write answered by three lines in a single read, not the
 six-step ping-pong documented — a reader built to the old text
-hangs. Also established: one read can carry two messages and end
-mid-message; alignment is per-message, not per-buffer; header field
+hangs. Also established: one read carries two complete messages;
+alignment is per-message, not per-buffer; header field
 order is arbitrary; the bus's first reply carries serial
 `0xFFFFFFFF`. The one SYNTHETIC fixture (a successful `TakeDevice`
 reply, uncapturable without a seated session) is derived from a
@@ -245,7 +261,7 @@ Live-bus end-to-end validation pending mabda's
   helpers.
 - `src/samvada.cyr` — public API surface (v0.x stable). Full
   surface map in `docs/architecture/public-api.md`.
-  - `samvada_version()` → packed u32 (0.7.1).
+  - `samvada_version()` → packed u32 (0.8.0).
   - `samvada_init(table)` → 0 | -err (opens bus, looks up
     session, **takes session control**). Returns `-EBUSY` (`-16`)
     on re-init without release as of 0.2.2; self-cleans on every
@@ -262,6 +278,11 @@ Live-bus end-to-end validation pending mabda's
     revokes devices taken via `TakeDevice` when control is
     released, so outstanding consumer fds become invalid.
   - `samvada_main(table)` → 0 | -err (C-shim entry point).
+- `src/dbus_frame.cyr` — **native backend, N3**. Message framing;
+  owns THE receive buffer that `dbus_auth` borrows.
+- `src/dbus_socket.cyr` — **native backend, N3**. `sockaddr_un`
+  (both forms), connect, `sendto`+`MSG_NOSIGNAL` write-all.
+- `src/dbus_auth.cyr` — **native backend, N3**. SASL handshake.
 - `src/dbus_sys.cyr` — **native backend, N1**. `SCM_RIGHTS` fd
   receive: `dbus_sys_recv_fd()` (the `recvmsg` half) and
   `dbus_sys_parse_scm_rights()` (the cmsg walk). NOT in

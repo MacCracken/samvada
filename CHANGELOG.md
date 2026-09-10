@@ -4,6 +4,94 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-09-09
+
+**N3 — transport, auth and framing.** Native Cyrius code now
+authenticates to a real dbus daemon with no libsystemd in the path.
+Three new modules, 210 new asserts, and two live defects fixed in
+the module N1 shipped. No public API change; the consumer bundle is
+untouched (26 exported fns, no native module in it until the N6
+cutover).
+
+### Added
+- **`src/dbus_frame.cyr`** — splits a byte stream into whole
+  messages. Owns THE receive buffer; `dbus_auth` borrows it rather
+  than keeping its own, because `alloc()` never frees and a private
+  buffer would either copy or lose the server's pipelined residual.
+- **`src/dbus_socket.cyr`** — `sockaddr_un` construction for both
+  address forms, connect, and a reliable write.
+- **`src/dbus_auth.cyr`** — the SASL handshake as a line-oriented
+  reader over the shared buffer.
+- 210 asserts across `tests/dbus_frame.tcyr` and
+  `tests/dbus_auth.tcyr`, all corpus- or socketpair-driven.
+
+### Fixed — two live defects in `src/dbus_sys.cyr` (shipped 0.7.0)
+- **`MSG_CTRUNC` leaked every descriptor the kernel had installed.**
+  The truncation check returned `-71` *before* parsing, but the
+  kernel installs the fds that fit before `recvmsg` returns.
+  Measured in C against that exact 24-byte control buffer: sending
+  3 fds sets `MSG_CTRUNC` **and** installs **2 descriptors**, both
+  of which leaked, per truncated message, unbounded, inside a
+  compositor. Now closed before the error returns.
+  My first Cyrius probe for this **passed against the leaking
+  version** — a lowest-free-fd probe cannot see it, because the
+  kernel installs the surviving fds at the lowest free numbers.
+  The pin now counts open descriptors, as the C proof did.
+- **A 4-byte read past the control buffer.** The surplus-fd walk
+  used `load64(ctrl + off)` where `off + 4 <= clen`; for a legal
+  2-fd cmsg `clen` is 24 and `off` reaches 20, so it read bytes
+  24..27 of a 24-byte allocation. The mask hid the garbage and the
+  bump allocator made it harmless; neither made it correct. Now
+  `load32`.
+
+### Notes
+- **`load32`, never `load64`, for header u32s — and this is the
+  opposite of what `dbus_sys.cyr` correctly does.** `load32`
+  zero-extends. `load64(p + 4)` on the bus's very first reply
+  returns **-4294967283**, because the `0xFFFFFFFF` serial occupies
+  the high half of that load; `total` then goes negative, the
+  cursor advances backwards and the framer never terminates.
+  `dbus_sys.cyr` sign-extends deliberately and correctly — an
+  `SCM_RIGHTS` payload is a signed int32 fd — so copying that idiom
+  into the header path is the trap. Both behaviours are now pinned
+  by tests that assert the *dangerous* form is dangerous.
+- **The send path is `sendto` with `MSG_NOSIGNAL`, not
+  `sys_write`.** Writing to a departed peer raises `SIGPIPE`, whose
+  default disposition kills the process — not survivable for a
+  library inside a compositor. `SIG_IGN` was rejected as the
+  mechanism: it is process-global *and* inherited across `execve`,
+  and samvada does not own mabda's signal policy. Pinned by a test
+  that writes to a closed peer, expects `-EPIPE`, and then asserts
+  the next line still runs.
+  This required hardcoding the syscall number, because **the stdlib
+  has no send-side socket call at all** — `sys_recvmsg` and
+  `sys_recvfrom` exist, `sys_sendto`/`sys_sendmsg`/`sys_send` do
+  not. Pinned with both arches (44 / 206), never a single number.
+- **The two `sockaddr_un` forms can produce the same `addrlen`.**
+  For a 10-byte name, filesystem gives `2+10+1` and abstract gives
+  `2+1+10` — both 13. A test checking only the length would pass
+  against a completely wrong address. What differs is the layout:
+  abstract puts a NUL at `sun_path[0]` with no terminator. The test
+  was written the wrong way first and caught by its own failure.
+- **An over-capacity message is drained, not fatal.** D-Bus carries
+  the full length in the fixed header, so the exact byte count to
+  discard is known before a single body byte is read and the stream
+  resynchronises. A bare length-prefix protocol could not do this.
+- **Partial-tail handling is proven by drip-feed, not by a
+  fixture.** No corpus fixture ends mid-message — that claim was
+  made once from a decoder bug and retracted in 0.7.1. So the path
+  is proven by feeding the 282-byte two-message buffer one byte at
+  a time, and at chunk sizes 3/7/16/100, asserting no state other
+  than `need_more` while incomplete.
+- **Honest caveat on the write-all loop**: it is required (a torn
+  request desynchronises the connection) but is **permanently
+  unexercised** at samvada's message sizes, 48–238 bytes against a
+  default `SO_SNDBUF` of hundreds of KB. A future closeout must not
+  "prove" it with a test that cannot fail.
+- **Big-endian framing is synthetic.** All 13 dbus fixtures are
+  `'l'`. The `'B'` path is covered only by a hand-built twin of a
+  real header, and is labelled as such in the test.
+
 ## [0.7.1] — 2026-09-09
 
 **N2 — the golden byte corpus.** Fifteen fixtures of real dbus wire
@@ -51,9 +139,11 @@ public API or the bundle; `dist/samvada.cyr` still exports 26 fns.
   and the two decode identically apart from those fields. It is
   still marked SYNTHETIC.
 - **Eight findings the capture established**, each previously an
-  assumption. Beyond the SASL correction: one read can carry two
-  messages *and end mid-message* (the very first exchange does
-  both); alignment is relative to the start of **each message**,
+  assumption. Beyond the SASL correction: one read carries **two
+  complete messages** (the very first exchange does — 101 + 181 =
+  282 bytes, zero residual), so a one-message-per-read reader
+  silently drops the signal; alignment is relative to the start of
+  **each message**,
   not the buffer — the decoder got this wrong at first and
   mis-read the second message's header, a bug invisible until a
   multi-message buffer appears; header field order is neither

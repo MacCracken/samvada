@@ -135,7 +135,7 @@ fn dbus_sys_parse_scm_rights(ctrl, ctrllen, fd_out) {
     # The payload is an int32 fd. Read the low 32 bits and sign-extend
     # the same way the C-shim path does, so a kernel-impossible
     # negative cannot read as a huge positive fd.
-    var got = load64(ctrl + dbus_sys_cmsg_data_off()) & 0xFFFFFFFF;
+    var got = load32(ctrl + dbus_sys_cmsg_data_off());
     var neg = got & 0x80000000;
     if (neg != 0) { got = got - 0x100000000; }
     store64(fd_out, got);
@@ -153,7 +153,13 @@ fn dbus_sys_parse_scm_rights(ctrl, ctrllen, fd_out) {
     var extra = 0;
     var off = dbus_sys_cmsg_data_off() + 4;
     while (off + 4 <= clen) {
-        var x = load64(ctrl + off) & 0xFFFFFFFF;
+        # load32, NOT load64: an fd is a 4-byte field, and the last one
+        # ends exactly at `clen`. `load64(ctrl + off)` there reads four
+        # bytes PAST the buffer — for a legal 2-fd cmsg, clen is 24, off
+        # reaches 20, and load64 would touch bytes 24..27 of a 24-byte
+        # allocation. The mask hid it, the bump allocator made it
+        # harmless, and neither makes it correct.
+        var x = load32(ctrl + off);
         var xneg = x & 0x80000000;
         if (xneg != 0) { x = x - 0x100000000; }
         if (x >= 0) { sys_close(x); }
@@ -202,15 +208,30 @@ fn dbus_sys_recv_fd(fd, buf, buflen, fd_out) {
     var n = sys_recvmsg(fd, _dbus_mh, dbus_sys_msg_cmsg_cloexec());
     if (n < 0) { return n; }
 
-    # MSG_CTRUNC means the kernel had more ancillary data than our
-    # buffer held and DROPPED the excess — any fd in the dropped part
-    # is closed by the kernel and gone. Refuse rather than return a
-    # partial success the caller cannot detect.
-    var flags = load64(_dbus_mh + 48) & 0xFFFFFFFF;
-    var trunc = flags & dbus_sys_msg_ctrunc();
-    if (trunc != 0) { return -71; }
-
     var ctrllen = load64(_dbus_mh + 40);
+
+    # MSG_CTRUNC means the kernel had more ancillary data than our buffer
+    # held and dropped the excess. Refuse the message — but CLOSE WHAT
+    # ARRIVED FIRST.
+    #
+    # The descriptors that fit are already installed in our table by the
+    # time recvmsg returns, and they are ours whether we wanted them or
+    # not. Measured against this exact 24-byte control buffer: sending 3
+    # fds sets MSG_CTRUNC *and* installs 2 descriptors. Returning -71
+    # without closing them leaked one fd pair per truncated message,
+    # unbounded, inside a compositor. (0.8.0; the 0.7.0 version returned
+    # before parsing and leaked both.)
+    var flags = load32(_dbus_mh + 48);
+    var trunc = flags & dbus_sys_msg_ctrunc();
+    if (trunc != 0) {
+        var scratch = alloc(8);
+        store64(scratch, (0 - 1));
+        dbus_sys_parse_scm_rights(_dbus_ctrl, ctrllen, scratch);
+        var first = load64(scratch);
+        if (first >= 0) { sys_close(first); }
+        return -71;
+    }
+
     dbus_sys_parse_scm_rights(_dbus_ctrl, ctrllen, fd_out);
     return n;
 }

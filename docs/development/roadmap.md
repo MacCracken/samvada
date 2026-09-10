@@ -116,6 +116,7 @@ it.
 | **N0** — signal-visibility contract | 0.6.0 | ✅ 2026-09-09. ADR-0004; `TakeControl` scoped to device ownership (0.5.1 console regression); no new slot. |
 | **N1** — SCM_RIGHTS fd passing | 0.7.0 | ✅ 2026-09-09. `src/dbus_sys.cyr`; fd proven across a socketpair; surplus-fd leak found and fixed. |
 | **N2** — golden byte corpus | 0.7.1 | ✅ 2026-09-09. 15 fixtures + tap/decoder tools; corrected our own SASL docs. Second-host capture outstanding. |
+| **N3** — transport, auth, framing | 0.8.0 | ✅ 2026-09-09. Native SASL against the real bus; framer proven by drip-feed. `Hello` round-trip deferred to N4 (needs the marshaller). |
 
 **M2 — "generalize beyond logind"** (Properties, Introspectable,
 session bus, generic method dispatch, async variants) is
@@ -265,16 +266,18 @@ it.
   host-specific. Recorded in the MANIFEST rather than quietly
   dropped.
 - **What it found**: our own SASL documentation was wrong in a way
-  that would hang the native reader; one read carries two messages
-  and can end mid-message; alignment is per-message, not
-  per-buffer; header field order is arbitrary; the bus's first
+  that would hang the native reader; one read carries **two
+  complete messages** (101 + 181 = 282, zero residual); alignment
+  is per-message, not per-buffer — a bug the decoder itself hit
+  first, and which initially made the second message *look*
+  truncated; header field order is arbitrary; the bus's first
   reply uses serial `0xFFFFFFFF`.
 - **The synthetic fixture is derived from a REAL fd-bearing reply**
   (`Manager.Inhibit` returns `h` and needs no seat), not
   hand-assembled from prose — which is the mitigation this
   milestone asked for.
 
-### N3 — Transport, auth and framing (0.8.0)
+### N3 — Transport, auth and framing (0.8.0) — ✅ SHIPPED
 
 Modules: `dbus_socket.cyr`, `dbus_auth.cyr`, `dbus_frame.cyr`.
 

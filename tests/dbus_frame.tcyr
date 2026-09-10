@@ -1,0 +1,351 @@
+# N3 — message framing, driven by the N2 golden corpus.
+#
+# No bus, no socket, no hardware. Every byte here came off a real
+# system bus (tests/fixtures/dbus/, captured 0.7.1) or is a
+# deliberately constructed edge case.
+#
+# The corpus fixtures are embedded as literal bytes rather than read
+# from disk: Cyrius has file I/O, but a test that depends on the
+# working directory is a test that fails differently in CI. The
+# generator is `tools/dbus_decode.py` plus the fixture .bin files —
+# see the header of each builder for which fixture it reproduces and
+# the exact byte offsets.
+
+include "src/dbus_frame.cyr"
+
+# ---- fixture builders ----
+# The first 16 bytes of tests/fixtures/dbus/02-hello-reply-plus-nameacquired.bin
+#   6c 02 01 01 | 0d 00 00 00 | ff ff ff ff | 47 00 00 00
+# 'l', METHOD_RETURN, NO_REPLY_EXPECTED, proto 1,
+# body_len 13, serial 0xFFFFFFFF, fields_len 71  -> total 101.
+fn t_hdr_hello_reply(p) {
+    store8(p + 0, 108); store8(p + 1, 2); store8(p + 2, 1); store8(p + 3, 1);
+    store8(p + 4, 0x0d); store8(p + 5, 0); store8(p + 6, 0); store8(p + 7, 0);
+    store8(p + 8, 0xff); store8(p + 9, 0xff); store8(p + 10, 0xff); store8(p + 11, 0xff);
+    store8(p + 12, 0x47); store8(p + 13, 0); store8(p + 14, 0); store8(p + 15, 0);
+    return 0;
+}
+
+# Message 2 of the same fixture, at offset 101:
+#   6c 04 01 01 | 0d 00 00 00 | ff ff ff ff | 97 00 00 00
+# SIGNAL, body 13, serial 0xFFFFFFFF, fields 151 -> total 181.
+fn t_hdr_nameacquired(p) {
+    store8(p + 0, 108); store8(p + 1, 4); store8(p + 2, 1); store8(p + 3, 1);
+    store8(p + 4, 0x0d); store8(p + 5, 0); store8(p + 6, 0); store8(p + 7, 0);
+    store8(p + 8, 0xff); store8(p + 9, 0xff); store8(p + 10, 0xff); store8(p + 11, 0xff);
+    store8(p + 12, 0x97); store8(p + 13, 0); store8(p + 14, 0); store8(p + 15, 0);
+    return 0;
+}
+
+# A big-endian twin of the hello reply: same fields, 'B' at +0 and
+# the u32s byte-reversed. No fixture is big-endian (all 13 are 'l'),
+# so this is the ONLY coverage the BE path gets — and it is marked
+# as such rather than presented as captured evidence.
+fn t_hdr_hello_reply_be(p) {
+    store8(p + 0, 66); store8(p + 1, 2); store8(p + 2, 1); store8(p + 3, 1);
+    store8(p + 4, 0); store8(p + 5, 0); store8(p + 6, 0); store8(p + 7, 0x0d);
+    store8(p + 8, 0xff); store8(p + 9, 0xff); store8(p + 10, 0xff); store8(p + 11, 0xff);
+    store8(p + 12, 0); store8(p + 13, 0); store8(p + 14, 0); store8(p + 15, 0x47);
+    return 0;
+}
+
+fn t_fill(p, n, v) {
+    var i = 0;
+    while (i < n) { store8(p + i, v); i = i + 1; }
+    return 0;
+}
+
+# ---- arithmetic ----
+fn test_align8() {
+    test_group("frame: align8");
+    assert_eq(dbus_frame_align8(0), 0, "0");
+    assert_eq(dbus_frame_align8(1), 8, "1 -> 8");
+    assert_eq(dbus_frame_align8(8), 8, "8 -> 8");
+    assert_eq(dbus_frame_align8(9), 16, "9 -> 16");
+    assert_eq(dbus_frame_align8(23), 24, "23 -> 24");
+    assert_eq(dbus_frame_align8(87), 88, "87 -> 88 (the hello reply's body offset)");
+    return 0;
+}
+
+# The reason this module reads headers with load32 and nothing else.
+fn test_u32_zero_extends() {
+    test_group("frame: header u32 reads are UNSIGNED");
+    var p = alloc(32);
+    t_hdr_hello_reply(p);
+    assert_eq(dbus_frame_u32(p, dbus_frame_off_serial()), 4294967295,
+      "serial 0xFFFFFFFF reads POSITIVE");
+    assert(dbus_frame_u32(p, dbus_frame_off_serial()) > 0, "and is not negative");
+    assert_eq(dbus_frame_msg_serial(p), 4294967295, "msg_serial agrees");
+    # The trap, demonstrated: load64 at +4 swallows the serial.
+    assert(load64(p + 4) < 0,
+      "load64(p+4) IS negative — this is the bug load32 exists to prevent");
+    return 0;
+}
+
+fn test_total_from_corpus_headers() {
+    test_group("frame: total length, from real corpus headers");
+    var p = alloc(32);
+    t_hdr_hello_reply(p);
+    assert_eq(dbus_frame_total(p, 16), 101, "hello reply -> 101 (align8(16+71)+13)");
+    assert_eq(dbus_frame_msg_type(p), 2, "METHOD_RETURN");
+    t_hdr_nameacquired(p);
+    assert_eq(dbus_frame_total(p, 16), 181, "NameAcquired -> 181 (align8(16+151)+13)");
+    assert_eq(dbus_frame_msg_type(p), 4, "SIGNAL");
+    # 101 + 181 == 282 == the fixture's size, with zero residual.
+    assert_eq(101 + 181, 282, "the two totals account for the whole fixture");
+    return 0;
+}
+
+fn test_total_needs_16_bytes() {
+    test_group("frame: 16 bytes are needed to know a length");
+    var p = alloc(32);
+    t_hdr_hello_reply(p);
+    var i = 0;
+    while (i < 16) {
+        assert_eq(dbus_frame_total(p, i), dbus_frame_need_more(),
+          "below 16 bytes the length is unknowable");
+        i = i + 1;
+    }
+    assert_eq(dbus_frame_total(p, 16), 101, "at exactly 16 it is known");
+    assert_eq(dbus_frame_total(p, 17), 101, "and does not change with more");
+    return 0;
+}
+
+fn test_big_endian_reader() {
+    test_group("frame: big-endian header (SYNTHETIC — no fixture is 'B')");
+    var p = alloc(32);
+    t_hdr_hello_reply_be(p);
+    assert_eq(dbus_frame_u32_be(p, dbus_frame_off_flds()), 71, "fields_len 71 BE");
+    assert_eq(dbus_frame_u32_be(p, dbus_frame_off_serial()), 4294967295, "serial BE");
+    assert_eq(dbus_frame_total(p, 16), 101, "BE twin frames to the same 101");
+    return 0;
+}
+
+fn test_rejects_bad_header() {
+    test_group("frame: rejects impossible headers");
+    var p = alloc(32);
+    t_hdr_hello_reply(p);
+    store8(p + 0, 88);                       # 'X' — neither 'l' nor 'B'
+    assert_eq(dbus_frame_total(p, 16), dbus_frame_badendian(), "unknown endian rejected");
+    t_hdr_hello_reply(p);
+    store8(p + 3, 2);                        # protocol version 2
+    assert_eq(dbus_frame_total(p, 16), dbus_frame_badproto(), "proto != 1 rejected");
+    return 0;
+}
+
+# ---- the stream framer ----
+# Feed the two-message buffer whole. Both messages must come out,
+# with nothing left over.
+fn test_two_messages_one_read() {
+    test_group("frame: one read yields TWO complete messages");
+    dbus_frame_init();
+    var t = dbus_frame_tail();
+    t_hdr_hello_reply(t);
+    t_fill(t + 16, 85, 0x41);                # body+fields filler to 101
+    t_hdr_nameacquired(t + 101);
+    t_fill(t + 117, 165, 0x42);              # to 282
+    dbus_frame_commit(282);
+
+    var a = dbus_frame_next();
+    assert_eq(a, 101, "first message is 101 bytes");
+    assert_eq(dbus_frame_msg_type(dbus_frame_base()), 2, "and is the METHOD_RETURN");
+    dbus_frame_advance(a);
+
+    var b = dbus_frame_next();
+    assert_eq(b, 181, "second message is 181 bytes");
+    assert_eq(dbus_frame_msg_type(dbus_frame_base()), 4, "and is the SIGNAL");
+    dbus_frame_advance(b);
+
+    assert_eq(dbus_frame_next(), dbus_frame_need_more(), "nothing left over");
+    assert_eq(dbus_frame_have(), 0, "buffer fully consumed");
+    return 0;
+}
+
+# THE partial-tail proof. No corpus fixture ends mid-message — that
+# claim was made once, from a decoder bug, and retracted. So the
+# path is proven by drip-feeding the same 282 bytes one at a time:
+# every intermediate state must say need_more, and the same two
+# messages must come out at the end.
+fn test_drip_feed_one_byte_at_a_time() {
+    test_group("frame: byte-at-a-time feed yields the same two messages");
+    var src = alloc(300);
+    t_hdr_hello_reply(src);
+    t_fill(src + 16, 85, 0x41);
+    t_hdr_nameacquired(src + 101);
+    t_fill(src + 117, 165, 0x42);
+
+    dbus_frame_init();
+    var got = 0;
+    var first = 0;
+    var second = 0;
+    var i = 0;
+    var premature = 0;
+    while (i < 282) {
+        store8(dbus_frame_tail(), load8(src + i));
+        dbus_frame_commit(1);
+        var r = dbus_frame_next();
+        if (r > 0) {
+            got = got + 1;
+            if (got == 1) { first = r; }
+            if (got == 2) { second = r; }
+            dbus_frame_advance(r);
+        }
+        if (r < 0) {
+            if (r != dbus_frame_need_more()) { premature = premature + 1; }
+        }
+        i = i + 1;
+    }
+    assert_eq(premature, 0, "no state other than need_more while incomplete");
+    assert_eq(got, 2, "exactly two messages emerged");
+    assert_eq(first, 101, "first is 101");
+    assert_eq(second, 181, "second is 181");
+    assert_eq(dbus_frame_have(), 0, "zero residual");
+    return 0;
+}
+
+# Same bytes, adversarial chunk sizes. A framer that happens to work
+# at one chunking can fail at another.
+fn test_drip_feed_various_chunks() {
+    test_group("frame: chunk sizes 3/7/16/100 all yield the same result");
+    var src = alloc(300);
+    t_hdr_hello_reply(src);
+    t_fill(src + 16, 85, 0x41);
+    t_hdr_nameacquired(src + 101);
+    t_fill(src + 117, 165, 0x42);
+
+    var sizes = alloc(32);
+    store64(sizes + 0, 3); store64(sizes + 8, 7);
+    store64(sizes + 16, 16); store64(sizes + 24, 100);
+    var s = 0;
+    while (s < 4) {
+        var chunk = load64(sizes + s * 8);
+        dbus_frame_init();
+        var got = 0;
+        var total = 0;
+        var i = 0;
+        while (i < 282) {
+            var k = chunk;
+            if (i + k > 282) { k = 282 - i; }
+            var j = 0;
+            while (j < k) {
+                store8(dbus_frame_tail() + j, load8(src + i + j));
+                j = j + 1;
+            }
+            dbus_frame_commit(k);
+            var r = dbus_frame_next();
+            while (r > 0) {
+                got = got + 1;
+                total = total + r;
+                dbus_frame_advance(r);
+                r = dbus_frame_next();
+            }
+            i = i + k;
+        }
+        assert_eq(got, 2, "two messages at this chunk size");
+        assert_eq(total, 282, "totalling 282 bytes");
+        s = s + 1;
+    }
+    return 0;
+}
+
+# ---- EOF semantics ----
+# recvmsg returning 0 means three different things depending on
+# framer state, and they must be three different codes.
+fn test_eof_semantics() {
+    test_group("frame: EOF means three different things");
+    # (a) clean close, nothing buffered
+    dbus_frame_init();
+    dbus_frame_set_eof();
+    assert_eq(dbus_frame_next(), dbus_frame_eof(), "clean close -> eof");
+
+    # (b) close with a partial header
+    dbus_frame_init();
+    var t = dbus_frame_tail();
+    t_hdr_hello_reply(t);
+    dbus_frame_commit(9);                     # fewer than 16
+    dbus_frame_set_eof();
+    assert_eq(dbus_frame_next(), dbus_frame_truncated(), "partial header -> truncated");
+
+    # (c) close with a complete header but a short body
+    dbus_frame_init();
+    t = dbus_frame_tail();
+    t_hdr_hello_reply(t);
+    t_fill(t + 16, 40, 0x41);
+    dbus_frame_commit(56);                    # needs 101
+    dbus_frame_set_eof();
+    assert_eq(dbus_frame_next(), dbus_frame_truncated(), "short body -> truncated");
+    return 0;
+}
+
+# ---- over-cap drain ----
+# D-Bus carries the full length in the fixed header, so an
+# over-capacity message can be discarded exactly and the stream
+# resynchronised. A bare length-prefix protocol could not do this.
+fn test_over_cap_message_is_drained() {
+    test_group("frame: an over-cap message is drained, not fatal");
+    dbus_frame_init();
+    var t = dbus_frame_tail();
+    # fields_len chosen so total > cap (8192)
+    store8(t + 0, 108); store8(t + 1, 2); store8(t + 2, 1); store8(t + 3, 1);
+    store8(t + 4, 0); store8(t + 5, 0); store8(t + 6, 0); store8(t + 7, 0);
+    store8(t + 8, 1); store8(t + 9, 0); store8(t + 10, 0); store8(t + 11, 0);
+    store8(t + 12, 0xF0); store8(t + 13, 0x3F); store8(t + 14, 0); store8(t + 15, 0);
+    dbus_frame_commit(16);
+    var big = dbus_frame_total(dbus_frame_base(), 16);
+    assert(big > dbus_frame_cap(), "this message exceeds the buffer");
+    var r = dbus_frame_next();
+    assert_eq(r, dbus_frame_need_more(), "drain begins, not a fatal error");
+    return 0;
+}
+
+# ---- pending fds ----
+fn test_fd_queue() {
+    test_group("frame: pending-fd queue is bounded and closes on overflow");
+    dbus_frame_init();
+    assert_eq(dbus_frame_fd_count(), 0, "starts empty");
+    var i = 0;
+    while (i < dbus_frame_fdq_cap()) {
+        assert_eq(dbus_frame_push_fd(100 + i), 0, "push within capacity");
+        i = i + 1;
+    }
+    assert_eq(dbus_frame_fd_count(), dbus_frame_fdq_cap(), "queue is full");
+    # Overflow must CLOSE the arriving fd, not silently drop it. Use a
+    # real descriptor so the close is observable.
+    var pr = alloc(8);
+    store64(pr, 0);
+    sys_socketpair(1, 1, 0, pr);
+    var lo = load64(pr) & 0xFFFFFFFF;
+    var hi = (load64(pr) >> 32) & 0xFFFFFFFF;
+    assert_eq(dbus_frame_push_fd(lo), dbus_frame_overflow(), "overflow reported");
+    var st = alloc(160);
+    assert(sys_fstat(lo, st) < 0, "the refused fd was CLOSED, not leaked");
+    sys_close(hi);
+    # FIFO order out.
+    assert_eq(dbus_frame_take_fd(), 100, "FIFO: first in, first out");
+    assert_eq(dbus_frame_take_fd(), 101, "then the second");
+    assert_eq(dbus_frame_fd_count(), dbus_frame_fdq_cap() - 2, "count drops");
+    dbus_frame_close_fds();
+    assert_eq(dbus_frame_fd_count(), 0, "close_fds drains the queue");
+    assert_eq(dbus_frame_take_fd(), (0 - 1), "empty queue yields -1");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_align8();
+    test_u32_zero_extends();
+    test_total_from_corpus_headers();
+    test_total_needs_16_bytes();
+    test_big_endian_reader();
+    test_rejects_bad_header();
+    test_two_messages_one_read();
+    test_drip_feed_one_byte_at_a_time();
+    test_drip_feed_various_chunks();
+    test_eof_semantics();
+    test_over_cap_message_is_drained();
+    test_fd_queue();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

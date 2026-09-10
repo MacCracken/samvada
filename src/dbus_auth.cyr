@@ -1,0 +1,129 @@
+# @internal — native-dbus SASL handshake
+# dbus_auth.cyr — the connect-time authentication exchange.
+#
+# What the reference client actually sends, captured in
+# tests/fixtures/dbus/01-sasl-client.bin — ONE pipelined 48-byte
+# write, with an EMPTY-CREDENTIAL `DATA` step:
+#
+#   \0 AUTH EXTERNAL\r\n DATA\r\n NEGOTIATE_UNIX_FD\r\n BEGIN\r\n
+#
+# This is NOT the `AUTH EXTERNAL <hex(ascii(uid))>` ping-pong that
+# docs/architecture/dbus-marshalling.md described until 0.7.1. Both
+# forms are legal; only one is what libsystemd emits, and a reader
+# built for the other blocks forever on a line that already arrived.
+#
+# The server answers with THREE lines in ONE read
+# (01-sasl-server.bin, 58 bytes here):
+#
+#   DATA\r\n OK <guid>\r\n AGREE_UNIX_FD\r\n
+#
+# 58 is DERIVED (6 + 3 + 32 + 2 + 15), not a protocol constant: the
+# same handshake yields 43 bytes without NEGOTIATE_UNIX_FD and 52
+# via the hex-uid form. Never size a read or a state machine off it.
+#
+# This module borrows dbus_frame.cyr's buffer through
+# tail/space/commit rather than owning one. alloc() never frees, and
+# a private buffer would either copy or lose the residual — the
+# server is free to pipeline, so binary message bytes can arrive in
+# the same read as AGREE_UNIX_FD.
+
+fn dbus_auth_ok()        { return 0; }
+fn dbus_auth_need_more() { return -1100; }
+fn dbus_auth_rejected()  { return -1101; }
+fn dbus_auth_error()     { return -1102; }
+fn dbus_auth_no_fds()    { return -1103; }   # server refused NEGOTIATE_UNIX_FD
+
+# The exact 48 bytes, byte for byte from the fixture.
+fn dbus_auth_blob_len() { return 48; }
+
+fn dbus_auth_write_blob(p) {
+    var s = "\x00AUTH EXTERNAL\r\nDATA\r\nNEGOTIATE_UNIX_FD\r\nBEGIN\r\n";
+    # The leading NUL means strlen cannot measure this; the length is
+    # pinned and asserted against the fixture instead.
+    store8(p + 0, 0);
+    var lit = "AUTH EXTERNAL\r\nDATA\r\nNEGOTIATE_UNIX_FD\r\nBEGIN\r\n";
+    var n = strlen(lit);
+    var i = 0;
+    while (i < n) {
+        store8(p + 1 + i, load8(lit + i));
+        i = i + 1;
+    }
+    return 1 + n;
+}
+
+# Find a CRLF in [p, p+len). Returns the index of the '\r', or -1.
+# Line-oriented over a buffer: the three server lines can arrive in
+# one read, in three, or split mid-line.
+fn dbus_auth_find_crlf(p, len) {
+    var i = 0;
+    while (i + 1 < len) {
+        var c = load8(p + i);
+        if (c == 13) {
+            if (load8(p + i + 1) == 10) { return i; }
+        }
+        i = i + 1;
+    }
+    return (0 - 1);
+}
+
+fn _dbus_auth_starts(p, len, lit) {
+    var n = strlen(lit);
+    if (len < n) { return 0; }
+    var i = 0;
+    while (i < n) {
+        if (load8(p + i) != load8(lit + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Classify one server line (without its CRLF).
+#   1 = DATA, 2 = OK, 3 = AGREE_UNIX_FD,
+#   4 = REJECTED, 5 = ERROR, 0 = anything else
+fn dbus_auth_line_kind(p, len) {
+    if (_dbus_auth_starts(p, len, "DATA") != 0)          { return 1; }
+    if (_dbus_auth_starts(p, len, "OK ") != 0)           { return 2; }
+    if (_dbus_auth_starts(p, len, "AGREE_UNIX_FD") != 0) { return 3; }
+    if (_dbus_auth_starts(p, len, "REJECTED") != 0)      { return 4; }
+    if (_dbus_auth_starts(p, len, "ERROR") != 0)         { return 5; }
+    return 0;
+}
+
+# Consume as many complete server lines as the buffer holds, and say
+# whether the handshake is done.
+#
+# Returns ok once AGREE_UNIX_FD has been seen; need_more while lines
+# are still outstanding; rejected / error / no_fds on refusal. The
+# buffer cursor is left exactly where the BINARY stream begins, so
+# the framer can take over with no copy.
+var _dbus_auth_saw_ok    = 0;
+var _dbus_auth_saw_agree = 0;
+
+fn dbus_auth_reset() {
+    _dbus_auth_saw_ok = 0;
+    _dbus_auth_saw_agree = 0;
+    return 0;
+}
+
+fn dbus_auth_drain_lines() {
+    while (1 == 1) {
+        var p = dbus_frame_base();
+        var have = dbus_frame_have();
+        if (have <= 0) { return dbus_auth_need_more(); }
+        var at = dbus_auth_find_crlf(p, have);
+        if (at < 0) { return dbus_auth_need_more(); }
+
+        var kind = dbus_auth_line_kind(p, at);
+        dbus_frame_consume(at + 2);
+
+        if (kind == 4) { return dbus_auth_rejected(); }
+        if (kind == 5) { return dbus_auth_error(); }
+        if (kind == 2) { _dbus_auth_saw_ok = 1; }
+        if (kind == 3) {
+            _dbus_auth_saw_agree = 1;
+            return dbus_auth_ok();
+        }
+        # kind 1 (DATA) and 0 (unknown-but-not-fatal) simply advance.
+    }
+    return dbus_auth_need_more();
+}

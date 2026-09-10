@@ -1,0 +1,264 @@
+# N3 — SASL handshake and transport, with no bus.
+#
+# The auth half is a pure byte transform driven from the captured
+# server reply (tests/fixtures/dbus/01-sasl-server.bin). The
+# transport half runs over a socketpair, which is the only way to
+# reach the failure paths — a real bus will not produce REJECTED or
+# a mid-line split on demand.
+
+include "src/dbus_frame.cyr"
+include "src/dbus_auth.cyr"
+include "src/dbus_socket.cyr"
+
+fn t_put(p, s) {
+    var n = strlen(s);
+    var i = 0;
+    while (i < n) { store8(p + i, load8(s + i)); i = i + 1; }
+    return n;
+}
+
+fn t_feed(s) {
+    var n = t_put(dbus_frame_tail(), s);
+    dbus_frame_commit(n);
+    return n;
+}
+
+# ---- the client blob ----
+# Byte-for-byte against tests/fixtures/dbus/01-sasl-client.bin:
+# 00 41 55 54 48 20 45 58 54 45 52 4e 41 4c 0d 0a ...
+fn test_auth_blob_matches_fixture() {
+    test_group("auth: the 48-byte pipelined blob");
+    var p = alloc(64);
+    var n = dbus_auth_write_blob(p);
+    assert_eq(n, 48, "48 bytes, as captured");
+    assert_eq(n, dbus_auth_blob_len(), "and the pinned length agrees");
+    assert_eq(load8(p + 0), 0, "byte 0 is the literal NUL");
+    assert_eq(load8(p + 1), 65, "then 'A'");
+    assert_eq(load8(p + 2), 85, "'U'");
+    assert_eq(load8(p + 3), 84, "'T'");
+    assert_eq(load8(p + 4), 72, "'H'");
+    assert_eq(load8(p + 14), 13, "CR after EXTERNAL");
+    assert_eq(load8(p + 15), 10, "LF after EXTERNAL");
+    assert_eq(load8(p + 46), 13, "final CR");
+    assert_eq(load8(p + 47), 10, "final LF");
+    return 0;
+}
+
+# ---- line scanning ----
+fn test_find_crlf() {
+    test_group("auth: CRLF scanning");
+    var p = alloc(64);
+    var n = t_put(p, "OK abc\r\nAGREE_UNIX_FD\r\n");
+    assert_eq(dbus_auth_find_crlf(p, n), 6, "first CRLF at 6");
+    assert_eq(dbus_auth_find_crlf(p, 6), (0 - 1), "not found when cut before it");
+    assert_eq(dbus_auth_find_crlf(p, 7), (0 - 1), "a lone CR is not a line end");
+    assert_eq(dbus_auth_find_crlf(p, 8), 6, "found once the LF is present");
+    return 0;
+}
+
+fn test_line_kinds() {
+    test_group("auth: line classification");
+    var p = alloc(64);
+    assert_eq(dbus_auth_line_kind(p, t_put(p, "DATA")), 1, "DATA");
+    assert_eq(dbus_auth_line_kind(p, t_put(p, "OK 0d2fd0e6568e7bb893d923844c184483")), 2, "OK <guid>");
+    assert_eq(dbus_auth_line_kind(p, t_put(p, "AGREE_UNIX_FD")), 3, "AGREE_UNIX_FD");
+    assert_eq(dbus_auth_line_kind(p, t_put(p, "REJECTED EXTERNAL")), 4, "REJECTED");
+    assert_eq(dbus_auth_line_kind(p, t_put(p, "ERROR wat")), 5, "ERROR");
+    assert_eq(dbus_auth_line_kind(p, t_put(p, "MOOSE")), 0, "unknown is not fatal");
+    return 0;
+}
+
+# ---- the real server reply, whole ----
+fn test_server_reply_whole() {
+    test_group("auth: the captured 58-byte reply, in one read");
+    dbus_frame_init();
+    dbus_auth_reset();
+    t_feed("DATA\r\nOK 0d2fd0e6568e7bb893d923844c184483\r\nAGREE_UNIX_FD\r\n");
+    assert_eq(dbus_auth_drain_lines(), dbus_auth_ok(), "handshake completes");
+    assert_eq(dbus_frame_have(), 0, "cursor left exactly at the binary stream");
+    return 0;
+}
+
+# The same bytes, arriving one at a time. Every intermediate state
+# must be need_more, and the result must be identical — this is the
+# split-line path a real bus will not produce on demand.
+fn test_server_reply_drip() {
+    test_group("auth: the same reply, one byte per read");
+    var src = alloc(80);
+    var n = t_put(src, "DATA\r\nOK 0d2fd0e6568e7bb893d923844c184483\r\nAGREE_UNIX_FD\r\n");
+    assert_eq(n, 58, "58 bytes, matching the fixture");
+    dbus_frame_init();
+    dbus_auth_reset();
+    var i = 0;
+    var done = 0;
+    var bad = 0;
+    while (i < n) {
+        store8(dbus_frame_tail(), load8(src + i));
+        dbus_frame_commit(1);
+        var r = dbus_auth_drain_lines();
+        if (r == dbus_auth_ok()) { done = done + 1; }
+        if (r < 0) {
+            if (r != dbus_auth_need_more()) { bad = bad + 1; }
+        }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, "no state other than need_more while incomplete");
+    assert_eq(done, 1, "completes exactly once, on the final byte");
+    assert_eq(dbus_frame_have(), 0, "zero residual");
+    return 0;
+}
+
+# The server may pipeline: binary message bytes can share the read
+# that finishes the handshake. Those bytes must survive for the
+# framer, which is the whole reason auth borrows the framer buffer.
+fn test_residual_survives_for_the_framer() {
+    test_group("auth: binary residual is left for the framer");
+    dbus_frame_init();
+    dbus_auth_reset();
+    t_feed("DATA\r\nOK abc\r\nAGREE_UNIX_FD\r\n");
+    var extra = dbus_frame_tail();
+    store8(extra + 0, 108); store8(extra + 1, 2);
+    store8(extra + 2, 1);   store8(extra + 3, 1);
+    dbus_frame_commit(4);
+    assert_eq(dbus_auth_drain_lines(), dbus_auth_ok(), "handshake completes");
+    assert_eq(dbus_frame_have(), 4, "the 4 binary bytes are still buffered");
+    assert_eq(load8(dbus_frame_base()), 108, "and start with 'l'");
+    return 0;
+}
+
+fn test_rejection_paths() {
+    test_group("auth: refusal is reported, not hung on");
+    dbus_frame_init(); dbus_auth_reset();
+    t_feed("REJECTED EXTERNAL DBUS_COOKIE_SHA1\r\n");
+    assert_eq(dbus_auth_drain_lines(), dbus_auth_rejected(), "REJECTED surfaces");
+
+    dbus_frame_init(); dbus_auth_reset();
+    t_feed("ERROR something went wrong\r\n");
+    assert_eq(dbus_auth_drain_lines(), dbus_auth_error(), "ERROR surfaces");
+
+    # REJECTED split across three reads must still surface, not hang.
+    dbus_frame_init(); dbus_auth_reset();
+    t_feed("REJE");
+    assert_eq(dbus_auth_drain_lines(), dbus_auth_need_more(), "partial line waits");
+    t_feed("CTED EXT");
+    assert_eq(dbus_auth_drain_lines(), dbus_auth_need_more(), "still waiting");
+    t_feed("ERNAL\r\n");
+    assert_eq(dbus_auth_drain_lines(), dbus_auth_rejected(), "and then reports");
+    return 0;
+}
+
+# ---- transport ----
+fn test_sockaddr_forms() {
+    test_group("socket: the two addrlen rules differ");
+    var sa = alloc(dbus_socket_sockaddr_un_size());
+    var p = alloc(128);
+    var n = t_put(p, "/run/dbus/system_bus_socket");
+    assert_eq(n, 27, "path is 27 bytes");
+    # filesystem: 2 + strlen + 1
+    assert_eq(dbus_socket_addr_path(sa, p, n), 30, "filesystem addrlen = 2 + 27 + 1");
+    assert_eq(load8(sa + 0), 1, "AF_UNIX in sun_family");
+    assert_eq(load8(sa + 2), 47, "sun_path starts with '/'");
+    assert_eq(load8(sa + 2 + n), 0, "and is NUL-terminated");
+
+    # abstract: 2 + 1 + namelen, leading NUL, NO trailing NUL
+    var m = t_put(p, "myabstract");
+    assert_eq(m, 10, "name is 10 bytes");
+    assert_eq(dbus_socket_addr_abstract(sa, p, m), 13, "abstract addrlen = 2 + 1 + 10");
+    assert_eq(load8(sa + 2), 0, "sun_path[0] is the LEADING NUL");
+    assert_eq(load8(sa + 3), 109, "then 'm'");
+
+    # The two rules can produce the SAME LENGTH — for a 10-byte name
+    # both give 13 (2+10+1 and 2+1+10). So length is NOT what
+    # distinguishes them, and a test that checks only addrlen would
+    # pass against a completely wrong address. What differs is the
+    # LAYOUT: abstract puts a NUL at sun_path[0] and no terminator;
+    # filesystem puts the name there and terminates it.
+    assert_eq(dbus_socket_addr_path(sa, p, m), 13, "filesystem: 2 + 10 + 1");
+    var fs_first = load8(sa + 2);
+    assert_eq(dbus_socket_addr_abstract(sa, p, m), 13, "abstract: 2 + 1 + 10 — same number");
+    var ab_first = load8(sa + 2);
+    assert(fs_first != ab_first,
+      "but the LAYOUTS differ: sun_path[0] is the name vs a leading NUL");
+    assert_eq(fs_first, 109, "filesystem form starts with 'm'");
+    assert_eq(ab_first, 0, "abstract form starts with NUL");
+    return 0;
+}
+
+fn test_sockaddr_guards() {
+    test_group("socket: address builders refuse rather than clamp");
+    var sa = alloc(dbus_socket_sockaddr_un_size());
+    var p = alloc(256);
+    t_put(p, "x");
+    assert_eq(dbus_socket_addr_path(0, p, 1), -22, "null sa rejected");
+    assert_eq(dbus_socket_addr_path(sa, 0, 1), -22, "null path rejected");
+    assert_eq(dbus_socket_addr_path(sa, p, 0), -22, "zero length rejected");
+    # An over-long path must be REFUSED. Clamping would silently
+    # connect to a different socket than the caller named.
+    assert_eq(dbus_socket_addr_path(sa, p, 108), -22, "over-long path refused, not truncated");
+    assert_eq(dbus_socket_addr_abstract(sa, p, 108), -22, "over-long name refused");
+    return 0;
+}
+
+fn test_write_all_over_socketpair() {
+    test_group("socket: write_all delivers every byte");
+    var fds = alloc(8);
+    store64(fds, 0);
+    assert_eq(sys_socketpair(1, 1, 0, fds), 0, "pair");
+    var a = load64(fds) & 0xFFFFFFFF;
+    var b = (load64(fds) >> 32) & 0xFFFFFFFF;
+
+    var msg = alloc(64);
+    var n = dbus_auth_write_blob(msg);
+    assert_eq(dbus_socket_write_all(a, msg, n), n, "all 48 bytes written");
+
+    var rx = alloc(64);
+    assert_eq(sys_read(b, rx, 64), 48, "48 bytes readable at the peer");
+    assert_eq(load8(rx + 0), 0, "leading NUL survived");
+    assert_eq(load8(rx + 47), 10, "trailing LF survived");
+
+    assert_eq(dbus_socket_write_all(a, 0, 4), -22, "null buffer rejected");
+    assert_eq(dbus_socket_write_all(a, msg, (0 - 1)), -22, "negative length rejected");
+    sys_close(a); sys_close(b);
+    return 0;
+}
+
+# MSG_NOSIGNAL is the reason the send path is sendto and not
+# sys_write. Without it, writing to a departed peer raises SIGPIPE
+# and the DEFAULT disposition kills the process — samvada is a
+# library inside a compositor, so that is not survivable.
+fn test_write_to_closed_peer_returns_epipe() {
+    test_group("socket: writing to a departed peer returns EPIPE, does NOT kill us");
+    var fds = alloc(8);
+    store64(fds, 0);
+    assert_eq(sys_socketpair(1, 1, 0, fds), 0, "pair");
+    var a = load64(fds) & 0xFFFFFFFF;
+    var b = (load64(fds) >> 32) & 0xFFFFFFFF;
+    sys_close(b);
+    var msg = alloc(16);
+    t_put(msg, "hello");
+    var rc = dbus_socket_write_all(a, msg, 5);
+    assert(rc < 0, "the write fails");
+    assert_eq(rc, -32, "with -EPIPE");
+    assert(1, "and this line runs — the process was not signalled");
+    sys_close(a);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_auth_blob_matches_fixture();
+    test_find_crlf();
+    test_line_kinds();
+    test_server_reply_whole();
+    test_server_reply_drip();
+    test_residual_survives_for_the_framer();
+    test_rejection_paths();
+    test_sockaddr_forms();
+    test_sockaddr_guards();
+    test_write_all_over_socketpair();
+    test_write_to_closed_peer_returns_epipe();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -1,0 +1,309 @@
+# @internal — native-dbus message framing
+# dbus_frame.cyr — splits a byte stream into whole dbus messages.
+#
+# A read from the bus is not a message. The N2 corpus shows the very
+# first exchange delivering TWO complete messages in one 282-byte
+# read (101 + 181, zero residual), so a reader that handles one
+# message per read silently drops the second — which in that
+# exchange is `NameAcquired`. Conversely a stream socket may split
+# anywhere, so a partial tail must survive into the next read.
+#
+# This module owns THE receive buffer. dbus_auth.cyr borrows it
+# through tail/space/commit rather than keeping its own: alloc()
+# never frees, and a separate auth buffer would either copy or lose
+# the residual left when the server pipelines its SASL reply.
+#
+# NOT REENTRANT. State is file-scope, matching dbus_sys.cyr and for
+# the same reason: `var buf[N]` inside a fn is STATIC in Cyrius, so
+# per-call scratch is a fiction. samvada is single-threaded by
+# design (public-api.md §Threading).
+
+# ---- header layout, message-relative ----
+#   +0  endian byte ('l' = 108 little, 'B' = 66 big)
+#   +1  message type (u8)
+#   +2  flags (u8)
+#   +3  protocol major version (u8)
+#   +4  body_len   (u32, in the endianness named at +0)
+#   +8  serial     (u32)
+#   +12 fields_len (u32)
+#   +16 header fields array, `fields_len` bytes
+#       body starts at align8(16 + fields_len)
+fn dbus_frame_hdr_size()  { return 16; }
+fn dbus_frame_off_body()  { return 4; }
+fn dbus_frame_off_serial(){ return 8; }
+fn dbus_frame_off_flds()  { return 12; }
+fn dbus_frame_endian_le() { return 108; }
+fn dbus_frame_endian_be() { return 66; }
+
+# The buffer. 8192 is 34x the largest delivery the corpus contains
+# (282 bytes) and a page multiple. It is NOT a protocol limit — the
+# spec allows 128 MiB — so an over-cap message is DRAINED, not
+# treated as fatal (see dbus_frame_next). D-Bus can do that because
+# the full length is in the fixed header; a bare length-prefix
+# protocol could not.
+fn dbus_frame_cap() { return 8192; }
+
+# Pending-fd queue depth. Fixed, because alloc() never frees and a
+# growable queue leaks per push. On overflow the arriving fd is
+# CLOSED, not dropped — an unbounded fd leak inside a compositor is
+# worse than a refused message.
+fn dbus_frame_fdq_cap() { return 8; }
+
+# ---- status codes ----
+# Deliberately OUTSIDE the errno band. samvada's convention is that
+# negatives are sd-bus errnos, and dbus_sys.cyr already spends -22
+# and -71. If a protocol fault shared that range, "the bus sent a
+# malformed header" would be indistinguishable from "recvmsg
+# failed", which is exactly the ambiguity the 0.5.1 audit found
+# around -22.
+fn dbus_frame_ok()        { return 0; }
+fn dbus_frame_need_more() { return -1000; }
+fn dbus_frame_eof()       { return -1001; }   # orderly close, nothing pending
+fn dbus_frame_truncated() { return -1002; }   # EOF mid-message
+fn dbus_frame_badendian() { return -1003; }
+fn dbus_frame_badproto()  { return -1004; }
+fn dbus_frame_overflow()  { return -1005; }   # fd queue full
+
+# ---- arithmetic ----
+fn dbus_frame_align8(n) {
+    return (n + 7) & (0 - 8);
+}
+
+# Read a u32 header field. load32 ZERO-extends, which is the whole
+# reason this fn exists and is the only place load32 appears on the
+# header path.
+#
+# `load64(p + 4)` on the bus's very FIRST reply returns -4294967283,
+# because the 0xFFFFFFFF serial occupies the high half of that
+# 8-byte load. `total` then goes negative, `avail < total` is false,
+# the cursor advances by a negative amount and the framer walks
+# backwards forever. Verified on the real fixture.
+#
+# Note also that dbus_sys.cyr DOES sign-extend, correctly — an
+# SCM_RIGHTS payload is a signed int32 fd. Copying that idiom here
+# is the trap: a valid serial would read as an error.
+fn dbus_frame_u32(p, off) {
+    return load32(p + off);
+}
+
+# Big-endian reader. No mask needed: load8 zero-extends and
+# 255 << 24 = 4278190080 is a positive i64.
+fn dbus_frame_u32_be(p, off) {
+    var b0 = load8(p + off + 0);
+    var b1 = load8(p + off + 1);
+    var b2 = load8(p + off + 2);
+    var b3 = load8(p + off + 3);
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+}
+
+# Total on-wire length of the message starting at `p`, given `avail`
+# readable bytes there. Returns need_more if fewer than 16 bytes are
+# present — the length is genuinely unknowable below that, because
+# byte +0 selects how to read the u32 at +12.
+#
+# Every quantity here is MESSAGE-relative. Evaluating align8 against
+# an absolute buffer offset is the bug that made the N2 corpus look
+# truncated: for message 2 of the hello reply (off 101, fields 151,
+# body 13) it yields 184 instead of 181.
+fn dbus_frame_total(p, avail) {
+    if (avail < dbus_frame_hdr_size()) { return dbus_frame_need_more(); }
+    var e = load8(p + 0);
+    var body = 0;
+    var flds = 0;
+    if (e == dbus_frame_endian_le()) {
+        body = dbus_frame_u32(p, dbus_frame_off_body());
+        flds = dbus_frame_u32(p, dbus_frame_off_flds());
+    }
+    if (e == dbus_frame_endian_be()) {
+        body = dbus_frame_u32_be(p, dbus_frame_off_body());
+        flds = dbus_frame_u32_be(p, dbus_frame_off_flds());
+    }
+    var known = 0;
+    if (e == dbus_frame_endian_le()) { known = 1; }
+    if (e == dbus_frame_endian_be()) { known = 1; }
+    if (known == 0) { return dbus_frame_badendian(); }
+    if (load8(p + 3) != 1) { return dbus_frame_badproto(); }
+    return dbus_frame_align8(dbus_frame_hdr_size() + flds) + body;
+}
+
+fn dbus_frame_msg_type(p)   { return load8(p + 1); }
+fn dbus_frame_msg_flags(p)  { return load8(p + 2); }
+fn dbus_frame_msg_serial(p) {
+    var e = load8(p + 0);
+    if (e == dbus_frame_endian_be()) {
+        return dbus_frame_u32_be(p, dbus_frame_off_serial());
+    }
+    return dbus_frame_u32(p, dbus_frame_off_serial());
+}
+
+# ---- state ----
+var _dbf_buf   = 0;   # the single receive buffer
+var _dbf_off   = 0;   # cursor: first unconsumed byte
+var _dbf_have  = 0;   # cursor: one past the last valid byte
+var _dbf_skip  = 0;   # bytes still to discard for an over-cap message
+var _dbf_eof   = 0;   # peer closed
+var _dbf_fdq   = 0;   # pending-fd ring
+var _dbf_fdn   = 0;   # fds queued
+var _dbf_ready = 0;
+
+fn dbus_frame_init() {
+    if (_dbf_ready != 0) {
+        _dbf_off = 0; _dbf_have = 0; _dbf_skip = 0; _dbf_eof = 0; _dbf_fdn = 0;
+        return 0;
+    }
+    _dbf_buf = alloc(dbus_frame_cap());
+    if (_dbf_buf == 0) { return -12; }
+    _dbf_fdq = alloc(dbus_frame_fdq_cap() * 8);
+    if (_dbf_fdq == 0) { return -12; }
+    _dbf_off = 0; _dbf_have = 0; _dbf_skip = 0; _dbf_eof = 0; _dbf_fdn = 0;
+    _dbf_ready = 1;
+    return 0;
+}
+
+# ---- buffer access, for dbus_auth.cyr and the socket reader ----
+fn dbus_frame_tail()  { return _dbf_buf + _dbf_have; }
+fn dbus_frame_space() { return dbus_frame_cap() - _dbf_have; }
+fn dbus_frame_have()  { return _dbf_have - _dbf_off; }
+fn dbus_frame_base()  { return _dbf_buf + _dbf_off; }
+
+fn dbus_frame_commit(n) {
+    if (n <= 0) { return 0; }
+    _dbf_have = _dbf_have + n;
+    return 0;
+}
+
+# Consume `n` bytes from the front — used by the SASL reader, which
+# leaves the cursor exactly where the binary stream begins.
+fn dbus_frame_consume(n) {
+    if (n <= 0) { return 0; }
+    _dbf_off = _dbf_off + n;
+    if (_dbf_off > _dbf_have) { _dbf_off = _dbf_have; }
+    return 0;
+}
+
+fn dbus_frame_set_eof() { _dbf_eof = 1; return 0; }
+
+# Slide unconsumed bytes to the front. Run only when a header can no
+# longer be appended, so compaction is rare rather than per-read.
+#
+# memcpy with dst < src and a forward loop is what makes this safe;
+# lib/string.cyr's memcpy is a forward byte loop today and there is
+# no memmove. Stated at the call site because the guarantee is
+# undocumented upstream.
+fn dbus_frame_compact() {
+    if (_dbf_off == 0) { return 0; }
+    var live = _dbf_have - _dbf_off;
+    if (live > 0) { memcpy(_dbf_buf, _dbf_buf + _dbf_off, live); }
+    _dbf_off = 0;
+    _dbf_have = live;
+    return 0;
+}
+
+fn dbus_frame_maybe_compact() {
+    var room = dbus_frame_cap() - _dbf_have;
+    if (room < dbus_frame_hdr_size()) { return dbus_frame_compact(); }
+    return 0;
+}
+
+# ---- pending fds ----
+fn dbus_frame_push_fd(fd) {
+    if (fd < 0) { return 0; }
+    if (_dbf_fdn >= dbus_frame_fdq_cap()) {
+        sys_close(fd);
+        return dbus_frame_overflow();
+    }
+    store64(_dbf_fdq + _dbf_fdn * 8, fd);
+    _dbf_fdn = _dbf_fdn + 1;
+    return 0;
+}
+
+fn dbus_frame_fd_count() { return _dbf_fdn; }
+
+fn dbus_frame_take_fd() {
+    if (_dbf_fdn <= 0) { return (0 - 1); }
+    var fd = load64(_dbf_fdq + 0);
+    var i = 1;
+    while (i < _dbf_fdn) {
+        store64(_dbf_fdq + (i - 1) * 8, load64(_dbf_fdq + i * 8));
+        i = i + 1;
+    }
+    _dbf_fdn = _dbf_fdn - 1;
+    return fd;
+}
+
+# Close every queued descriptor. Must run on any terminal fault, on
+# the over-cap drain, and at connection close — a queued fd nobody
+# takes is a leak for the process lifetime.
+fn dbus_frame_close_fds() {
+    var i = 0;
+    while (i < _dbf_fdn) {
+        var fd = load64(_dbf_fdq + i * 8);
+        if (fd >= 0) { sys_close(fd); }
+        i = i + 1;
+    }
+    _dbf_fdn = 0;
+    return 0;
+}
+
+# ---- the framer ----
+# Yield the next complete message.
+#
+#   returns > 0   its total length; the message starts at
+#                 dbus_frame_base() and the caller must call
+#                 dbus_frame_advance(len) when done with it
+#           need_more   buffer holds a partial message; read again
+#           eof         peer closed cleanly with nothing pending
+#           truncated   peer closed mid-message
+#           badendian / badproto   unrecoverable, stream is lost
+fn dbus_frame_next() {
+    # Finish discarding an over-cap message first.
+    if (_dbf_skip > 0) {
+        var avail0 = _dbf_have - _dbf_off;
+        var take = _dbf_skip;
+        if (take > avail0) { take = avail0; }
+        _dbf_off = _dbf_off + take;
+        _dbf_skip = _dbf_skip - take;
+        if (_dbf_skip > 0) {
+            if (_dbf_eof != 0) { return dbus_frame_truncated(); }
+            return dbus_frame_need_more();
+        }
+    }
+
+    var avail = _dbf_have - _dbf_off;
+    if (avail == 0) {
+        if (_dbf_eof != 0) { return dbus_frame_eof(); }
+        return dbus_frame_need_more();
+    }
+    if (avail < dbus_frame_hdr_size()) {
+        if (_dbf_eof != 0) { return dbus_frame_truncated(); }
+        return dbus_frame_need_more();
+    }
+
+    var p = _dbf_buf + _dbf_off;
+    var total = dbus_frame_total(p, avail);
+    if (total == dbus_frame_badendian()) { return dbus_frame_badendian(); }
+    if (total == dbus_frame_badproto())  { return dbus_frame_badproto(); }
+
+    # Over-cap: the message can never fit, so discard exactly `total`
+    # bytes and resynchronise. Every queued fd goes with it — the
+    # field array may not even be buffered, so UNIX_FDS is unreadable
+    # and conservatism is the only safe rule.
+    if (total > dbus_frame_cap()) {
+        dbus_frame_close_fds();
+        _dbf_skip = total;
+        return dbus_frame_next();
+    }
+
+    if (avail < total) {
+        if (_dbf_eof != 0) { return dbus_frame_truncated(); }
+        return dbus_frame_need_more();
+    }
+    return total;
+}
+
+fn dbus_frame_advance(n) {
+    if (n <= 0) { return 0; }
+    _dbf_off = _dbf_off + n;
+    if (_dbf_off > _dbf_have) { _dbf_off = _dbf_have; }
+    return 0;
+}

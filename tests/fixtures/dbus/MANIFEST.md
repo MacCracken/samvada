@@ -77,11 +77,21 @@ evidence rather than belief.
    Both forms are legal; only one is what the reference client emits.
 2. **The server answers all three SASL lines in ONE 58-byte read.** A
    reader written one-read-per-line hangs against a real bus.
-3. **One read can carry TWO messages** — and can also END MID-MESSAGE.
-   `02-hello-reply-plus-nameacquired.bin` holds a complete `METHOD_RETURN`
-   followed by a `NameAcquired` SIGNAL that is *truncated* at the buffer
-   edge; its tail arrived in the next read. A framer must carry partial
-   tails. This is not an edge case: it is the very first exchange.
+3. **One read carries TWO COMPLETE messages.**
+   `02-hello-reply-plus-nameacquired.bin` is 282 bytes holding a complete
+   `METHOD_RETURN` (101 bytes) immediately followed by a complete
+   `NameAcquired` SIGNAL (181 bytes), with **zero residual**. A reader that
+   handles one message per read silently drops the signal. This is the very
+   first exchange, so it is not an edge case.
+
+   > **Corrected 2026-09-09.** This entry first claimed the second message
+   > was *truncated* and its tail arrived in a later read. That was wrong,
+   > and it was an artifact of finding 4 below: the decoder's
+   > buffer-relative alignment bug mis-read the second message's header and
+   > reported a nonsense required length. With the alignment fixed,
+   > `101 + 181 == 282` exactly. **Carrying a partial tail across reads is
+   > still required in general** — a stream socket may split anywhere — but
+   > this corpus does **not** demonstrate it, and no fixture here does.
 4. **Alignment is relative to the START OF EACH MESSAGE**, not to the
    buffer. The decoder got this wrong at first and mis-read the second
    message's header — a bug that is invisible until a multi-message buffer
