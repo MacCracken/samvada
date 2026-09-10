@@ -486,6 +486,12 @@ These are gaps in this audit, not clean results. They are the
 strongest argument for treating 1.0.0 as a first stable release
 rather than a hardened one.
 
+**They are tracked as the A lane** in
+[`docs/development/roadmap.md`](../development/roadmap.md) —
+A-1..A-6, each with exit criteria — rather than living only here.
+An outstanding item with no home is how M1 stayed open for five
+releases.
+
 1. **Resource exhaustion / DoS.** `alloc()` never frees. Nothing
    here established whether a long-running consumer pumping at 60 Hz
    grows without bound, whether a peer can force worst-case buffer

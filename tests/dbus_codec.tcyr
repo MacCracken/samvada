@@ -93,6 +93,7 @@ fn test_hello_is_byte_identical() {
 fn test_roundtrip_fields() {
     test_group("unmarshal: every Hello field reads back");
     t_build_hello();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
     var b = dbus_marshal_buf();
     var sig = alloc(8);
     var ptr = alloc(8);
@@ -135,6 +136,7 @@ fn test_field_order_is_not_assumed() {
     dbus_marshal_field_str(dbus_marshal_f_member(), 115, t, n);      # then 3
     dbus_marshal_end_fields();
     dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
     var b = dbus_marshal_buf();
     var sig = alloc(8);
     var ptr = alloc(8);
@@ -157,6 +159,7 @@ fn test_signature_field_is_one_byte_prefixed() {
     dbus_marshal_field_sig(dbus_marshal_f_signature(), t, n);
     dbus_marshal_end_fields();
     dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
     var b = dbus_marshal_buf();
     var sig = alloc(8);
     var ptr = alloc(8);
@@ -186,6 +189,7 @@ fn test_body_uu_roundtrip() {
     dbus_marshal_body_u32(226);
     dbus_marshal_body_u32(1);
     var total = dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
     var b = dbus_marshal_buf();
     assert_eq(dbus_unmarshal_body_len(b), 8, "body is 8 bytes");
     dbus_unmarshal_body_begin(b);
@@ -209,6 +213,7 @@ fn test_body_hb_roundtrip() {
     dbus_marshal_body_u32(0);          # fd INDEX, not an fd
     dbus_marshal_body_bool(0);         # inactive = false
     dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
     var b = dbus_marshal_buf();
     assert_eq(dbus_unmarshal_body_len(b), 8, "h + b = 8 bytes");
     var sig = alloc(8);
@@ -227,6 +232,7 @@ fn test_bool_is_strict() {
     dbus_marshal_end_fields();
     dbus_marshal_body_u32(2);          # not a legal boolean
     dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
     var b = dbus_marshal_buf();
     dbus_unmarshal_body_begin(b);
     assert_eq(dbus_unmarshal_next_bool(), dbus_unmarshal_malformed(),
@@ -237,6 +243,7 @@ fn test_bool_is_strict() {
     dbus_marshal_end_fields();
     dbus_marshal_body_bool(99);
     dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
     dbus_unmarshal_body_begin(dbus_marshal_buf());
     assert_eq(dbus_unmarshal_next_bool(), 1, "99 encodes as 1");
     return 0;
@@ -252,6 +259,7 @@ fn test_max_serial_reads_positive() {
     dbus_marshal_field_u32(dbus_marshal_f_replyser(), 4294967295);
     dbus_marshal_end_fields();
     dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
     var b = dbus_marshal_buf();
     assert_eq(dbus_unmarshal_serial(b), 4294967295, "serial reads back POSITIVE");
     assert(dbus_unmarshal_serial(b) > 0, "and is not negative");
@@ -271,6 +279,7 @@ fn test_malformed_field_array() {
     dbus_marshal_field_str(dbus_marshal_f_member(), 115, t, n);
     dbus_marshal_end_fields();
     dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
     var b = dbus_marshal_buf();
     # a zero signature length cannot advance the walk
     store8(b + 17, 0);
@@ -371,6 +380,94 @@ fn test_audit_framer_rejects_absurd_headers() {
     return 0;
 }
 
+# ---- A-5: THE MARSHALLER'S OVERFLOW GUARD ----
+# Every writer used to advance the cursor with no check against
+# dbus_marshal_cap(). A caller-supplied length reached _dbm_bytes
+# unvalidated: a NEGATIVE length walked the cursor backwards out of
+# the buffer's start, an OVERSIZED one wrote past its end, and
+# finish() then reported the oversized total — which the call path
+# would have handed to write_all, putting adjacent heap on the wire.
+# field_str and body_str are exported in dist/samvada.cyr, so the
+# length is not necessarily samvada's own.
+fn test_marshal_refuses_out_of_range_lengths() {
+    test_group("marshal: an out-of-range length poisons rather than overflowing");
+    var t = alloc(64);
+    var n = t_put(t, "/org/freedesktop/DBus");
+
+    # A clean message is not poisoned.
+    dbus_marshal_begin(dbus_marshal_type_call(), 0, 1);
+    dbus_marshal_field_str(dbus_marshal_f_path(), 111, t, n);
+    dbus_marshal_end_fields();
+    dbus_marshal_finish();
+    assert_eq(dbus_marshal_bad(), 0, "a well-formed message is not poisoned");
+
+    # Oversized: far beyond the 4096-byte buffer.
+    dbus_marshal_begin(dbus_marshal_type_call(), 0, 1);
+    dbus_marshal_field_str(dbus_marshal_f_path(), 111, t, 100000);
+    assert_eq(dbus_marshal_bad(), 1,
+      "THE PIN: a length past the buffer poisons the message");
+    var over = dbus_marshal_len();
+    var in_buf = 0;
+    if (over <= dbus_marshal_cap()) { in_buf = 1; }
+    assert_eq(in_buf, 1, "and the write cursor never left the buffer");
+
+    # Negative: would drive the cursor below the buffer's start.
+    dbus_marshal_begin(dbus_marshal_type_call(), 0, 1);
+    dbus_marshal_field_str(dbus_marshal_f_path(), 111, t, (0 - 4096));
+    assert_eq(dbus_marshal_bad(), 1, "a negative length poisons too");
+    var at = dbus_marshal_len();
+    var fwd = 0;
+    if (at >= 0) { fwd = 1; }
+    assert_eq(fwd, 1, "and the cursor never went below zero");
+
+    # A body string is guarded on the same path.
+    dbus_marshal_begin(dbus_marshal_type_call(), 0, 1);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_str(t, 100000);
+    assert_eq(dbus_marshal_bad(), 1, "body_str is guarded too");
+
+    # And begin() clears the poison for the next message.
+    dbus_marshal_begin(dbus_marshal_type_call(), 0, 1);
+    assert_eq(dbus_marshal_bad(), 0, "begin() starts a fresh, unpoisoned message");
+    return 0;
+}
+
+# ---- A-5: THE BOUNDS CHECK MUST FAIL CLOSED ----
+# The AUDIT-1..3 guards were all written `if (_dbu_limit > 0)` and
+# _dbu_limit defaults to 0 — so the decoder's DEFAULT state had NO
+# bounds, and a wire-supplied 0xFFFFFFF0 length was handed straight
+# back. That is AUDIT-1 again, re-openable by any path that forgets
+# to declare the extent.
+fn test_unmarshal_bounds_fail_closed() {
+    test_group("unmarshal: an undeclared extent refuses, it does not permit");
+    t_build_hello();
+    var b = dbus_marshal_buf();
+    var sig = alloc(8);
+    var ptr = alloc(8);
+
+    # With the extent declared, decoding works.
+    assert_eq(dbus_unmarshal_set_limit(dbus_marshal_len()), 0, "a real extent is accepted");
+    var off = dbus_unmarshal_find_field(b, dbus_marshal_f_path(), sig);
+    assert(off > 0, "PATH decodes when the extent is known");
+
+    # Undeclared: everything must refuse.
+    assert_eq(dbus_unmarshal_set_limit(0), -22, "an extent of 0 is rejected");
+    assert_eq(dbus_unmarshal_limit(), 0, "and leaves the decoder unset");
+    assert_eq(dbus_unmarshal_find_field(b, dbus_marshal_f_path(), sig),
+      dbus_unmarshal_malformed(),
+      "THE PIN: with no extent declared, find_field refuses");
+    assert_eq(dbus_unmarshal_str_at(b, 20, ptr), dbus_unmarshal_malformed(),
+      "str_at refuses — this is the AUDIT-1 hand-back path");
+    assert_eq(dbus_unmarshal_sig_at(b, 20, ptr), dbus_unmarshal_malformed(),
+      "sig_at refuses");
+    dbus_unmarshal_body_begin(b);
+    assert_eq(dbus_unmarshal_body_remaining(), 0, "the body cursor is empty, not unbounded");
+    assert_eq(dbus_unmarshal_next_u32(), dbus_unmarshal_malformed(), "and reads refuse");
+
+    assert_eq(dbus_unmarshal_set_limit((0 - 1)), -22, "a negative extent is rejected");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_audit_hostile_lengths_refused();
@@ -385,6 +482,8 @@ fn main() {
     test_bool_is_strict();
     test_max_serial_reads_positive();
     test_malformed_field_array();
+    test_marshal_refuses_out_of_range_lengths();
+    test_unmarshal_bounds_fail_closed();
     return assert_summary();
 }
 

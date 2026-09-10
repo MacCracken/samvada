@@ -28,7 +28,7 @@ jobs:
     needs: [ci]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           persist-credentials: false
 
@@ -50,6 +50,8 @@ jobs:
         env:
           CYRIUS_INSTALL_SHA: "6020f5ba5f2986ab5d83de277a589c072133678e"
           CYRIUS_INSTALL_SUM: "f33ee940c1387205f10f852c823b56983f5f44fda7ba3c2eff9af6917c3a8d51"
+          # sha256 of cyrius-<version>-x86_64-linux.tar.gz itself.
+          CYRIUS_TARBALL_SUM: "a85cca2c510cfe48590eed93273fe317521d62e07046bc568508e8a45c990325"
         run: |
           set -euo pipefail
           CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
@@ -57,8 +59,23 @@ jobs:
           curl -sSfL -o install.sh \
             "https://raw.githubusercontent.com/MacCracken/cyrius/${CYRIUS_INSTALL_SHA}/scripts/install.sh"
           echo "${CYRIUS_INSTALL_SUM}  install.sh" | sha256sum -c -
-          CYRIUS_VERSION="$CYRIUS_VERSION" sh install.sh
-          rm -f install.sh
+          # Pin the toolchain BYTES, not merely the installer script.
+          # install.sh's Ed25519 check needs a pre-existing trusted
+          # `cyrsign`; a clean runner has none, so _verify_signature()
+          # returns 2 and SKIPS before it even fetches the signature.
+          # Integrity then reduced to a .sha256 sidecar served from the
+          # same origin as the tarball — same host, same compromise.
+          # Fetching it ourselves against a sum pinned IN THIS REPO is
+          # what makes the toolchain reproducible from the repo alone.
+          # Bump deliberately alongside the cyrius.cyml version pin; a
+          # version bump without a sum bump fails loudly here, which is
+          # the point.
+          curl -sSfL -o cyrius.tar.gz \
+            "https://github.com/MacCracken/cyrius/releases/download/${CYRIUS_VERSION}/cyrius-${CYRIUS_VERSION}-x86_64-linux.tar.gz"
+          echo "${CYRIUS_TARBALL_SUM}  cyrius.tar.gz" | sha256sum -c -
+          CYRIUS_VERSION="$CYRIUS_VERSION" \
+            CYRIUS_INSTALL_TARBALL="$PWD/cyrius.tar.gz" sh install.sh
+          rm -f install.sh cyrius.tar.gz
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Resolve deps
@@ -108,7 +125,7 @@ jobs:
           cp deps/samvada_main.c "samvada-${TAG}-shim.c"
           sha256sum samvada-*.tar.gz samvada-*.cyr samvada-*-linux samvada-*-shim.c > SHA256SUMS
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: release-artifacts
           path: |
@@ -127,10 +144,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: release-artifacts
       - name: Changelog
@@ -140,7 +157,7 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           awk "/^## \\[${TAG}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md > /tmp/body.md
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           name: "samvada ${{ github.ref_name }}"
           body_path: /tmp/body.md

@@ -44,12 +44,40 @@ var _dbm_at    = 0;   # write cursor
 var _dbm_fend  = 0;   # where the header-fields array ended
 var _dbm_ready = 0;
 
+# ---- overflow guard ----
+# Every writer below advanced _dbm_at with NO check against
+# dbus_marshal_cap(). A caller-supplied length reached _dbm_bytes
+# unvalidated, so a negative length walked the cursor BACKWARDS out
+# of the buffer's start, and an oversized one wrote past its end —
+# after which dbus_marshal_finish() returned the oversized total and
+# dbus_session_call would have handed that straight to write_all,
+# putting adjacent heap on the wire.
+#
+# dbus_marshal_field_str and dbus_marshal_body_str are exported in
+# dist/samvada.cyr, so the length is not necessarily samvada's own.
+#
+# It POISONS rather than truncating, deliberately: a message that did
+# not fit must never go out as a shorter, still-parseable one.
+var _dbm_bad = 0;
+
+fn dbus_marshal_bad() { return _dbm_bad; }
+
+fn _dbm_room(n) {
+    if (_dbm_bad != 0) { return 0; }
+    if (n < 0)         { _dbm_bad = 1; return 0; }
+    if (_dbm_at < 0)   { _dbm_bad = 1; return 0; }
+    var end = _dbm_at + n;
+    if (end > dbus_marshal_cap()) { _dbm_bad = 1; return 0; }
+    return 1;
+}
+
 fn dbus_marshal_align(n, a) {
     return (n + a - 1) & (0 - a);
 }
 
 fn _dbm_pad_to(a) {
     var want = dbus_marshal_align(_dbm_at, a);
+    if (_dbm_room(want - _dbm_at) == 0) { return -22; }
     while (_dbm_at < want) {
         store8(_dbm_buf + _dbm_at, 0);
         _dbm_at = _dbm_at + 1;
@@ -58,6 +86,7 @@ fn _dbm_pad_to(a) {
 }
 
 fn _dbm_u8(v) {
+    if (_dbm_room(1) == 0) { return -22; }
     store8(_dbm_buf + _dbm_at, v & 0xFF);
     _dbm_at = _dbm_at + 1;
     return 0;
@@ -67,6 +96,7 @@ fn _dbm_u8(v) {
 # are little-endian, and emitting native order is what every dbus
 # implementation does.
 fn _dbm_u32(v) {
+    if (_dbm_room(4) == 0) { return -22; }
     store8(_dbm_buf + _dbm_at + 0, v & 0xFF);
     store8(_dbm_buf + _dbm_at + 1, (v >> 8) & 0xFF);
     store8(_dbm_buf + _dbm_at + 2, (v >> 16) & 0xFF);
@@ -76,6 +106,7 @@ fn _dbm_u32(v) {
 }
 
 fn _dbm_bytes(p, n) {
+    if (_dbm_room(n) == 0) { return -22; }
     var i = 0;
     while (i < n) {
         store8(_dbm_buf + _dbm_at + i, load8(p + i));
@@ -88,6 +119,7 @@ fn _dbm_bytes(p, n) {
 # Start a message. `flags` is 0 for a normal call — the captured
 # Hello uses 0x00, and replies use 0x01 (NO_REPLY_EXPECTED).
 fn dbus_marshal_begin(mtype, flags, serial) {
+    _dbm_bad = 0;                   # a new message starts unpoisoned
     if (_dbm_ready == 0) {
         _dbm_buf = alloc(dbus_marshal_cap());
         if (_dbm_buf == 0) { return -12; }

@@ -161,6 +161,7 @@ fn test_captured_error_reply_maps_to_eacces() {
     n = t_put(t, "Operation not permitted");
     dbus_marshal_body_str(t, n);
     dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
 
     var b = dbus_marshal_buf();
     assert_eq(dbus_unmarshal_type(b), dbus_marshal_type_error(), "it is an ERROR");
@@ -192,6 +193,7 @@ fn test_release_control_has_no_signature_field() {
     dbus_session_begin_call(t, pn, m, mn, 0, 5);
     dbus_marshal_end_fields();
     dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
     var b = dbus_marshal_buf();
     assert_eq(dbus_unmarshal_body_len(b), 0, "empty body");
     var sig = alloc(8);
@@ -286,6 +288,7 @@ fn test_reply_fd_survives_the_call_path() {
     dbus_marshal_end_fields();
     dbus_marshal_body_u32(0);
     dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
     var mlen = dbus_marshal_len();
     var wire = alloc(512);
     s_copy(wire, dbus_marshal_buf(), mlen);
@@ -351,6 +354,7 @@ fn test_forged_signal_cannot_impersonate_a_reply() {
     var tn = t_put(txt, "/org/freedesktop/PWNED/session/_99");
     dbus_marshal_body_str(txt, tn);
     dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
     at = at + s_copy(wire + at, dbus_marshal_buf(), dbus_marshal_len());
 
     # (2) the genuine reply, same serial, arriving second.
@@ -362,6 +366,7 @@ fn test_forged_signal_cannot_impersonate_a_reply() {
     tn = t_put(txt, "/org/freedesktop/login1/session/_32");
     dbus_marshal_body_str(txt, tn);
     dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
     at = at + s_copy(wire + at, dbus_marshal_buf(), dbus_marshal_len());
 
     assert_eq(sys_write(a, wire, at), at, "forged signal + real reply planted");
@@ -397,6 +402,7 @@ fn s_build_reply(rser, dest, destn, path, pathn) {
     dbus_marshal_end_fields();
     dbus_marshal_body_str(path, pathn);
     dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
     return dbus_marshal_len();
 }
 
@@ -475,6 +481,7 @@ fn test_absent_destination_is_permitted() {
     dbus_marshal_field_u32(dbus_marshal_f_replyser(), 13);
     dbus_marshal_end_fields();
     dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
     var mlen = dbus_marshal_len();
     var wire = alloc(256);
     s_copy(wire, dbus_marshal_buf(), mlen);
@@ -610,6 +617,18 @@ fn test_expired_deadline_refuses_to_block() {
     var rc = dbus_session_call(b, 77);
     assert_eq(rc, -110, "THE PIN: the deadline fired before committing to a blocking receive");
 
+    # A budget large enough to overflow `t0 + timeout` must be
+    # REFUSED, not accepted: the deadline is gated on `deadline > 0`,
+    # so a wrapped-negative sum silently DISARMS the guard. A bound
+    # that its own argument can switch off is not a bound.
+    assert_eq(dbus_session_set_timeout_ms(9223372036854775807), -22,
+      "THE PIN: an overflowing budget is refused, not silently disarming");
+    assert_eq(dbus_session_set_timeout_ms(dbus_session_timeout_max_ms() + 1), -22,
+      "one past the cap is refused");
+    assert_eq(dbus_session_set_timeout_ms(dbus_session_timeout_max_ms()), 0,
+      "the cap itself is accepted");
+    assert_eq(dbus_session_set_timeout_ms((0 - 1)), -22, "negative is refused");
+
     # And reset must restore the default, or a short budget leaks
     # into every later test in this file.
     dbus_session_reset();
@@ -618,6 +637,429 @@ fn test_expired_deadline_refuses_to_block() {
 
     sys_close(a);
     sys_close(b);
+    return 0;
+}
+
+fn s_ino(fd) {
+    var st = alloc(160);
+    var rc = sys_fstat(fd, st);
+    if (rc < 0) { return (0 - 1); }
+    return load64(st + 8);              # st_ino sits at +8 on x86_64
+}
+
+# Count open descriptors by fstat'ing each number. Stronger than a
+# lowest-free-fd probe, which the 0.8.0 work found could pass against
+# a version that was leaking two descriptors.
+fn s_count_open() {
+    var st = alloc(160);
+    var n = 0;
+    var i = 0;
+    while (i < 64) {
+        var rc = sys_fstat(i, st);
+        if (rc >= 0) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn s_pair() {
+    var p = alloc(8);
+    store64(p, 0);
+    sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, p);
+    return load64(p);
+}
+
+# ---- THE FD-OWNERSHIP PIN ----
+# There is ONE fd queue with TWO fill sites (the reply loop and
+# pump_signals) and ONE drain site (take_device), which pops FIFO.
+# logind's ResumeDevice SIGNAL carries a descriptor, and signals are
+# never surfaced (ADR-0004) — so that descriptor used to sit at the
+# head of the queue until the next take_device collected it BY
+# MISTAKE. A compositor asking for an input device would have been
+# handed the DRM descriptor from an earlier resume.
+#
+# Measured before the fix: signal fd inode 3201875, reply fd inode
+# 3201877, take_fd() returned 3201875.
+#
+# Same shape as AUDIT-4 — an index into a queue whose fill path was
+# never exercised.
+fn test_take_device_gets_its_own_descriptor() {
+    test_group("native: a signal's descriptor is not collected by the next call");
+    var before = s_count_open();
+
+    var bus = s_pair();
+    var a = bus & 0xFFFFFFFF;
+    var b = (bus >> 32) & 0xFFFFFFFF;
+    var px = s_pair();
+    var x = px & 0xFFFFFFFF;
+    var xp = (px >> 32) & 0xFFFFFFFF;
+    var py = s_pair();
+    var y = py & 0xFFFFFFFF;
+    var yp = (py >> 32) & 0xFFFFFFFF;
+
+    var inox = s_ino(x);
+    var inoy = s_ino(y);
+    var distinct = 0;
+    if (inox != inoy) { distinct = 1; }
+    assert_eq(distinct, 1, "the two descriptors are distinguishable by inode");
+
+    dbus_session_reset();
+    dbus_frame_init();
+
+    # (1) a ResumeDevice-shaped SIGNAL carrying descriptor X.
+    var sg = alloc(8);
+    store8(sg, 104);                    # 'h'
+    dbus_marshal_begin(dbus_marshal_type_signal(), 1, 9001);
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sg, 1);
+    dbus_marshal_field_u32(dbus_marshal_f_unixfds(), 1);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_u32(0);
+    dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
+    var slen = dbus_marshal_len();
+    var swire = alloc(512);
+    s_copy(swire, dbus_marshal_buf(), slen);
+    assert_eq(s_send_with_fd(a, swire, slen, x), slen, "signal + its fd planted");
+
+    # (2) the TakeDevice reply carrying descriptor Y.
+    dbus_marshal_begin(dbus_marshal_type_return(), 1, 4242);
+    dbus_marshal_field_u32(dbus_marshal_f_replyser(), 7);
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sg, 1);
+    dbus_marshal_field_u32(dbus_marshal_f_unixfds(), 1);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_u32(0);
+    dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
+    var rlen = dbus_marshal_len();
+    var rwire = alloc(512);
+    s_copy(rwire, dbus_marshal_buf(), rlen);
+    assert_eq(s_send_with_fd(a, rwire, rlen, y), rlen, "reply + its fd planted");
+
+    assert_eq(dbus_session_call(b, 7), 0, "the reply matched");
+    assert_eq(dbus_frame_fd_count(), 1,
+      "exactly one descriptor is queued — the signal's was closed, not left behind");
+
+    var got = dbus_frame_take_fd();
+    assert(got > 2, "a descriptor came back");
+    assert_eq(s_ino(got), inoy,
+      "THE PIN: it is the REPLY's descriptor, not the signal's");
+
+    sys_close(got);
+    sys_close(x);  sys_close(xp);
+    sys_close(y);  sys_close(yp);
+    sys_close(a);  sys_close(b);
+    dbus_session_reset();
+
+    assert_eq(s_count_open(), before,
+      "and the signal's descriptor was closed, not leaked");
+    return 0;
+}
+
+# The same hazard by the OTHER route, and the more realistic one: a
+# compositor pumps its event loop, logind's ResumeDevice arrives with
+# a descriptor, and only later does the consumer take a device.
+# pump_signals fills the shared queue and never drains it.
+fn test_pumped_signal_descriptor_is_not_left_for_take_device() {
+    test_group("native: pump_signals does not leave a descriptor for the next take");
+    var before = s_count_open();
+
+    var bus = s_pair();
+    var a = bus & 0xFFFFFFFF;
+    var b = (bus >> 32) & 0xFFFFFFFF;
+    var px = s_pair();
+    var x = px & 0xFFFFFFFF;
+    var xp = (px >> 32) & 0xFFFFFFFF;
+    var py = s_pair();
+    var y = py & 0xFFFFFFFF;
+    var yp = (py >> 32) & 0xFFFFFFFF;
+    var inoy = s_ino(y);
+
+    dbus_session_reset();
+    dbus_frame_init();
+
+    var sg = alloc(8);
+    store8(sg, 104);                    # 'h'
+    dbus_marshal_begin(dbus_marshal_type_signal(), 1, 9001);
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sg, 1);
+    dbus_marshal_field_u32(dbus_marshal_f_unixfds(), 1);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_u32(0);
+    dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
+    var slen = dbus_marshal_len();
+    var swire = alloc(512);
+    s_copy(swire, dbus_marshal_buf(), slen);
+    assert_eq(s_send_with_fd(a, swire, slen, x), slen, "ResumeDevice-shaped signal planted");
+
+    # The consumer pumps its event loop first.
+    assert_eq(dbus_native_pump_signals(b), 1, "pump drained exactly one message");
+    assert_eq(dbus_frame_fd_count(), 0,
+      "THE PIN: pump left NO descriptor behind for a later take_device");
+
+    # Only now does it take a device.
+    dbus_marshal_begin(dbus_marshal_type_return(), 1, 4242);
+    dbus_marshal_field_u32(dbus_marshal_f_replyser(), 7);
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sg, 1);
+    dbus_marshal_field_u32(dbus_marshal_f_unixfds(), 1);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_u32(0);
+    dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
+    var rlen = dbus_marshal_len();
+    var rwire = alloc(512);
+    s_copy(rwire, dbus_marshal_buf(), rlen);
+    assert_eq(s_send_with_fd(a, rwire, rlen, y), rlen, "reply + its fd planted");
+
+    assert_eq(dbus_session_call(b, 7), 0, "the reply matched");
+    var got = dbus_frame_take_fd();
+    assert_eq(s_ino(got), inoy, "and take got the REPLY's descriptor");
+
+    sys_close(got);
+    sys_close(x);  sys_close(xp);
+    sys_close(y);  sys_close(yp);
+    sys_close(a);  sys_close(b);
+    dbus_session_reset();
+    assert_eq(s_count_open(), before, "no descriptor leaked");
+    return 0;
+}
+
+# ---- THE DEVNUM PIN ----
+# The C shim gates both device calls on devnum_ok(v) == (v >= 0 &&
+# v <= UINT32_MAX) BEFORE the 64->32 narrowing — audit MED-2, 0.5.1,
+# added because the cast truncated silently. CLAUDE.md says a
+# PURE_CYRIUS backend must RE-SUPPLY that check; at the N6 cutover
+# it did not, checking only `v < 0`.
+#
+# _dbm_u32 writes the low four bytes and nothing else, so a major of
+# 2^32 + 1 marshalled as major 1: samvada would have opened a
+# DIFFERENT DEVICE than asked for, silently, and returned success.
+# The differential harness compares error codes for in-range values
+# only, which is why it never noticed.
+fn test_out_of_range_devnum_is_refused_not_truncated() {
+    test_group("native: an out-of-range device number is refused, not silently truncated");
+    var fo = alloc(8);
+    var ao = alloc(8);
+
+    # The predicate itself, exercised directly. Everything past the
+    # guard does real I/O, so the bound is tested here rather than
+    # through a call that would block on a 25 s deadline.
+    assert_eq(dbus_session_devnum_ok(0), 1, "0 is a valid device number");
+    assert_eq(dbus_session_devnum_ok(226), 1, "226 (DRM major) is valid");
+    assert_eq(dbus_session_devnum_ok(4294967295), 1,
+      "UINT32_MAX is valid — matches the shim's `v <= UINT32_MAX`");
+    assert_eq(dbus_session_devnum_ok(4294967296), 0,
+      "THE PIN: 2^32 is refused, not truncated to 0");
+    assert_eq(dbus_session_devnum_ok(4294967522), 0,
+      "2^32+226 refused, not truncated to 226 — the silent-wrong-device case");
+    assert_eq(dbus_session_devnum_ok((0 - 1)), 0, "negative refused");
+
+    # And the guard is actually WIRED into both device calls. These
+    # return before any I/O, so they are safe with a null bus.
+    assert_eq(dbus_native_take_device(0, 0, 4294967296, 0, fo, ao), -22,
+      "take_device rejects an out-of-range major");
+    assert_eq(dbus_native_take_device(0, 0, 0, 4294967296, fo, ao), -22,
+      "take_device rejects an out-of-range minor");
+    assert_eq(dbus_native_release_device(0, 0, 4294967296, 0), -22,
+      "release_device rejects an out-of-range major");
+    assert_eq(dbus_native_release_device(0, 0, 0, 4294967296), -22,
+      "release_device rejects an out-of-range minor");
+    assert_eq(dbus_native_take_device(0, 0, (0 - 1), 0, fo, ao), -22,
+      "and the negative bound the native path always had");
+
+    # A null session is refused rather than dereferenced, on ALL FOUR
+    # fns that take one. These ship in dist/samvada.cyr, so a caller
+    # we do not control reaches them; strlen(0) is a segfault, not an
+    # error code. The public path survives only because samvada_init
+    # allocates a zeroed buffer — luck, not design, which is AUDIT-1's
+    # exact shape.
+    #
+    # The guard was first applied to the two device fns only, and
+    # dbus_native_take_control(0, 0) went on exiting 139. All four are
+    # asserted here so it cannot be half-applied a second time.
+    assert_eq(dbus_session_sess_ok(0), 0, "the predicate rejects null");
+    assert_eq(dbus_session_sess_ok(1), 1, "and accepts a pointer");
+    assert_eq(dbus_native_take_device(0, 0, 226, 0, fo, ao), -22,
+      "take_device refuses a null session");
+    assert_eq(dbus_native_release_device(0, 0, 226, 0), -22,
+      "release_device refuses a null session");
+    assert_eq(dbus_native_take_control(0, 0), -22,
+      "THE PIN: take_control refuses it too — this one used to SIGSEGV");
+    assert_eq(dbus_native_release_control(0, 0), -22,
+      "release_control refuses it too");
+    return 0;
+}
+
+# ---- THE ALLOCATION PIN ----
+# alloc() is a bump allocator that NEVER frees, and the consumer is a
+# compositor that pumps at 60 Hz for days. Every alloc() on a
+# repeating path is therefore a permanent leak, and no test process
+# lives long enough to notice.
+#
+# Measured before the fix, on the IDLE path where nothing is read:
+# 8 bytes per pump = ~41 MB/day at 60 Hz, unbounded.
+fn test_repeating_paths_do_not_grow_the_heap() {
+    test_group("native: the 60 Hz pump path allocates nothing per call");
+    var p = alloc(8);
+    store64(p, 0);
+    assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, p), 0,
+      "socketpair created");
+    var a = load64(p) & 0xFFFFFFFF;
+    var b = (load64(p) >> 32) & 0xFFFFFFFF;
+
+    dbus_session_reset();
+    dbus_frame_init();
+
+    # Warm up, so one-time lazy allocations are not counted as growth.
+    dbus_native_pump_signals(b);
+    dbus_native_pump_signals(b);
+
+    var before = alloc_used();
+    var i = 0;
+    while (i < 20000) { dbus_native_pump_signals(b); i = i + 1; }
+    var grew = alloc_used() - before;
+    assert_eq(grew, 0,
+      "THE PIN: 20000 idle pumps allocate ZERO bytes (was 8 each = ~41 MB/day at 60 Hz)");
+
+    # The reply path too — and it must actually PARSE messages, or
+    # the per-message allocation is never reached. A call that only
+    # times out exercises nothing: that mistake is what let the
+    # per-message alloc survive the first version of this test.
+    assert_eq(dbus_socket_set_recv_timeout(b, 0, 20000), 0, "short recv timeout");
+    var sgz = alloc(8);
+    store8(sgz, 111);                   # 'o'
+    var txt = alloc(64);
+    var tn = t_put(txt, "/org/freedesktop/login1/session/_32");
+    dbus_marshal_begin(dbus_marshal_type_return(), 1, 5000);
+    dbus_marshal_field_u32(dbus_marshal_f_replyser(), 999);   # never matches
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sgz, 1);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_str(txt, tn);
+    dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
+    var one = dbus_marshal_len();
+    var wire = alloc(2048);
+    var w = 0;
+    var c = 0;
+    while (c < 8) { w = w + s_copy(wire + w, dbus_marshal_buf(), one); c = c + 1; }
+
+    # Warm the path once so lazy one-time state is already allocated.
+    sys_write(a, wire, w);
+    dbus_session_call(b, 4242);
+
+    var before2 = alloc_used();
+    var j = 0;
+    var parsed = 0;
+    while (j < 10) {
+        sys_write(a, wire, w);
+        dbus_session_call(b, 4242);     # 8 messages examined and discarded
+        parsed = parsed + 8;
+        j = j + 1;
+    }
+    assert_eq(parsed, 80, "80 messages were actually examined, not zero");
+    assert_eq(alloc_used() - before2, 0,
+      "THE PIN: examining 80 messages allocates nothing (was 8 bytes EACH)");
+
+    sys_close(a);
+    sys_close(b);
+    dbus_session_reset();
+    return 0;
+}
+
+# ---- A-4: THE SASL READER UNDER HOSTILE INPUT ----
+# dbus_auth is a line-oriented reader over the framer's SHARED 8192
+# buffer, fed by a 48-byte pipelined blob. It runs BEFORE any dbus
+# framing exists, against a peer that has not authenticated — so it
+# is the first thing a hostile or broken server touches.
+fn s_plant(p, n) {
+    s_copy(dbus_frame_tail(), p, n);
+    dbus_frame_commit(n);
+    return n;
+}
+
+fn test_sasl_reader_survives_hostile_input() {
+    test_group("native: the SASL reader survives hostile server output");
+    var buf = alloc(9000);
+
+    # (1) A line with no terminator, ever. Must ask for more rather
+    # than scanning off the end.
+    dbus_frame_init();
+    dbus_auth_reset();
+    var n = t_put(buf, "OK 1234");
+    s_plant(buf, n);
+    assert_eq(dbus_auth_drain_lines(), dbus_auth_need_more(),
+      "an unterminated line asks for more, it does not guess");
+
+    # (2) A line that FILLS the buffer with no terminator. The framer
+    # has 8192 bytes; find_crlf must stay inside them.
+    dbus_frame_init();
+    dbus_auth_reset();
+    var i = 0;
+    while (i < 8000) { store8(buf + i, 65); i = i + 1; }   # 'A' x8000
+    s_plant(buf, 8000);
+    assert_eq(dbus_auth_drain_lines(), dbus_auth_need_more(),
+      "8000 bytes with no CRLF stays in-bounds and asks for more");
+    assert_eq(dbus_frame_space(), dbus_frame_cap() - 8000,
+      "and consumed nothing, so the caller can see the buffer is nearly full");
+
+    # (3) Binary garbage including NULs and high bytes.
+    dbus_frame_init();
+    dbus_auth_reset();
+    i = 0;
+    while (i < 64) { store8(buf + i, i * 3); i = i + 1; }
+    store8(buf + 64, 13); store8(buf + 65, 10);            # CRLF
+    s_plant(buf, 66);
+    var g = dbus_auth_drain_lines();
+    var garbage_ok = 0;
+    if (g == dbus_auth_error()) { garbage_ok = 1; }
+    if (g == dbus_auth_need_more()) { garbage_ok = 1; }
+    assert_eq(garbage_ok, 1, "binary garbage is an error or ignored, never OK");
+
+    # (4) An explicit REJECTED must not read as success.
+    dbus_frame_init();
+    dbus_auth_reset();
+    n = t_put(buf, "REJECTED EXTERNAL\r\n");
+    s_plant(buf, n);
+    assert_eq(dbus_auth_drain_lines(), dbus_auth_rejected(), "REJECTED is reported as such");
+
+    # (5) An ERROR line likewise.
+    dbus_frame_init();
+    dbus_auth_reset();
+    n = t_put(buf, "ERROR not welcome\r\n");
+    s_plant(buf, n);
+    assert(dbus_auth_drain_lines() != dbus_auth_ok(), "ERROR is never OK");
+
+    # (6) A line split across two reads must reassemble, not be lost.
+    dbus_frame_init();
+    dbus_auth_reset();
+    n = t_put(buf, "OK 0123456789abcdef");
+    s_plant(buf, n);
+    assert_eq(dbus_auth_drain_lines(), dbus_auth_need_more(), "first half: incomplete");
+    n = t_put(buf, "\r\nAGREE_UNIX_FD\r\n");
+    s_plant(buf, n);
+    assert_eq(dbus_auth_drain_lines(), dbus_auth_ok(),
+      "the split line reassembles and completes with fd support");
+
+    # (7) A server that OKs but refuses fd passing must be refused —
+    # samvada cannot do TakeDevice without SCM_RIGHTS.
+    dbus_frame_init();
+    dbus_auth_reset();
+    n = t_put(buf, "OK 0123456789abcdef\r\nERROR\r\n");
+    s_plant(buf, n);
+    # It reports plain `error`, not the more specific `no_fds` — see
+    # the note there; what matters is that it is NEVER ok.
+    assert(dbus_auth_drain_lines() != dbus_auth_ok(),
+      "OK without AGREE_UNIX_FD is refused, not treated as usable");
+
+    # (8) THE property the whole handshake rests on: the reader can
+    # only report success by actually seeing AGREE_UNIX_FD. samvada
+    # cannot do TakeDevice without SCM_RIGHTS, so an `ok` that did not
+    # observe fd negotiation would be a silent downgrade.
+    dbus_frame_init();
+    dbus_auth_reset();
+    n = t_put(buf, "OK 0123456789abcdef\r\nDATA\r\nWHATEVER\r\n");
+    s_plant(buf, n);
+    assert_eq(dbus_auth_drain_lines(), dbus_auth_need_more(),
+      "THE PIN: OK plus unknown lines is never ok — only AGREE_UNIX_FD ends it");
     return 0;
 }
 
@@ -636,6 +1078,11 @@ fn main() {
     test_preplanted_reply_cannot_answer_a_later_call();
     test_silent_peer_times_out_instead_of_hanging();
     test_expired_deadline_refuses_to_block();
+    test_take_device_gets_its_own_descriptor();
+    test_pumped_signal_descriptor_is_not_left_for_take_device();
+    test_out_of_range_devnum_is_refused_not_truncated();
+    test_repeating_paths_do_not_grow_the_heap();
+    test_sasl_reader_survives_hostile_input();
     return assert_summary();
 }
 

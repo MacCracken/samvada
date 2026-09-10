@@ -177,6 +177,49 @@ trusts vs. validates:
 
 ## Known Limitations
 
+### Added by the 1.0.1 A-lane audit
+
+These are stated rather than fixed, and each says what the real
+defence is so a deployment can judge whether it holds.
+
+- **`release_device`'s control accounting is a bare counter.** It
+  tracks *how many* devices are held, not *which*. Reaching zero
+  issues `ReleaseControl`, and per [ADR-0004](docs/adr/0004-session-control-lifecycle-and-signal-visibility.md)
+  logind then revokes every device the consumer still holds —
+  including descriptors it is actively drawing to. samvada decrements
+  only when the call **succeeds**, and logind answers
+  `DEVICE_NOT_TAKEN` for a device it never handed out, so the counter
+  cannot be driven to zero by releasing devices you do not hold. That
+  defence is **logind's, not samvada's**, and samvada does not verify
+  it. Releasing a device you did not take is undefined.
+- **The consumer fetch path is authenticated only by the lock.** A
+  `[deps.samvada]` consumer fetches `dist/samvada.cyr` from a git
+  clone of the release **tag**; it never touches the release
+  artifacts or `SHA256SUMS`. samvada's tags are lightweight and
+  unsigned. With a `cyrius.lock` present, a repointed tag is refused
+  (commit-pin mismatch — verified); on a **first** resolve, or when a
+  consumer bumps the pinned version, there is nothing to check
+  against and substituted bytes are accepted silently. Consumers
+  should commit `cyrius.lock` and review the commit a version bump
+  moves to.
+- **`dist/samvada.cyr` exports 198 functions; the documented public
+  surface is eight.** `@public` and `@internal` are comments with no
+  mechanical meaning — Cyrius has no visibility mechanism — so every
+  internal is consumer-reachable. This is the premise AUDIT-1 already
+  rested on. Only the documented eight are stable; anything else may
+  change in any release. Notably `dbus_session_set_timeout_ms` is
+  reachable and can set every subsequent call's budget to zero.
+- **The unmarshaller is little-endian only** while the framer is
+  endian-aware. A big-endian peer's reply is framed, then every field
+  read returns malformed and the call times out at `-ETIMEDOUT`. It
+  fails **safe** — no out-of-bounds read — but samvada cannot
+  interoperate with a BE peer. Both target arches are little-endian.
+- **Two invariants are enforced by review, not mechanically**: "no
+  FFI types in public signatures" and "the exported symbol set is
+  unchanged". A demonstrated manifest gate catches both but is not
+  yet wired into CI. Review is what AUDIT-4 survived.
+
+
 Named here because a security document that only lists what is
 defended is misleading about what is wired.
 

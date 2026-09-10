@@ -32,9 +32,12 @@ the call never got that far. `src/dbus_session.cyr` plus 71 asserts
 `SCM_RIGHTS` reply path and the reply matcher's type gate; +13 more
 for the provenance hardening — `DESTINATION` must be us, absent
 destination stays permitted, and a pre-planted reply cannot answer a
-later call; +9 for the wall-clock timeouts — a silent peer must time
-out rather than hang, and an expired deadline must return before
-blocking). **517 asserts across the suite.**
+later call; +9 for the wall-clock timeouts). **1.0.1 adds 68 more for
+the A-lane repairs — fd ownership on both routes, the devnum upper
+bound, null session paths on all four fns, zero-allocation pump and
+reply paths, a poisoning marshaller, fail-closed unmarshal bounds, a
+non-disarming deadline, and hostile SASL input. 585 asserts across
+the suite.**
 Every native fn is written to the C shim's ABI including the
 vestigial `bus` argument and out-pointer pairs; the tests call each
 one directly at its declared arity so a wrong arity fails the BUILD

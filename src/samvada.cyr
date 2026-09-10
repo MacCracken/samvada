@@ -50,7 +50,7 @@ var _SAMVADA_OUTS_BUFLEN = 16;
 # Bumps lock-step with VERSION; consumers can do
 # `if (samvada_version() < ((1<<16)|(0<<8)|0)) { ... }` for gates.
 fn samvada_version() {
-    return (1 << 16) | (0 << 8) | 0;
+    return (1 << 16) | (0 << 8) | 1;
 }
 
 # ---- private helpers ----

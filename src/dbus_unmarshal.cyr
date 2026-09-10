@@ -48,7 +48,18 @@ var _dbu_limit = 0;      # total on-wire length of the current message
 
 # Declare the message's true extent. Every caller that has a framed
 # message knows it: dbus_frame_next() returns exactly this number.
+# FAIL-CLOSED. The 1.0.0 guards were all written `if (_dbu_limit > 0)`
+# and _dbu_limit defaults to 0 — so the decoder's DEFAULT state had NO
+# bounds at all, and a wire-supplied 0xFFFFFFF0 length was handed back
+# to the caller verbatim. That is AUDIT-1 again, re-openable by any
+# path that forgets to set a limit, and this module is exported in the
+# consumer bundle where callers we do not control reach it.
+#
+# An unset or nonsensical limit now means EVERYTHING is malformed,
+# rather than everything being permitted. A bounds check whose default
+# is "no bounds" is not a bounds check.
 fn dbus_unmarshal_set_limit(total) {
+    if (total <= 0) { _dbu_limit = 0; return -22; }
     _dbu_limit = total;
     return 0;
 }
@@ -87,9 +98,8 @@ fn dbus_unmarshal_find_field(p, code, sig_out) {
     var flen = dbus_unmarshal_fields_len(p);
     var end = 16 + flen;
     # Refuse a field array that claims to extend past the message.
-    if (_dbu_limit > 0) {
-        if (end > _dbu_limit) { return dbus_unmarshal_malformed(); }
-    }
+    if (_dbu_limit <= 0) { return dbus_unmarshal_malformed(); }
+    if (end > _dbu_limit) { return dbus_unmarshal_malformed(); }
     var at = 16;
     while (at < end) {
         at = dbus_unmarshal_align(at, 8);
@@ -140,15 +150,12 @@ fn dbus_unmarshal_find_field(p, code, sig_out) {
 # stay valid until dbus_frame_advance moves past this message.
 fn dbus_unmarshal_str_at(p, off, ptr_out) {
     if (off < 0) { return dbus_unmarshal_malformed(); }
-    if (_dbu_limit > 0) {
-        if (off + 4 > _dbu_limit) { return dbus_unmarshal_malformed(); }
-    }
+    if (_dbu_limit <= 0) { return dbus_unmarshal_malformed(); }
+    if (off + 4 > _dbu_limit) { return dbus_unmarshal_malformed(); }
     var n = dbus_unmarshal_u32(p, off);
     # The length must fit inside the message. Returning it unchecked
     # invites the caller to copy gigabytes out of bounds.
-    if (_dbu_limit > 0) {
-        if (off + 4 + n + 1 > _dbu_limit) { return dbus_unmarshal_malformed(); }
-    }
+    if (off + 4 + n + 1 > _dbu_limit) { return dbus_unmarshal_malformed(); }
     if (ptr_out != 0) { store64(ptr_out, p + off + 4); }
     return n;
 }
@@ -157,13 +164,10 @@ fn dbus_unmarshal_str_at(p, off, ptr_out) {
 # it like `s` reads the signature text as a length.
 fn dbus_unmarshal_sig_at(p, off, ptr_out) {
     if (off < 0) { return dbus_unmarshal_malformed(); }
-    if (_dbu_limit > 0) {
-        if (off + 1 > _dbu_limit) { return dbus_unmarshal_malformed(); }
-    }
+    if (_dbu_limit <= 0) { return dbus_unmarshal_malformed(); }
+    if (off + 1 > _dbu_limit) { return dbus_unmarshal_malformed(); }
     var n = load8(p + off);
-    if (_dbu_limit > 0) {
-        if (off + 1 + n + 1 > _dbu_limit) { return dbus_unmarshal_malformed(); }
-    }
+    if (off + 1 + n + 1 > _dbu_limit) { return dbus_unmarshal_malformed(); }
     if (ptr_out != 0) { store64(ptr_out, p + off + 1); }
     return n;
 }
@@ -182,10 +186,11 @@ fn dbus_unmarshal_body_begin(p) {
     # Clamp to the message's real extent. A header claiming a body
     # far larger than the bytes present would otherwise let the
     # cursor read past the end, one aligned value at a time.
-    if (_dbu_limit > 0) {
-        if (_dbu_end > _dbu_limit) { _dbu_end = _dbu_limit; }
-        if (_dbu_at > _dbu_limit)  { _dbu_at = _dbu_limit; }
-    }
+    # An unset limit yields an EMPTY cursor rather than an unbounded
+    # one: remaining() is 0 and every next_*() refuses.
+    if (_dbu_limit <= 0) { _dbu_at = 0; _dbu_end = 0; return 0; }
+    if (_dbu_end > _dbu_limit) { _dbu_end = _dbu_limit; }
+    if (_dbu_at > _dbu_limit)  { _dbu_at = _dbu_limit; }
     return 0;
 }
 

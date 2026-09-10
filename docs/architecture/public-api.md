@@ -101,6 +101,29 @@ safety is a v1.0+ design conversation, not a v0.x property.
 | [`samvada_pump_signals`](#samvada_pump_signals) | (none) | `events \| -err` | -22 / -38 / -107 / sd-bus negatives |
 | [`samvada_release`](#samvada_release) | (none) | `0` | (none — idempotent) |
 | [`samvada_main`](#samvada_main) | `table` | `0 \| -err` | (delegates to `samvada_init`) |
+| `samvada_native_init` | (none) | `0 \| -err` | -12 / -22 / (delegates to `samvada_init`) |
+
+**`samvada_native_init()`** is the entry point for the **native
+backend, which is 1.0's default** — it builds an FFI table populated
+with the pure-Cyrius dbus implementation (`kind = PURE_CYRIUS`) and
+hands it to `samvada_init`. It takes no arguments precisely because
+CLAUDE.md forbids exposing an FFI table in a public signature, so a
+native consumer never sees one. A consumer wanting zero libsystemd
+calls this and **not** `samvada_init` / `samvada_main`, which are the
+C-shim entry points. The table is allocated once and reused across
+init/release cycles.
+
+> **What the bundle actually exports.** `dist/samvada.cyr` exports
+> **198 functions**; the eight above are the ones this document
+> defines and the only ones that are stable. `@public` and
+> `@internal` are comments — Cyrius has no visibility mechanism — so
+> every internal is reachable by a consumer, including
+> `dbus_session_set_timeout_ms`, `dbus_frame_close_fds` and the whole
+> `dbus_unmarshal_*` surface. Anything not listed above may change in
+> any release without notice. This is stated because the alternative
+> is implying a boundary that is not enforced; it is also the premise
+> AUDIT-1 rests on.
+
 
 All seven live in `src/samvada.cyr`.
 

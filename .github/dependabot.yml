@@ -1,0 +1,19 @@
+# Actions are pinned by COMMIT SHA, not by tag — a mutable tag in the
+# release job (which is the only job holding `contents: write`) means a
+# repointed upstream tag executes attacker code with a token that can
+# rewrite this repo, its tags and its releases. That is the
+# tj-actions/changed-files pattern, and the 0.5.1 hardening removed it
+# from the toolchain installer but not from the actions.
+#
+# SHAs do not age on their own, so dependabot is what keeps them from
+# rotting into permanently-stale pins. It proposes the bump; a human
+# reviews the diff between the old and new SHA.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"

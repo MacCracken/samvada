@@ -4,6 +4,170 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-09-09
+
+**The A lane, closed.** 1.0.0 shipped with four of seven audit
+dimensions covered and the rest tracked as the A lane. This release
+works through them and fixes **ten** defects — two of which meant
+samvada handed the consumer the *wrong descriptor* or the *wrong
+device*, silently, and returned success.
+
+### Fixed
+- **A-3 [HIGH] — `take_device` could return someone else's file
+  descriptor.** There is one fd queue with two fill sites
+  (`dbus_session_call` and `pump_signals`) and one drain site
+  (`take_device`), which pops FIFO. logind's `ResumeDevice` **signal
+  carries a descriptor**, and signals are never surfaced (ADR-0004),
+  so that fd sat at the head of the queue until the next
+  `take_device` collected it *by mistake*. Measured:
+
+  ```
+  signal fd X inode = 3201875
+  reply  fd Y inode = 3201877
+  take_fd() inode   = 3201875   <-- the SIGNAL's fd
+  ```
+
+  In the flow mabda actually has — take DRM device A, VT-switch away
+  and back, pump, then take input device B — the compositor is handed
+  A's DRM descriptor instead of B's evdev one. Fixed using what the
+  wire format already specifies: a message declares its own
+  descriptor count in `UNIX_FDS`, and `SCM_RIGHTS` fds arrive in
+  stream order, so discarding a message discards exactly that many
+  from the head. Same class as AUDIT-4.
+- **A-5 [HIGH] — an out-of-range device number was silently
+  truncated.** The C shim gates both device calls on
+  `devnum_ok(v) == (v >= 0 && v <= UINT32_MAX)` *before* the 64→32
+  narrowing (0.5.1, audit MED-2). CLAUDE.md says a `PURE_CYRIUS`
+  backend must re-supply that check; at the N6 cutover it did not,
+  checking only `v < 0`. `_dbm_u32` writes the low four bytes, so a
+  major of `2^32 + 226` went on the wire as **226** — a different,
+  valid device — and returned success where the shim returns
+  `-EINVAL` without touching the bus. The differential harness
+  compares error codes for in-range values only, which is why it
+  never noticed.
+- **A-6 [MEDIUM] — a null session path segfaulted.** All four native
+  fns that take one (`take_device`, `release_device`, `take_control`,
+  `release_control`) reached `strlen(sess)` on a null pointer.
+  Measured `exit=139`. The public path survives only because
+  `samvada_init` happens to allocate `_samvada_sess` as a zeroed
+  buffer — luck, not design, and these ship in `dist/samvada.cyr`
+  where callers we do not control reach them. **Fixed in two passes,
+  honestly recorded**: the first covered only the two device fns and
+  `take_control(0, 0)` went on crashing. All four now share one
+  predicate so it cannot be half-applied again.
+- **A-1 [MEDIUM] — the 60 Hz pump leaked memory forever.** `alloc()`
+  is a bump allocator that never frees, and the consumer is a
+  compositor that pumps for days. Measured on the **idle** path,
+  where nothing is even read:
+
+  | | before | after |
+  |---|---|---|
+  | per idle pump | 8 bytes | **0** |
+  | per day at 60 Hz | ~41 MB | **0** |
+
+  Also removed a per-*message* allocation in the reply loop and the
+  fresh 88-byte FFI table `samvada_native_init` allocated on every
+  call — `public-api.md` documents init-after-release as the
+  supported recovery path, so that was a permanent leak on a path
+  consumers are told to use (measured 744 B/cycle).
+
+- **A-5 [HIGH] — the marshaller had no bounds at all.** Every writer
+  advanced the cursor without checking `dbus_marshal_cap()`, and a
+  caller-supplied length reached `_dbm_bytes` unvalidated. A
+  **negative** length walked the cursor backwards out of the buffer's
+  start; an **oversized** one wrote past its end, after which
+  `finish()` reported the oversized total and `dbus_session_call`
+  would have handed that to `write_all` — putting adjacent heap on
+  the wire. `field_str` and `body_str` are exported in
+  `dist/samvada.cyr`, so the length is not necessarily samvada's own.
+  The marshaller now **poisons** rather than truncating (a message
+  that did not fit must never go out as a shorter, still-parseable
+  one) and the call path refuses to transmit a poisoned buffer.
+- **A-5 [MEDIUM] — the AUDIT-1..3 bounds check was fail-OPEN.** Every
+  guard added in 1.0.0 was written `if (_dbu_limit > 0)`, `_dbu_limit`
+  defaults to 0, and `set_limit` accepted 0 or negative without
+  complaint — so the decoder's **default state had no bounds at
+  all**, and a wire-supplied `0xFFFFFFF0` string length was handed
+  straight back to the caller. That is AUDIT-1 verbatim, re-openable
+  by any path that forgot to declare the extent. Now fail-closed: an
+  undeclared extent means everything is malformed, and `set_limit`
+  rejects a nonsensical one. *A bounds check whose default is "no
+  bounds" is not a bounds check.*
+- **A-5 [LOW] — a large timeout silently disarmed the deadline.**
+  The per-call deadline is armed as `t0 + timeout` and gated on
+  `deadline > 0`, so a large enough budget wrapped the sum negative
+  and switched the guard **off** rather than firing it. Capped at 24
+  hours. *A bound its own argument can turn off is not a bound.*
+
+### Security
+- **A-2 [HIGH] — the toolchain that builds and releases samvada was
+  never signature-verified on CI.** The installer *script* was pinned
+  to a commit and checksummed (0.5.1, audit MED-9), but the
+  **toolchain tarball it downloads was not** — and the comment
+  conflated the two. `install.sh`'s Ed25519 check needs a
+  pre-existing trusted `cyrsign`; a clean runner has none, so
+  `_verify_signature()` returns 2 and **skips before it even fetches
+  the signature**. Integrity reduced to a `.sha256` sidecar served
+  from the same origin as the tarball — same host, same compromise.
+  Both workflows now fetch the tarball and verify it against
+  `CYRIUS_TARBALL_SUM`, pinned in this repo, before handing it to the
+  installer's offline hook. A version bump without a sum bump now
+  fails loudly, which is the point.
+- **A-2 [HIGH] — every GitHub Action was pinned by mutable tag**,
+  including third-party `softprops/action-gh-release@v2` running in
+  the **only job holding `contents: write`**. A repointed upstream
+  tag would execute attacker code with a token that can rewrite the
+  repo, its tags and its releases — the `tj-actions/changed-files`
+  pattern. All nine `uses:` refs are now pinned by 40-char commit
+  SHA, with `.github/dependabot.yml` added so they age deliberately
+  instead of rotting.
+
+### Changed
+- `dbus_auth`'s `drain_lines` doc comment claimed `no_fds` was among
+  its returns. It is not — `dbus_auth_no_fds()` is defined and never
+  produced by any path, because a server refusing fd passing answers
+  `ERROR`. The constant is retained (its numbering is pinned by
+  tests) but is dead, and the comment no longer claims otherwise. The
+  property that matters is now pinned: `drain_lines` can only return
+  `ok` by having **seen** `AGREE_UNIX_FD`, so it cannot silently
+  downgrade to a bus samvada cannot use.
+- `dbus_session_set_timeout_ms`'s docstring claimed it was "not
+  reachable from the public API". **That was false** and is
+  corrected in place rather than quietly dropped — see *Known
+  limitations*.
+
+### Added
+- 68 new assertions (**585 total**, from 517), every repair
+  mutation-tested. Two mutation results are worth recording because
+  they differ in kind: removing the fd-ownership guard *fails* its
+  pin, while removing the wall-clock deadline does not fail the suite
+  — it **hangs** it (exit 124). When mutation-testing blocking I/O,
+  run under `timeout` and treat exit 124 as a positive result.
+- A hostile-input pass over the SASL reader (unterminated lines, an
+  8000-byte line with no CRLF, binary garbage, `REJECTED`, `ERROR`,
+  a line split across reads). No defect found; the bounds hold.
+
+### Known limitations — unchanged, now stated
+- **`dist/samvada.cyr` exports 198 functions against a documented
+  public surface of eight.** `@public` and `@internal` are comments
+  with no mechanical meaning, so every internal is consumer-reachable
+  — the premise AUDIT-1 already rested on. Cyrius has no visibility
+  mechanism; the honest contract is now in `public-api.md` rather
+  than implied.
+- **`release_device`'s control accounting is a bare counter.**
+  Reaching zero issues `ReleaseControl`, which makes logind revoke
+  every device still held. samvada's counter is kept honest only by
+  logind answering `DEVICE_NOT_TAKEN` for a device it never gave out
+  — a property of the peer that samvada does not verify. Not changed
+  in a patch release; recorded in `SECURITY.md`.
+- **The consumer fetch path is authenticated only by the lock.**
+  `[deps.samvada]` fetches `dist/samvada.cyr` from a git clone of the
+  tag; samvada's tags are lightweight and unsigned. With
+  `cyrius.lock` present a repointed tag is refused (commit-pin
+  mismatch, verified); on a **first** resolve or a version bump there
+  is nothing to check against.
+- **A-4 is PARTIAL and A-1 is not fully closed** — see the roadmap.
+
 ## [1.0.0] — 2026-09-09
 
 **Native dbus in Cyrius.** samvada speaks dbus over a raw unix
@@ -17,6 +181,18 @@ replacing a C dependency at every consumer's edge.
 ### Added
 - [`docs/audit/2026-09-09-native-audit.md`](docs/audit/2026-09-09-native-audit.md)
   — the pre-1.0 security audit of the native marshaller.
+- **The A lane** in
+  [`docs/development/roadmap.md`](docs/development/roadmap.md) —
+  A-1 through A-6, the audit dimensions 1.0.0 did **not** cover,
+  each with exit criteria that demand evidence rather than review.
+  The audit planned seven dimensions and covered four; the
+  remainder now has an owner instead of living in that document's
+  closing paragraph. Highest value is **A-1, resource exhaustion**,
+  the one dimension where samvada has no evidence at all and
+  `alloc()` never frees inside a process that pumps at 60 Hz.
+  Nothing in the lane blocks a tag — it gates the *claim* that
+  samvada is audited-hardened, which 1.0.0 does not make. The
+  roadmap now runs **three** lanes, not two.
 - Benchmark rows filled: native handshake **167 µs** vs libsystemd
   **494 µs**; `pump_signals` **2138 ns** idle. The `TakeDevice`
   round-trip row stays empty and says why.

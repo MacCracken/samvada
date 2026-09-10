@@ -93,9 +93,22 @@ fn dbus_auth_line_kind(p, len) {
 # whether the handshake is done.
 #
 # Returns ok once AGREE_UNIX_FD has been seen; need_more while lines
-# are still outstanding; rejected / error / no_fds on refusal. The
-# buffer cursor is left exactly where the BINARY stream begins, so
-# the framer can take over with no copy.
+# are still outstanding; rejected or error on refusal. The buffer
+# cursor is left exactly where the BINARY stream begins, so the
+# framer can take over with no copy.
+#
+# NOTE (A-4 audit): this comment used to claim `no_fds` was among the
+# returns. It is not — dbus_auth_no_fds() is defined and never
+# produced by any path, because a server that refuses fd passing
+# answers ERROR and is reported as `error`. The constant is retained
+# (removing it would change the @internal status-code numbering that
+# tests pin) but it is dead, and the comment no longer says otherwise.
+#
+# The property that actually matters, and it holds: this can only
+# return `ok` by having SEEN AGREE_UNIX_FD. samvada cannot do
+# TakeDevice without SCM_RIGHTS, so an `ok` that skipped fd
+# negotiation would be a silent downgrade to a bus it cannot use.
+# Pinned by test_sasl_reader_survives_hostile_input case (8).
 var _dbus_auth_saw_ok    = 0;
 var _dbus_auth_saw_agree = 0;
 
