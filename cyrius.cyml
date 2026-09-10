@@ -17,9 +17,25 @@ output = "samvada"
 # `[lib]` feeds `cyrius distlib` — module order matters when
 # samvada grows real modules. v0.1.0 has only a placeholder fn so
 # the bundle is intentionally trivial.
+# N6 cutover (0.11.0): the native dbus modules ship in the bundle.
+# Until 0.10.0 they were built and tested but deliberately excluded,
+# so `dist/samvada.cyr`'s exported set stayed frozen at 26 fns while
+# the backend was under construction. Shipping them IS the cutover —
+# a consumer can now reach a working dbus client with no C shim and
+# no libsystemd, via `samvada_native_init()`.
+#
+# Order matters: each module is included in dependency order, and
+# samvada.cyr last because it is what dispatches through the table.
 [lib]
 modules = [
     "src/samvada_ffi.cyr",
+    "src/dbus_sys.cyr",
+    "src/dbus_frame.cyr",
+    "src/dbus_socket.cyr",
+    "src/dbus_auth.cyr",
+    "src/dbus_marshal.cyr",
+    "src/dbus_unmarshal.cyr",
+    "src/dbus_session.cyr",
     "src/samvada.cyr",
 ]
 

@@ -4,6 +4,79 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-09-09
+
+**N6 — cutover.** The native Cyrius dbus backend ships in the
+consumer bundle. A consumer can now reach a working dbus client with
+**no C shim, no libsystemd and no `pkg-config`** — verified by
+building a probe against `dist/samvada.cyr` alone and confirming the
+binary has **zero libsystemd references**:
+
+```
+samvada_native_init -> 0
+take_device(226,1)  -> -13
+release             -> 0
+```
+
+The C shim stays in tree, still compiling and still passing CI, as
+the differential reference. It is deleted at 1.0.0 (N7), not before.
+
+### Added
+- **`samvada_native_init()`** — the one new public fn, and the only
+  supported way to reach the native backend. It exists because
+  CLAUDE.md forbids exposing FFI types in public signatures: without
+  it a native consumer would have to write `samvada_ffi_alloc()` +
+  `dbus_native_populate(t)` + `samvada_init(t)`, which hands them a
+  fn-table pointer. Additive — `samvada_init`'s frozen signature is
+  untouched and shim consumers are unaffected.
+- **The native modules enter `[lib] modules`.** This *is* the
+  cutover. `dist/samvada.cyr` goes 332 → 2008 lines; the exported
+  `samvada_*` set goes 26 → 27 (the new entry point), plus the
+  `@internal` `dbus_*` layer. The "bundle unchanged" exit criterion
+  that governed N1–N5 was scoped to the pre-cutover milestones and
+  retires here, as designed.
+- **`tools/differential/`** — builds both backends into one process
+  and compares every return value. Sequential A/B is forced, not
+  chosen: the module-scope state and the `-EBUSY` re-init guard make
+  two live backends in one process impossible by construction.
+
+### Fixed
+- **Native `pump_signals` never read from the socket.** It drained
+  only what was already buffered, so it could never observe anything
+  new. Now does a non-blocking `MSG_DONTWAIT` receive first, with
+  any `SCM_RIGHTS` descriptor queued rather than dropped.
+  `MSG_DONTWAIT` is per-call deliberately: setting `O_NONBLOCK` on
+  the socket would make the request/reply path non-blocking too and
+  turn every method call into a busy-wait.
+
+### Notes
+- **Error-code parity HOLDS**, and it is the contract. `init`,
+  `take_device`, `release_device` and `release` return identical
+  values from both backends — including `-13` (`AccessDenied`) and
+  `-22`, the two a consumer is most likely to branch on.
+- **`pump_signals`' event count is NOT a parity target, and the
+  differential found out the hard way.** Its first version reported
+  **BREACHED** on shim=1 vs native=0. Investigating rather than
+  "fixing" showed both backends handle the same `NameAcquired`
+  exactly once, at different points: libsystemd drains its own queue
+  at pump time, while the native backend consumes it earlier as a
+  non-matching message inside `get_session_path`'s reply loop.
+  Pinning the count would pin an internal buffering schedule. The
+  harness now reports it and excludes it, with the reasoning written
+  down so it is not re-litigated.
+  This is exactly the failure mode N6 exists to catch — it just
+  turned out that the first thing it caught was an over-strict
+  test rather than a defect.
+- **`dbus_session` gained a real dependency on `dbus_sys`** through
+  the pump fix, which surfaced immediately as an undefined-function
+  build failure in the session tests. Recorded because it is the
+  kind of coupling that is invisible until the module graph is
+  exercised.
+- **Still not verified**: a `TakeDevice` that returns an actual fd.
+  That needs an active seated session, which no host here has. Both
+  backends agree on `-13` off a seat, which is as far as this
+  environment can go — the CG lane remains open.
+
 ## [0.10.0] — 2026-09-09
 
 **N5 — the logind session layer.** samvada's **frozen public API now

@@ -5,6 +5,22 @@
 
 ## Version
 
+**0.11.0** — 2026-09-09. **N6 — cutover.** The native dbus backend
+**ships in the consumer bundle**. A probe built against
+`dist/samvada.cyr` alone runs `samvada_native_init() -> 0` and
+`take_device -> -13` with **zero libsystemd references in the
+binary** — no C shim, no `pkg-config`, no two-stage build. One new
+public fn, `samvada_native_init()`, which exists so consumers never
+see a fn-table pointer. `dist/samvada.cyr` goes 332 → 2008 lines and
+26 → 27 exported `samvada_*` fns; the "bundle unchanged" criterion
+that governed N1–N5 retires here by design. **Error-code parity
+with the C shim is verified** by `tools/differential/`, which runs
+both backends in one process: `init`, `take_device`,
+`release_device` and `release` all match. `pump_signals`' event
+count differs and that is correct, not a breach — both backends
+handle the same `NameAcquired` once, at different points. The shim
+stays in tree as the reference until N7.
+
 **0.10.0** — 2026-09-09. **N5** — the logind session layer.
 **samvada's frozen public API now runs on a fully native Cyrius
 backend** against the real bus, `kind = PURE_CYRIUS`, no libsystemd:
@@ -286,7 +302,7 @@ Live-bus end-to-end validation pending mabda's
   helpers.
 - `src/samvada.cyr` — public API surface (v0.x stable). Full
   surface map in `docs/architecture/public-api.md`.
-  - `samvada_version()` → packed u32 (0.10.0).
+  - `samvada_version()` → packed u32 (0.11.0).
   - `samvada_init(table)` → 0 | -err (opens bus, looks up
     session, **takes session control**). Returns `-EBUSY` (`-16`)
     on re-init without release as of 0.2.2; self-cleans on every
@@ -303,6 +319,8 @@ Live-bus end-to-end validation pending mabda's
     revokes devices taken via `TakeDevice` when control is
     released, so outstanding consumer fds become invalid.
   - `samvada_main(table)` → 0 | -err (C-shim entry point).
+  - `samvada_native_init()` → 0 | -err (0.11.0). The supported way
+    to use the native backend; hides the FFI table entirely.
 - `src/dbus_session.cyr` — **native backend, N5**. The six logind
   calls, serial counter, reply correlation, error mapping, and
   `dbus_native_populate()`.

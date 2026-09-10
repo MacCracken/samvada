@@ -53,6 +53,12 @@ fn dbus_sys_msg_ctrunc()  { return 8; }
 # shim had to close by hand.
 fn dbus_sys_msg_cmsg_cloexec() { return 1073741824; }
 
+# MSG_DONTWAIT — per-CALL non-blocking. Deliberately not O_NONBLOCK
+# on the socket: that is socket state and would make every
+# request/reply read non-blocking too, silently turning a normal
+# method call into a busy-wait.
+fn dbus_sys_msg_dontwait() { return 64; }
+
 # ---- arch-selected syscall numbers ----
 # sendmsg/recvmsg are NOT in the same numeric slot across arches, and
 # getting this wrong is silent: on aarch64, 46 is `ftruncate`, so a
@@ -181,6 +187,13 @@ fn dbus_sys_parse_scm_rights(ctrl, ctrllen, fd_out) {
 #
 # The caller owns the fd and must close it.
 fn dbus_sys_recv_fd(fd, buf, buflen, fd_out) {
+    return dbus_sys_recv_fd_flags(fd, buf, buflen, fd_out, 0);
+}
+
+# As above, plus caller-supplied flags (MSG_DONTWAIT for the pump
+# path). Split out rather than adding a parameter to
+# dbus_sys_recv_fd, whose signature is pinned by tests.
+fn dbus_sys_recv_fd_flags(fd, buf, buflen, fd_out, extra) {
     if (buf == 0)      { return -22; }
     if (buflen <= 0)   { return -22; }
     if (fd_out == 0)   { return -22; }
@@ -205,7 +218,7 @@ fn dbus_sys_recv_fd(fd, buf, buflen, fd_out) {
     store64(_dbus_mh + 32, _dbus_ctrl);
     store64(_dbus_mh + 40, dbus_sys_cmsg_space_1fd());
 
-    var n = sys_recvmsg(fd, _dbus_mh, dbus_sys_msg_cmsg_cloexec());
+    var n = sys_recvmsg(fd, _dbus_mh, dbus_sys_msg_cmsg_cloexec() | extra);
     if (n < 0) { return n; }
 
     var ctrllen = load64(_dbus_mh + 40);

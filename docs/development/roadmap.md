@@ -119,6 +119,7 @@ it.
 | **N3** — transport, auth, framing | 0.8.0 | ✅ 2026-09-09. Native SASL against the real bus; framer proven by drip-feed. `Hello` round-trip deferred to N4 (needs the marshaller). |
 | **N4** — marshal / unmarshal | 0.9.0 | ✅ 2026-09-09. `Hello` byte-identical to libsystemd's and ACCEPTED by the bus; reply decoded; closes N3's deferred criterion. |
 | **N5** — logind session layer | 0.10.0 | ✅ 2026-09-09. The frozen public API runs on `kind = PURE_CYRIUS` against the real bus; `TakeDevice` reaches a device error, not `NotInControl`. |
+| **N6** — cutover | 0.11.0 | ✅ 2026-09-09. Native backend ships in the bundle; a consumer builds with zero libsystemd. Error-code parity verified against the shim. |
 
 **M2 — "generalize beyond logind"** (Properties, Introspectable,
 session bus, generic method dispatch, async variants) is
@@ -407,7 +408,7 @@ mechanical.
   round-trips natively against the real bus; `TakeDevice` reaches
   a device-level error rather than `NotInControl`.
 
-### N6 — Cutover (0.11.0)
+### N6 — Cutover (0.11.0) — ✅ SHIPPED
 
 `kind = PURE_CYRIUS` becomes the default backend. **The shim stays
 in tree**, selectable per build, as the differential reference.

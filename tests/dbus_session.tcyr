@@ -8,6 +8,7 @@
 # fncallN rather than a compile error.
 
 include "src/lib.cyr"
+include "src/dbus_sys.cyr"
 include "src/dbus_frame.cyr"
 include "src/dbus_auth.cyr"
 include "src/dbus_socket.cyr"

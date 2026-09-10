@@ -364,8 +364,33 @@ fn dbus_native_release_device(bus, sess, major, minor) {
 # Drains whatever is readable without blocking, and reports how many
 # whole messages went past. Bounded like the C shim's, and for the
 # same reason: the frozen signature takes no cap argument.
+#
+# The read is NOT optional, and leaving it out is how the 0.11.0
+# differential caught this module diverging from the C shim: the C
+# side's sd_bus_process pulls from the socket, so it reported 1
+# event where this reported 0 having only looked at an already-empty
+# buffer. Same call, same session, two different answers — precisely
+# the silent error-parity breach N6 exists to find.
+#
+# MSG_DONTWAIT is per-call. Setting O_NONBLOCK on the socket instead
+# would make the request/reply path non-blocking too and turn every
+# method call into a busy-wait.
 fn dbus_native_pump_signals(bus) {
     var drained = 0;
+    if (bus > 0) {
+        dbus_frame_maybe_compact();
+        var space = dbus_frame_space();
+        if (space > 0) {
+            var scratch = alloc(8);
+            store64(scratch, (0 - 1));
+            var got = dbus_sys_recv_fd_flags(bus, dbus_frame_tail(), space,
+              scratch, dbus_sys_msg_dontwait());
+            if (got > 0) { dbus_frame_commit(got); }
+            if (got == 0) { dbus_frame_set_eof(); }
+            var qfd = load64(scratch);
+            if (qfd >= 0) { dbus_frame_push_fd(qfd); }
+        }
+    }
     var r = dbus_frame_next();
     while (r > 0) {
         drained = drained + 1;
@@ -381,6 +406,34 @@ fn dbus_native_close_bus(bus) {
     dbus_frame_close_fds();
     if (bus > 0) { sys_close(bus); }
     return 0;
+}
+
+# ---- the public native entry point (0.11.0, N6 cutover) ----
+# @public
+#
+# The ONLY way a consumer should reach the native backend. It exists
+# because CLAUDE.md forbids exposing FFI types in public signatures:
+# without it a native consumer would have to write
+#
+#     var t = samvada_ffi_alloc();
+#     dbus_native_populate(t);
+#     samvada_init(t);
+#
+# which hands them a fn-table pointer — the exact thing the rule
+# exists to prevent, and the thing that would make the eventual
+# removal of the FFI layer a breaking change for them.
+#
+# Additive, so nothing that exists today changes: `samvada_init` and
+# its frozen signature are untouched, and a consumer still linking
+# the C shim keeps working unchanged.
+#
+#   returns 0, or a negative sd-bus errno
+fn samvada_native_init() {
+    var t = samvada_ffi_alloc();
+    if (t == 0) { return -12; }
+    var rc = dbus_native_populate(t);
+    if (rc < 0) { return rc; }
+    return samvada_init(t);
 }
 
 # Populate an FFI table with the native backend. kind = PURE_CYRIUS.

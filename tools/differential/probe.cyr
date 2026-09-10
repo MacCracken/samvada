@@ -1,0 +1,38 @@
+include "lib/samvada.cyr"
+
+# Run the identical sequence and report each rc. Sequential A/B is
+# forced: samvada's module-scope state and the -EBUSY re-init guard
+# make two live backends in one process impossible by construction.
+var _r_init = 0;
+var _r_take = 0;
+var _r_rel  = 0;
+var _r_pump = 0;
+var _r_close = 0;
+
+fn run_sequence_native() {
+    _r_init = samvada_native_init();
+    if (_r_init == 0) {
+        _r_take = samvada_session_take_device(226, 1);
+        _r_rel  = samvada_session_release_device(226, 1);
+        _r_pump = samvada_pump_signals();
+    }
+    _r_close = samvada_release();
+    return 0;
+}
+
+# The shim path: the C side has already built the table and called
+# samvada_main() -> samvada_init(). We just exercise the rest.
+fn run_sequence_shim_tail() {
+    _r_take = samvada_session_take_device(226, 1);
+    _r_rel  = samvada_session_release_device(226, 1);
+    _r_pump = samvada_pump_signals();
+    _r_close = samvada_release();
+    return 0;
+}
+
+fn r_init()  { return _r_init; }
+fn r_take()  { return _r_take; }
+fn r_rel()   { return _r_rel; }
+fn r_pump()  { return _r_pump; }
+fn r_close() { return _r_close; }
+fn set_init(v) { _r_init = v; return 0; }
