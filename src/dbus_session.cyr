@@ -116,6 +116,10 @@ fn dbus_session_call(fd, serial) {
         var r = dbus_frame_next();
         while (r > 0) {
             var p = dbus_frame_base();
+            # dbus_frame_next() returned the message's exact on-wire
+            # length; handing it to the unmarshaller is what makes its
+            # bounds checks real (pre-1.0 audit, AUDIT-1..3).
+            dbus_unmarshal_set_limit(r);
             var ty = dbus_unmarshal_type(p);
             var sig = alloc(8);
             var rs_off = dbus_unmarshal_find_field(p, dbus_marshal_f_replyser(), sig);
@@ -262,6 +266,7 @@ fn dbus_native_get_session_path(bus, pid, out_buf, out_len) {
     var rc = dbus_session_call(bus, serial);
     if (rc < 0) { return rc; }
     var p = dbus_frame_base();
+    dbus_unmarshal_set_limit(dbus_frame_next());
     dbus_unmarshal_body_begin(p);
     var ptr = alloc(8);
     var n = dbus_unmarshal_next_str(ptr);
@@ -327,6 +332,7 @@ fn dbus_native_take_device(bus, sess, major, minor, fd_out, active_out) {
     var rc = dbus_session_call(bus, serial);
     if (rc < 0) { return rc; }
     var p = dbus_frame_base();
+    dbus_unmarshal_set_limit(dbus_frame_next());
     dbus_unmarshal_body_begin(p);
     var idx = dbus_unmarshal_next_fd_index();
     var inactive = dbus_unmarshal_next_bool();

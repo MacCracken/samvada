@@ -158,6 +158,60 @@ Notes:
   this binary and the tests are a separate target, so neither
   moves it.
 
+## Live-bus rows — the v1.0 gate, FILLED (0.11.0 / 1.0.0)
+
+These are the rows this document was waiting for. They became
+measurable at the N5/N6 cutover: a **native** backend can be driven
+from samvada's own binary against any running system bus, where the
+C-shim era needed a consumer build plus libsystemd.
+
+Host `Linux 7.2.3-arch1-3 x86_64`, AMD Ryzen 7 5800H, systemd 261.2,
+dbus-broker 37, seatless session, 2026-09-09.
+
+### Handshake latency
+
+Full connect sequence: socket + connect, SASL, `Hello`,
+`GetSessionByPID`, `TakeControl`. 20 fresh connections each.
+
+| Backend | avg | min | max |
+|---|---|---|---|
+| **native Cyrius** | **167 µs** | 122 µs | 509 µs |
+| libsystemd (C shim) | 494 µs | 417 µs | 1125 µs |
+
+**Read this carefully before quoting it.** The native path is ~3×
+faster *on this specific sequence*, and that comparison is not as
+flattering as it looks: samvada implements exactly six method calls
+against one well-known service, while libsystemd is a general dbus
+client doing connection caching, credential negotiation, match-rule
+bookkeeping and a full type system. The honest claim is "a
+purpose-built client for six calls is cheaper than a general one",
+not "samvada is faster than libsystemd".
+
+The measurement also forces a fresh connection per round, which is
+the path libsystemd optimises *least* — `sd_bus_default_system`
+caches, and a long-lived consumer pays the handshake once.
+
+### Signal-pump drain cost
+
+`samvada_pump_signals()` on an idle connection, 1000 calls:
+
+| | ns/call |
+|---|---|
+| native, idle connection | **2138** |
+
+That figure includes a non-blocking `recvmsg` syscall — the pump
+reads before it drains, which is the 0.11.0 fix. It is the cost a
+consumer pays per frame if it pumps every frame, so ~2.1 µs at
+60 Hz is ~0.013 % of a frame budget.
+
+### `TakeDevice` round-trip — STILL NOT MEASURED
+
+The third row this document has always named remains empty, and
+will until a seated session exists. Off a seat, `TakeDevice`
+returns `-13` (`AccessDenied`) from both backends without ever
+transferring a descriptor, so there is nothing to time. Tracked in
+the roadmap's CG lane.
+
 ## When this doc graduates
 
 The v1.0 gate fills three items below:

@@ -26,6 +26,35 @@
 # reply — it is an implementation choice, so fields are always
 # located by scanning for their code.
 
+# ---- message bounds ----
+# The 2026-09-09 pre-1.0 audit found this module trusting three
+# separate wire-supplied lengths without checking any of them
+# against the bytes actually present:
+#
+#   * a string field claiming length 0xFFFFFFF0 had that length
+#     handed straight back to the caller;
+#   * `find_field` walked to `16 + fields_len` even when fields_len
+#     exceeded the whole message;
+#   * the body cursor set its end from `body_len` alone.
+#
+# None was reachable through samvada's own call paths, because the
+# framer only ever yields a message once `avail >= total` — so the
+# header lengths are already consistent with the bytes present. But
+# "unreachable because the caller happens to validate first" is the
+# exact shape of CRIT-1 and CRIT-2, and this module is exported in
+# the consumer bundle. So the limit is now explicit and enforced
+# here rather than assumed of the caller.
+var _dbu_limit = 0;      # total on-wire length of the current message
+
+# Declare the message's true extent. Every caller that has a framed
+# message knows it: dbus_frame_next() returns exactly this number.
+fn dbus_unmarshal_set_limit(total) {
+    _dbu_limit = total;
+    return 0;
+}
+
+fn dbus_unmarshal_limit() { return _dbu_limit; }
+
 fn dbus_unmarshal_ok()       { return 0; }
 fn dbus_unmarshal_notfound() { return -1200; }
 fn dbus_unmarshal_malformed(){ return -1201; }
@@ -57,6 +86,10 @@ fn dbus_unmarshal_body_off(p) {
 fn dbus_unmarshal_find_field(p, code, sig_out) {
     var flen = dbus_unmarshal_fields_len(p);
     var end = 16 + flen;
+    # Refuse a field array that claims to extend past the message.
+    if (_dbu_limit > 0) {
+        if (end > _dbu_limit) { return dbus_unmarshal_malformed(); }
+    }
     var at = 16;
     while (at < end) {
         at = dbus_unmarshal_align(at, 8);
@@ -72,16 +105,23 @@ fn dbus_unmarshal_find_field(p, code, sig_out) {
         if (sig0 == 111) { nxt = 1; }        # 'o'
         if (nxt == 1) {
             vo = dbus_unmarshal_align(vo, 4);
+            if (vo + 4 > end) { return dbus_unmarshal_malformed(); }
             var n = dbus_unmarshal_u32(p, vo);
             nxt = vo + 4 + n + 1;
+            # A length that runs past the field array is malformed,
+            # not a value to hand back.
+            if (nxt > end) { return dbus_unmarshal_malformed(); }
         }
         if (sig0 == 117) {                   # 'u'
             vo = dbus_unmarshal_align(vo, 4);
             nxt = vo + 4;
+            if (nxt > end) { return dbus_unmarshal_malformed(); }
         }
         if (sig0 == 103) {                   # 'g'
+            if (vo + 1 > end) { return dbus_unmarshal_malformed(); }
             var gn = load8(p + vo);
             nxt = vo + 1 + gn + 1;
+            if (nxt > end) { return dbus_unmarshal_malformed(); }
         }
         if (nxt <= at) { return dbus_unmarshal_malformed(); }
 
@@ -99,7 +139,16 @@ fn dbus_unmarshal_find_field(p, code, sig_out) {
 # The bytes are NOT copied — they live in the framer's buffer and
 # stay valid until dbus_frame_advance moves past this message.
 fn dbus_unmarshal_str_at(p, off, ptr_out) {
+    if (off < 0) { return dbus_unmarshal_malformed(); }
+    if (_dbu_limit > 0) {
+        if (off + 4 > _dbu_limit) { return dbus_unmarshal_malformed(); }
+    }
     var n = dbus_unmarshal_u32(p, off);
+    # The length must fit inside the message. Returning it unchecked
+    # invites the caller to copy gigabytes out of bounds.
+    if (_dbu_limit > 0) {
+        if (off + 4 + n + 1 > _dbu_limit) { return dbus_unmarshal_malformed(); }
+    }
     if (ptr_out != 0) { store64(ptr_out, p + off + 4); }
     return n;
 }
@@ -107,7 +156,14 @@ fn dbus_unmarshal_str_at(p, off, ptr_out) {
 # Read a signature value (`g`) — ONE length byte, not four. Treating
 # it like `s` reads the signature text as a length.
 fn dbus_unmarshal_sig_at(p, off, ptr_out) {
+    if (off < 0) { return dbus_unmarshal_malformed(); }
+    if (_dbu_limit > 0) {
+        if (off + 1 > _dbu_limit) { return dbus_unmarshal_malformed(); }
+    }
     var n = load8(p + off);
+    if (_dbu_limit > 0) {
+        if (off + 1 + n + 1 > _dbu_limit) { return dbus_unmarshal_malformed(); }
+    }
     if (ptr_out != 0) { store64(ptr_out, p + off + 1); }
     return n;
 }
@@ -123,6 +179,13 @@ fn dbus_unmarshal_body_begin(p) {
     _dbu_p = p;
     _dbu_at = dbus_unmarshal_body_off(p);
     _dbu_end = _dbu_at + dbus_unmarshal_body_len(p);
+    # Clamp to the message's real extent. A header claiming a body
+    # far larger than the bytes present would otherwise let the
+    # cursor read past the end, one aligned value at a time.
+    if (_dbu_limit > 0) {
+        if (_dbu_end > _dbu_limit) { _dbu_end = _dbu_limit; }
+        if (_dbu_at > _dbu_limit)  { _dbu_at = _dbu_limit; }
+    }
     return 0;
 }
 

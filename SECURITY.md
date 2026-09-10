@@ -31,7 +31,9 @@ the wrapper, document the workaround, or both.
 
 | Version | Supported                                                            |
 |---------|----------------------------------------------------------------------|
-| 0.5.x   | **Yes** — current release line, receives security fixes              |
+| 1.0.x   | **Yes** — current release line, receives security fixes              |
+| 0.11.x  | No — superseded by 1.0.0                                             |
+| 0.5.x   | No — the C-shim era; superseded                                      |
 | 0.4.x   | No — superseded by 0.5.1; upgrade, there is no backport path         |
 | 0.3.x   | No                                                                   |
 | 0.2.x   | No                                                                   |

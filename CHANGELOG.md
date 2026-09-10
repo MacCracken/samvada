@@ -4,6 +4,88 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-09-09
+
+**Native dbus in Cyrius.** samvada speaks dbus over a raw unix
+socket with no libsystemd, no C shim and no `pkg-config`. The road
+[ADR-0003](docs/adr/0003-native-cyrius-dbus.md) set out at 0.5.1 is
+complete: N0 through N7, seven milestones, ~1000 lines of Cyrius
+replacing a C dependency at every consumer's edge.
+
+`samvada_version()` → `(1,0,0)`.
+
+### Added
+- [`docs/audit/2026-09-09-native-audit.md`](docs/audit/2026-09-09-native-audit.md)
+  — the pre-1.0 security audit of the native marshaller.
+- Benchmark rows filled: native handshake **167 µs** vs libsystemd
+  **494 µs**; `pump_signals` **2138 ns** idle. The `TakeDevice`
+  round-trip row stays empty and says why.
+
+### Security
+Three defects found and fixed, all the same class — **the
+unmarshaller trusted wire-supplied lengths without checking them
+against the bytes present**:
+- **AUDIT-1 (HIGH)** — a string field claiming `0xFFFFFFF0` bytes
+  had that length returned to the caller with a pointer into the
+  message. Measured: `str_at returned len=4294967280`.
+- **AUDIT-2 (MEDIUM)** — `find_field` walked to `16 + fields_len`
+  from the header; a 48-byte message claiming `fields_len = 65535`
+  read ~65 KB past the end.
+- **AUDIT-3 (HIGH)** — the body cursor took its end from `body_len`
+  alone. Measured: `remaining = 16777215` in a 32-byte message,
+  with `next_u32()` reading beyond it under attacker control.
+
+None was reachable through samvada's own paths — the framer only
+yields a message once `avail >= total`. They are filed at these
+severities anyway because *"unreachable because the caller happens
+to validate first"* is the exact shape of 0.5.1's two CRITICALs,
+and this module ships in the consumer bundle where callers we do
+not control can reach it. The one internal caller that touches
+attacker-influenced data survived by luck, not design.
+
+Fixed by making the message extent explicit and enforced in the
+module (`dbus_unmarshal_set_limit`) rather than assumed of the
+caller. Pinned by regression tests.
+
+### Notes — read these before treating 1.0.0 as hardened
+- **The planned multi-agent audit FAILED.** All eight agents
+  terminated on a session limit with zero findings. What shipped was
+  performed by hand instead: real byte sequences driven through the
+  real modules. It found three genuine defects — but it covered
+  **three of seven planned dimensions fully**. **Resource
+  exhaustion, reply forgery, and build/supply-chain were NOT
+  audited**, and the audit document lists them as outstanding rather
+  than omitting them. The most valuable next question is reply
+  forgery: samvada correlates on `REPLY_SERIAL` alone and does not
+  check `SENDER`.
+- **The C shim is NOT deleted.** N7 planned to delete it; that is
+  **deferred to 1.1.0** because the CG lane never cleared — mabda
+  has never run the native backend and no seated session exists
+  here, so a `TakeDevice` that returns a real descriptor remains
+  unverified by anyone. Deleting the shim would remove both the
+  fallback and `tools/differential/`, which had just caught a real
+  `pump_signals` defect. Consumers lose nothing by waiting:
+  `samvada_native_init()` already builds with zero libsystemd.
+- **Two v1.0 criteria ship partially met, marked `[~]` in the
+  roadmap rather than redefined**: libsystemd is absent from
+  consumer builds (✅) but the shim is not deleted (❌); two
+  benchmark rows are filled (✅), the `TakeDevice` one is not (❌).
+- **Downstream consumer green is OPEN at 1.0.0**, exactly as the CG
+  lane's expiry clause anticipated. The native backend is
+  **not-yet-consumer-validated** and re-evaluated at 1.1.0.
+
+### The road, for the record
+| | |
+|---|---|
+| N0 (0.6.0) | ADR-0004; found `TakeControl` at init was blanking the console |
+| N1 (0.7.0) | `SCM_RIGHTS` fd passing; found a surplus-fd leak |
+| N2 (0.7.1) | golden corpus; corrected our own SASL docs |
+| N3 (0.8.0) | transport, auth, framing; native SASL against the real bus |
+| N4 (0.9.0) | `Hello` byte-identical to libsystemd's, accepted by the bus |
+| N5 (0.10.0) | the frozen API on `kind = PURE_CYRIUS` |
+| N6 (0.11.0) | cutover; error-code parity verified |
+| N7 (1.0.0) | audit, benchmarks, tag |
+
 ## [0.11.0] — 2026-09-09
 
 **N6 — cutover.** The native Cyrius dbus backend ships in the

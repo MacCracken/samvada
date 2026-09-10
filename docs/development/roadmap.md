@@ -49,28 +49,38 @@ not quietly dropped — where one changed, the change is stated.
   `dist/samvada.cyr`'s exported symbol set is unchanged.
 - [x] **CHANGELOG complete from v0.1.0 onward.** Verified 0.4.0;
   CI enforces per release.
-- [ ] **Native dbus backend reaches parity with the C shim** —
-  `kind = PURE_CYRIUS` populates the same slots, and every
-  behaviour the shim provides is provided natively. *(New; the
-  substance of this file.)*
-- [ ] **The C shim is deleted** — `deps/samvada_main.c` gone,
-  libsystemd absent from every consumer build. *(Replaces the old
-  "architectural pivot decided", which [ADR-0003](../adr/0003-native-cyrius-dbus.md)
-  closes.)*
-- [ ] **Benchmarks captured in `docs/benchmarks.md`.** *(Carried,
-  and now easier: a native backend can be driven from samvada's
-  own binary against any running system bus. Split into three
-  rows — handshake latency and signal-pump drain move into the N
-  lane; only the `TakeDevice` round-trip stays hardware-gated.)*
+- [x] **Native dbus backend reaches parity with the C shim** —
+  closed at N6. `kind = PURE_CYRIUS` populates the same slots, and
+  `tools/differential/` runs both backends in one process and
+  confirms every **error code** matches. `pump_signals`' event count
+  differs and is excluded on purpose — the two backends drain
+  internal buffers at different points while handling the same
+  message once.
+- [~] **libsystemd is absent from every consumer build** — ✅ done
+  at N6: `samvada_native_init()` builds with zero libsystemd
+  references. **The shim's DELETION is deferred to 1.1.0**, gated on
+  the CG lane, so the fallback and the differential harness survive
+  until someone has run the native path on real hardware. The
+  *consumer-facing* half of this criterion is met; the
+  *housekeeping* half is not, and that is stated rather than
+  redefined.
+- [~] **Benchmarks captured in `docs/benchmarks.md`.** ✅ handshake
+  latency (native 167 µs vs libsystemd 494 µs) and ✅ signal-pump
+  drain (2138 ns idle) are filled at 1.0.0. ❌ the `TakeDevice`
+  round-trip is still empty and will be until a seated session
+  exists — off a seat no descriptor is ever transferred, so there is
+  nothing to time.
 - [ ] **Security audit pass over the native marshaller**
   (`docs/audit/YYYY-MM-DD-audit.md`). *(Carried. The 0.5.1 pass
   covered the C-shim surface; ~650–1010 LoC of hand-rolled byte
   parsing replaces libsystemd's validated parser and earns its
   own pass.)*
 - [ ] **Downstream consumer green** — mabda builds, pins and runs
-  against the native backend from a seated session. *(Carried.
-  Lives in the quarantined CG lane below and does **not** block
-  any N milestone.)*
+  against the native backend from a seated session. **STILL OPEN AT
+  1.0.0**, exactly as the CG lane's expiry clause anticipated: the
+  tag ships with the native backend documented as
+  *not-yet-consumer-validated*, the C shim retained as the fallback,
+  and the lane re-evaluated at 1.1.0.
 - [ ] ~~Six-consumer regression sweep~~ → **every AGNOS consumer
   that pins `[deps.samvada]` builds and tests cleanly (today:
   mabda).** *(The number was a template artifact from the
@@ -424,10 +434,28 @@ in tree**, selectable per build, as the differential reference.
   `-EBUSY` guard forbid two live backends in one process) agrees
   on every outcome and every error code.
 
-### N7 — Delete the shim, audit, tag 1.0.0
+### N7 — Audit and tag 1.0.0 (shim deletion deferred to 1.1.0)
 
-- `deps/samvada_main.c` deleted; libsystemd gone from every
-  consumer build; `consumer-link.md` reduced to "add the dep".
+> **Scope changed 2026-09-09, deliberately.** This milestone was
+> written as "delete the shim, audit, tag". The deletion is
+> **deferred to 1.1.0** and the reason is the CG lane: mabda has
+> never run the native backend, and no seated session exists here,
+> so a `TakeDevice` that returns a real descriptor is still
+> unverified by anyone. Deleting the C shim now would remove both
+> the fallback and `tools/differential/` — which had just caught a
+> real `pump_signals` defect — at exactly the moment the native
+> path is least proven in the field.
+>
+> Consumers lose nothing by waiting: `samvada_native_init()` already
+> gives a zero-libsystemd build today (N6), and the shim is opt-in.
+> What 1.0.0 gives up is only the *tidiness* of a native-only tree.
+> Recorded here rather than quietly re-planned.
+
+- ~~`deps/samvada_main.c` deleted~~ → **deferred to 1.1.0** (see
+  the note above). libsystemd is already gone from every consumer
+  build that uses `samvada_native_init()`; `consumer-link.md` gains
+  a native section and keeps the shim recipe for anyone who wants
+  the reference backend.
 - **Full security audit** of the native marshaller →
   `docs/audit/YYYY-MM-DD-audit.md`. Non-negotiable: this is where
   samvada takes ownership of alignment, endianness, bounds and fd

@@ -12,6 +12,8 @@
 # and that our understanding of the wire format reproduces a real
 # captured message exactly.
 
+include "src/dbus_sys.cyr"
+include "src/dbus_frame.cyr"
 include "src/dbus_marshal.cyr"
 include "src/dbus_unmarshal.cyr"
 
@@ -278,8 +280,101 @@ fn test_malformed_field_array() {
     return 0;
 }
 
+# ---- pre-1.0 audit regressions: hostile wire lengths ----
+# The unmarshaller trusted three separate wire-supplied lengths.
+# None was reachable through samvada's own paths — the framer only
+# yields a message once `avail >= total` — but this module ships in
+# the consumer bundle, and "safe because the caller validates" is
+# the shape of both 0.5.1 CRITICALs.
+fn t_hdr(p, body, flds) {
+    store8(p + 0, 108); store8(p + 1, 2); store8(p + 2, 1); store8(p + 3, 1);
+    store8(p + 4, body & 0xFF); store8(p + 5, (body >> 8) & 0xFF);
+    store8(p + 6, (body >> 16) & 0xFF); store8(p + 7, (body >> 24) & 0xFF);
+    store8(p + 8, 1); store8(p + 9, 0); store8(p + 10, 0); store8(p + 11, 0);
+    store8(p + 12, flds & 0xFF); store8(p + 13, (flds >> 8) & 0xFF);
+    store8(p + 14, (flds >> 16) & 0xFF); store8(p + 15, (flds >> 24) & 0xFF);
+    return 0;
+}
+fn t_u32(p, o, v) {
+    store8(p + o, v & 0xFF); store8(p + o + 1, (v >> 8) & 0xFF);
+    store8(p + o + 2, (v >> 16) & 0xFF); store8(p + o + 3, (v >> 24) & 0xFF);
+    return 0;
+}
+fn t_zero(p, n) { var i = 0; while (i < n) { store8(p + i, 0); i = i + 1; } return 0; }
+
+fn test_audit_hostile_lengths_refused() {
+    test_group("audit: wire lengths are checked against the message");
+    var sig = alloc(8);
+    var ptr = alloc(8);
+
+    # AUDIT-1: a string field claiming 0xFFFFFFF0 bytes
+    var p = alloc(256); t_zero(p, 256);
+    t_hdr(p, 0, 32);
+    store8(p + 16, 6); store8(p + 17, 1); store8(p + 18, 115); store8(p + 19, 0);
+    t_u32(p, 20, 0xFFFFFFF0);
+    dbus_unmarshal_set_limit(48);
+    assert_eq(dbus_unmarshal_find_field(p, 6, sig), dbus_unmarshal_malformed(),
+      "a string length past the field array is malformed");
+    assert_eq(dbus_unmarshal_str_at(p, 20, ptr), dbus_unmarshal_malformed(),
+      "and str_at refuses it rather than returning 4294967280");
+
+    # AUDIT-2: fields_len far beyond the message
+    var r = alloc(256); t_zero(r, 256);
+    t_hdr(r, 0, 0xFFFF);
+    store8(r + 16, 1); store8(r + 17, 1); store8(r + 18, 111); store8(r + 19, 0);
+    t_u32(r, 20, 4);
+    dbus_unmarshal_set_limit(48);
+    assert_eq(dbus_unmarshal_find_field(r, 9, sig), dbus_unmarshal_malformed(),
+      "a field array claiming to run past the message is refused");
+
+    # AUDIT-3: a body_len that lies
+    var b = alloc(256); t_zero(b, 256);
+    t_hdr(b, 0xFFFFFF, 8);
+    store8(b + 16, 8); store8(b + 17, 1); store8(b + 18, 103); store8(b + 19, 0);
+    store8(b + 20, 1); store8(b + 21, 117); store8(b + 22, 0);
+    dbus_unmarshal_set_limit(32);
+    dbus_unmarshal_body_begin(b);
+    assert_eq(dbus_unmarshal_body_remaining(), 8,
+      "the body cursor is clamped to the real extent, not 16777215");
+
+    # a signature length running past the end
+    var g = alloc(256); t_zero(g, 256);
+    t_hdr(g, 0, 24);
+    store8(g + 16, 8); store8(g + 17, 1); store8(g + 18, 103); store8(g + 19, 0);
+    store8(g + 20, 255);
+    dbus_unmarshal_set_limit(40);
+    assert_eq(dbus_unmarshal_find_field(g, 9, sig), dbus_unmarshal_malformed(),
+      "a signature length past the end is refused");
+
+    # with no limit declared, behaviour is unchanged for existing callers
+    dbus_unmarshal_set_limit(0);
+    assert_eq(dbus_unmarshal_limit(), 0, "limit 0 means 'not declared'");
+    return 0;
+}
+
+# The framer is the first line of defence and must stay so: it never
+# yields a message whose declared length exceeds the bytes present.
+fn test_audit_framer_rejects_absurd_headers() {
+    test_group("audit: the framer refuses impossible headers");
+    var p = alloc(64);
+    t_hdr(p, 0, 0xFFFFFFFF);
+    var t = dbus_frame_total(p, 16);
+    assert(t > dbus_frame_cap(), "a huge fields_len exceeds the cap (and is drained)");
+    assert(t > 0, "and stays POSITIVE — no 64-bit wrap on a 32-bit field");
+    t_hdr(p, 0xFFFFFFFF, 0xFFFFFFFF);
+    t = dbus_frame_total(p, 16);
+    assert(t > 0, "both fields maxed still yields a positive total");
+    store8(p + 0, 88);
+    assert_eq(dbus_frame_total(p, 16), dbus_frame_badendian(), "bad endian refused");
+    store8(p + 0, 108); store8(p + 3, 9);
+    assert_eq(dbus_frame_total(p, 16), dbus_frame_badproto(), "bad proto refused");
+    return 0;
+}
+
 fn main() {
     alloc_init();
+    test_audit_hostile_lengths_refused();
+    test_audit_framer_rejects_absurd_headers();
     test_marshal_align();
     test_hello_is_byte_identical();
     test_roundtrip_fields();
