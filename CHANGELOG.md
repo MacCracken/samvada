@@ -4,6 +4,80 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-09-09
+
+**N5 — the logind session layer.** samvada's **frozen public API now
+runs on a fully native Cyrius backend** against the real bus, with
+`kind = PURE_CYRIUS` and zero libsystemd anywhere in the path:
+
+```
+samvada_init       -> 0
+take_device(226,1) -> -13
+release_device     -> -22
+release            -> 0
+```
+
+`samvada_init -> 0` means connect + SASL + `Hello` +
+`GetSessionByPID` + `TakeControl` all succeeded natively. And
+`take_device -> -13` is **`AccessDenied`, a device-level error — not
+`-22` (`NotInControl`)**, which is precisely the milestone's exit
+criterion. `-22` from `release_device` is logind's own
+"device not taken", correct since the take failed.
+
+No public API change; the consumer bundle is untouched (26 exported
+fns, no native module until N6).
+
+### Added
+- **`src/dbus_session.cyr`** — the six logind calls, a serial
+  counter, reply correlation by `REPLY_SERIAL`, dbus-error-name to
+  errno mapping, and `dbus_native_populate()` which fills the SAME
+  FFI table the C shim fills.
+- `tests/dbus_session.tcyr` — 45 asserts.
+
+### Notes
+- **Written to the C shim's ABI, deliberately.** Every native fn
+  matches a frozen `fncallN` shape exactly — **including the
+  vestigial leading `bus` argument and the C-style out-pointer
+  pairs**, shapes no Cyrius-native design would choose. A mismatch
+  is a silent crash through `fncallN`, not a compile error.
+  The pin for this is the strongest in the suite: the tests call
+  each native fn **directly at its declared arity**, so a lost or
+  gained parameter fails the BUILD. Verified by mutation —
+  dropping `active_out` from `take_device` now yields
+  `error: 'dbus_native_take_device' expects 5 arguments, got 6`.
+- **Session selection: DOCUMENT, not validate.** `GetSessionByPID`
+  returns the caller's session, which is not necessarily seated —
+  on this host it returns a `Seat=""` session while seat0 belongs
+  to the display manager, so `TakeDevice` cannot get DRM master
+  there regardless. Validating the session's `Seat` would need
+  `org.freedesktop.DBus.Properties`, which ADR-0003's scope fence
+  defers past 1.0; widening the fence to produce a nicer error
+  message is a bad trade. samvada surfaces logind's error verbatim.
+- **Session paths are passed through opaquely.** logind returns
+  `/org/freedesktop/login1/session/_32`, where `_32` is hex-escaped
+  ASCII `'2'`. samvada only ever echoes the path back as a method
+  target — never parses or compares it — so no unescaping is
+  needed. Anything that starts comparing session ids must implement
+  it first.
+- **Error-parity is a contract, and it starts here.** The frozen API
+  promises sd-bus errno pass-through, so the native backend has to
+  reproduce libsystemd's name→errno map or consumers branching on
+  magnitudes break. Eight names are mapped; anything unmapped is
+  `-EIO` rather than a plausible-looking wrong value. The captured
+  `AccessDenied` reply maps to `-13`, matching the live run.
+- **An empty-body call carries NO signature field at all.**
+  `ReleaseControl` takes no arguments; emitting `SIGNATURE=""` is a
+  distinct encoding. Pinned.
+- **The serial wrap is a pure fn so it can be tested.** Driving
+  `next_serial()` to the u32 ceiling would take four billion calls;
+  extracting `dbus_session_wrap_serial()` makes the one branch that
+  matters a one-line assertion. Found because the first version of
+  that test could not fail.
+- **Unsolicited traffic is discarded, not treated as an error.**
+  The bus emits `NameAcquired` on the connect path before any match
+  rule exists, so a reader that takes the first message as its
+  answer gets the signal instead of its reply.
+
 ## [0.9.0] — 2026-09-09
 
 **N4 — marshal and unmarshal.** Native Cyrius now speaks dbus end

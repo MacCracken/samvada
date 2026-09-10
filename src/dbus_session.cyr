@@ -1,0 +1,399 @@
+# @internal — native-dbus logind session layer
+# dbus_session.cyr — the six logind calls, natively.
+#
+# This is the module that has to match the FROZEN FFI SHAPES, and
+# that constraint is not cosmetic. src/samvada.cyr dispatches with
+# exactly:
+#
+#   fncall1(bus_slot, bus_out)
+#   fncall4(sp_slot,  bus, pid, buf, len)
+#   fncall2(tc_slot,  bus, sess)
+#   fncall6(td_slot,  bus, sess, major, minor, fd_out, active_out)
+#   fncall4(rd_slot,  bus, sess, major, minor)
+#   fncall1(pump_slot, bus)
+#   fncall1(close_slot, bus)
+#
+# So every native fn below is written to the C shim's ABI, INCLUDING
+# the vestigial leading `bus` argument and the C-style out-pointer
+# pairs — shapes that would never be chosen for a Cyrius-native
+# design. Getting one wrong is a silent crash through fncallN, not a
+# compile error, which is why the arities are pinned by tests.
+#
+# In native mode the "bus handle" is simply the connected socket fd.
+#
+# SESSION SELECTION — the open question this milestone had to
+# settle, and the answer is DOCUMENT, not validate. GetSessionByPID
+# returns the CALLER's session, which is not necessarily seated: on
+# the development host it returns a `Seat=""` session while seat0
+# belongs to the display manager, so TakeDevice cannot get DRM
+# master there no matter what. Validating the session's `Seat`
+# property would require org.freedesktop.DBus.Properties, which
+# ADR-0003's scope fence defers past 1.0 — and widening the fence to
+# produce a better error message is a bad trade. samvada therefore
+# takes the caller's own session and surfaces logind's error
+# verbatim. See public-api.md.
+#
+# SESSION PATH ESCAPING — logind returns paths like
+# `/org/freedesktop/login1/session/_32`, where `_32` is the
+# hex-escaped ASCII of '2'. samvada passes the path through
+# OPAQUELY: it is only ever echoed back as a method target, never
+# parsed or compared, so no unescaping is needed. Anything that
+# starts comparing session ids must implement it first.
+
+fn dbus_session_max_serial() { return 4294967295; }
+
+var _dbs_serial = 0;
+var _dbs_last_err = 0;      # last ERROR_NAME mapped errno
+
+# Pure, so the wrap is reachable from a test. Driving
+# next_serial() to the u32 ceiling would take four billion calls;
+# this makes the one branch that matters a one-line assertion.
+fn dbus_session_wrap_serial(n) {
+    if (n > dbus_session_max_serial()) { return 1; }
+    if (n == 0) { return 1; }
+    return n;
+}
+
+fn dbus_session_next_serial() {
+    # Wrap within u32 and never yield 0, which the spec reserves.
+    _dbs_serial = dbus_session_wrap_serial(_dbs_serial + 1);
+    return _dbs_serial;
+}
+
+fn dbus_session_reset() {
+    _dbs_serial = 0;
+    _dbs_last_err = 0;
+    return 0;
+}
+
+fn dbus_session_last_error() { return _dbs_last_err; }
+
+# ---- error mapping ----
+# The frozen API promises "sd-bus errno pass-through", so the native
+# backend has to reproduce libsystemd's dbus-name -> errno mapping
+# or consumers branching on magnitudes break. This is the
+# error-parity contract N6 verifies; the names here are the ones
+# samvada's own calls can actually produce.
+fn _dbs_name_is(p, n, lit) {
+    if (n != strlen(lit)) { return 0; }
+    var i = 0;
+    while (i < n) {
+        if (load8(p + i) != load8(lit + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn dbus_session_map_error(p, n) {
+    if (_dbs_name_is(p, n, "org.freedesktop.DBus.Error.AccessDenied") != 0) { return -13; }
+    if (_dbs_name_is(p, n, "org.freedesktop.login1.NotInControl") != 0) { return -22; }
+    if (_dbs_name_is(p, n, "org.freedesktop.login1.DeviceNotTaken") != 0) { return -22; }
+    if (_dbs_name_is(p, n, "org.freedesktop.DBus.Error.InvalidArgs") != 0) { return -22; }
+    if (_dbs_name_is(p, n, "org.freedesktop.DBus.Error.NoSuchDevice") != 0) { return -19; }
+    if (_dbs_name_is(p, n, "org.freedesktop.DBus.Error.UnixProcessIdUnknown") != 0) { return -3; }
+    if (_dbs_name_is(p, n, "org.freedesktop.DBus.Error.ServiceUnknown") != 0) { return -2; }
+    if (_dbs_name_is(p, n, "System.Error.EBUSY") != 0) { return -16; }
+    return -5;                                   # -EIO for anything unmapped
+}
+
+# ---- the call/reply cycle ----
+# Send whatever the marshaller has built, then read until the reply
+# whose REPLY_SERIAL matches. Unsolicited traffic is DISCARDED, not
+# treated as an error: the bus emits NameAcquired on the connect
+# path before any match rule exists, and a reader that treats the
+# first message as its answer gets the signal instead.
+#
+# Returns 0 on a METHOD_RETURN (whose message is left addressable
+# via dbus_frame_base()), or a negative errno on an ERROR reply or
+# transport failure.
+fn dbus_session_call(fd, serial) {
+    var total = dbus_marshal_len();
+    var w = dbus_socket_write_all(fd, dbus_marshal_buf(), total);
+    if (w < 0) { return w; }
+
+    var spins = 0;
+    while (spins < 64) {
+        var r = dbus_frame_next();
+        while (r > 0) {
+            var p = dbus_frame_base();
+            var ty = dbus_unmarshal_type(p);
+            var sig = alloc(8);
+            var rs_off = dbus_unmarshal_find_field(p, dbus_marshal_f_replyser(), sig);
+            var mine = 0;
+            if (rs_off > 0) {
+                if (dbus_unmarshal_u32(p, rs_off) == serial) { mine = 1; }
+            }
+            if (mine == 1) {
+                if (ty == dbus_marshal_type_return()) { return 0; }
+                if (ty == dbus_marshal_type_error()) {
+                    var eo = dbus_unmarshal_find_field(p, dbus_marshal_f_errname(), sig);
+                    var rc = -5;
+                    if (eo > 0) {
+                        var ptr = alloc(8);
+                        var n = dbus_unmarshal_str_at(p, eo, ptr);
+                        rc = dbus_session_map_error(load64(ptr), n);
+                    }
+                    _dbs_last_err = rc;
+                    dbus_frame_advance(r);
+                    return rc;
+                }
+            }
+            # Not ours — a signal, or a reply to something else.
+            dbus_frame_advance(r);
+            r = dbus_frame_next();
+        }
+        if (r == dbus_frame_eof())       { return -107; }
+        if (r == dbus_frame_truncated()) { return -71; }
+        if (r == dbus_frame_badendian()) { return -71; }
+        if (r == dbus_frame_badproto())  { return -71; }
+
+        dbus_frame_maybe_compact();
+        var got = sys_read(fd, dbus_frame_tail(), dbus_frame_space());
+        if (got == 0) { dbus_frame_set_eof(); }
+        if (got < 0)  { return got; }
+        if (got > 0)  { dbus_frame_commit(got); }
+        spins = spins + 1;
+    }
+    return -110;                                  # -ETIMEDOUT
+}
+
+fn _dbs_put(p, s) {
+    var n = strlen(s);
+    var i = 0;
+    while (i < n) { store8(p + i, load8(s + i)); i = i + 1; }
+    return n;
+}
+
+# Build a logind method call. `path`/`plen` name the object; the
+# interface is chosen by `on_mgr`.
+fn dbus_session_begin_call(path, plen, member, mlen, on_mgr, serial) {
+    var t = alloc(128);
+    dbus_marshal_begin(dbus_marshal_type_call(), 0, serial);
+    dbus_marshal_field_str(dbus_marshal_f_path(), 111, path, plen);
+    dbus_marshal_field_str(dbus_marshal_f_member(), 115, member, mlen);
+    var n = 0;
+    if (on_mgr != 0) { n = _dbs_put(t, "org.freedesktop.login1.Manager"); }
+    if (on_mgr == 0) { n = _dbs_put(t, "org.freedesktop.login1.Session"); }
+    dbus_marshal_field_str(dbus_marshal_f_interface(), 115, t, n);
+    n = _dbs_put(t, "org.freedesktop.login1");
+    dbus_marshal_field_str(dbus_marshal_f_dest(), 115, t, n);
+    return 0;
+}
+
+# ================= FFI-shaped native backend =================
+# Every fn below matches a frozen fncallN shape exactly. The
+# `bus` argument is the connected socket fd.
+
+# fncall1(slot, bus_out) -> 0 | -err
+fn dbus_native_open_system_bus(bus_out) {
+    dbus_frame_init();
+    dbus_auth_reset();
+    dbus_session_reset();
+
+    var sa = alloc(dbus_socket_sockaddr_un_size());
+    var t = alloc(64);
+    var n = _dbs_put(t, "/run/dbus/system_bus_socket");
+    var alen = dbus_socket_addr_path(sa, t, n);
+    if (alen < 0) { return alen; }
+    var fd = dbus_socket_connect(sa, alen);
+    if (fd < 0) { return fd; }
+
+    var blob = alloc(64);
+    var bn = dbus_auth_write_blob(blob);
+    var w = dbus_socket_write_all(fd, blob, bn);
+    if (w < 0) { sys_close(fd); return w; }
+
+    var st = dbus_auth_need_more();
+    var spins = 0;
+    while (spins < 32) {
+        var got = sys_read(fd, dbus_frame_tail(), dbus_frame_space());
+        if (got <= 0) { spins = 99; }
+        if (got > 0) {
+            dbus_frame_commit(got);
+            st = dbus_auth_drain_lines();
+            if (st == dbus_auth_ok()) { spins = 99; }
+            if (st < 0) {
+                if (st != dbus_auth_need_more()) { spins = 99; }
+            }
+        }
+        spins = spins + 1;
+    }
+    if (st != dbus_auth_ok()) { sys_close(fd); return -13; }
+
+    # Hello, so the bus assigns a unique name. Without it every
+    # subsequent call is refused.
+    var serial = dbus_session_next_serial();
+    var pn = _dbs_put(t, "/org/freedesktop/DBus");
+    dbus_marshal_begin(dbus_marshal_type_call(), 0, serial);
+    dbus_marshal_field_str(dbus_marshal_f_path(), 111, t, pn);
+    var mn = _dbs_put(t, "Hello");
+    dbus_marshal_field_str(dbus_marshal_f_member(), 115, t, mn);
+    var inn = _dbs_put(t, "org.freedesktop.DBus");
+    dbus_marshal_field_str(dbus_marshal_f_interface(), 115, t, inn);
+    var dn = _dbs_put(t, "org.freedesktop.DBus");
+    dbus_marshal_field_str(dbus_marshal_f_dest(), 115, t, dn);
+    dbus_marshal_end_fields();
+    dbus_marshal_finish();
+    var rc = dbus_session_call(fd, serial);
+    if (rc < 0) { sys_close(fd); return rc; }
+    dbus_frame_advance(dbus_frame_next());
+
+    store64(bus_out, fd);
+    return 0;
+}
+
+# fncall4(slot, bus, pid, out_buf, out_buf_len) -> 0 | -err
+fn dbus_native_get_session_path(bus, pid, out_buf, out_len) {
+    if (out_buf == 0)  { return -22; }
+    if (out_len <= 0)  { return -22; }
+    var t = alloc(128);
+    var serial = dbus_session_next_serial();
+    var pn = _dbs_put(t, "/org/freedesktop/login1");
+    var m = alloc(64);
+    var mn = _dbs_put(m, "GetSessionByPID");
+    dbus_session_begin_call(t, pn, m, mn, 1, serial);
+    var sg = alloc(8);
+    var sn = _dbs_put(sg, "u");
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sg, sn);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_u32(pid);
+    dbus_marshal_finish();
+
+    var rc = dbus_session_call(bus, serial);
+    if (rc < 0) { return rc; }
+    var p = dbus_frame_base();
+    dbus_unmarshal_body_begin(p);
+    var ptr = alloc(8);
+    var n = dbus_unmarshal_next_str(ptr);
+    if (n < 0) { dbus_frame_advance(dbus_frame_next()); return -71; }
+    if (n + 1 > out_len) {
+        dbus_frame_advance(dbus_frame_next());
+        return -105;                              # -ENOBUFS
+    }
+    var src = load64(ptr);
+    var i = 0;
+    while (i < n) { store8(out_buf + i, load8(src + i)); i = i + 1; }
+    store8(out_buf + n, 0);
+    dbus_frame_advance(dbus_frame_next());
+    return 0;
+}
+
+# fncall2(slot, bus, sess_cstr) -> 0 | -err
+fn dbus_native_take_control(bus, sess) {
+    var t = alloc(64);
+    var mn = _dbs_put(t, "TakeControl");
+    var serial = dbus_session_next_serial();
+    dbus_session_begin_call(sess, strlen(sess), t, mn, 0, serial);
+    var sg = alloc(8);
+    var sn = _dbs_put(sg, "b");
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sg, sn);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_bool(0);                    # force = false
+    dbus_marshal_finish();
+    var rc = dbus_session_call(bus, serial);
+    if (rc == 0) { dbus_frame_advance(dbus_frame_next()); }
+    return rc;
+}
+
+# fncall2(slot, bus, sess_cstr) -> 0 | -err
+fn dbus_native_release_control(bus, sess) {
+    var t = alloc(64);
+    var mn = _dbs_put(t, "ReleaseControl");
+    var serial = dbus_session_next_serial();
+    dbus_session_begin_call(sess, strlen(sess), t, mn, 0, serial);
+    dbus_marshal_end_fields();                    # empty body: NO signature field
+    dbus_marshal_finish();
+    var rc = dbus_session_call(bus, serial);
+    if (rc == 0) { dbus_frame_advance(dbus_frame_next()); }
+    return rc;
+}
+
+# fncall6(slot, bus, sess_cstr, major, minor, fd_out, active_out) -> 0 | -err
+fn dbus_native_take_device(bus, sess, major, minor, fd_out, active_out) {
+    if (major < 0) { return -22; }
+    if (minor < 0) { return -22; }
+    var t = alloc(64);
+    var mn = _dbs_put(t, "TakeDevice");
+    var serial = dbus_session_next_serial();
+    dbus_session_begin_call(sess, strlen(sess), t, mn, 0, serial);
+    var sg = alloc(8);
+    var sn = _dbs_put(sg, "uu");
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sg, sn);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_u32(major);
+    dbus_marshal_body_u32(minor);
+    dbus_marshal_finish();
+
+    var rc = dbus_session_call(bus, serial);
+    if (rc < 0) { return rc; }
+    var p = dbus_frame_base();
+    dbus_unmarshal_body_begin(p);
+    var idx = dbus_unmarshal_next_fd_index();
+    var inactive = dbus_unmarshal_next_bool();
+    # The descriptor itself came via SCM_RIGHTS and was queued by
+    # the framer; the body carries only an index into that queue.
+    var fd = dbus_frame_take_fd();
+    store64(fd_out, fd);
+    store64(active_out, inactive);
+    dbus_frame_advance(dbus_frame_next());
+    if (fd < 0) { return -9; }                    # -EBADF: no fd arrived
+    return 0;
+}
+
+# fncall4(slot, bus, sess_cstr, major, minor) -> 0 | -err
+fn dbus_native_release_device(bus, sess, major, minor) {
+    if (major < 0) { return -22; }
+    if (minor < 0) { return -22; }
+    var t = alloc(64);
+    var mn = _dbs_put(t, "ReleaseDevice");
+    var serial = dbus_session_next_serial();
+    dbus_session_begin_call(sess, strlen(sess), t, mn, 0, serial);
+    var sg = alloc(8);
+    var sn = _dbs_put(sg, "uu");
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sg, sn);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_u32(major);
+    dbus_marshal_body_u32(minor);
+    dbus_marshal_finish();
+    var rc = dbus_session_call(bus, serial);
+    if (rc == 0) { dbus_frame_advance(dbus_frame_next()); }
+    return rc;
+}
+
+# fncall1(slot, bus) -> events | -err
+# Drains whatever is readable without blocking, and reports how many
+# whole messages went past. Bounded like the C shim's, and for the
+# same reason: the frozen signature takes no cap argument.
+fn dbus_native_pump_signals(bus) {
+    var drained = 0;
+    var r = dbus_frame_next();
+    while (r > 0) {
+        drained = drained + 1;
+        dbus_frame_advance(r);
+        if (drained >= 256) { return drained; }
+        r = dbus_frame_next();
+    }
+    return drained;
+}
+
+# fncall1(slot, bus) -> 0
+fn dbus_native_close_bus(bus) {
+    dbus_frame_close_fds();
+    if (bus > 0) { sys_close(bus); }
+    return 0;
+}
+
+# Populate an FFI table with the native backend. kind = PURE_CYRIUS.
+fn dbus_native_populate(t) {
+    if (t == 0) { return -22; }
+    samvada_ffi_set_slot(t, samvada_slot_open_system_bus(),  &dbus_native_open_system_bus);
+    samvada_ffi_set_slot(t, samvada_slot_get_session_path(), &dbus_native_get_session_path);
+    samvada_ffi_set_slot(t, samvada_slot_take_device(),      &dbus_native_take_device);
+    samvada_ffi_set_slot(t, samvada_slot_release_device(),   &dbus_native_release_device);
+    samvada_ffi_set_slot(t, samvada_slot_pump_signals(),     &dbus_native_pump_signals);
+    samvada_ffi_set_slot(t, samvada_slot_close_bus(),        &dbus_native_close_bus);
+    samvada_ffi_set_slot(t, samvada_slot_take_control(),     &dbus_native_take_control);
+    samvada_ffi_set_slot(t, samvada_slot_release_control(),  &dbus_native_release_control);
+    samvada_ffi_set_slot(t, samvada_slot_kind(), samvada_backend_kind_pure_cyrius());
+    return 0;
+}

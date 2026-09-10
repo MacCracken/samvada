@@ -5,6 +5,19 @@
 
 ## Version
 
+**0.10.0** — 2026-09-09. **N5** — the logind session layer.
+**samvada's frozen public API now runs on a fully native Cyrius
+backend** against the real bus, `kind = PURE_CYRIUS`, no libsystemd:
+`samvada_init -> 0` (connect + SASL + Hello + GetSessionByPID +
+TakeControl, all native) and `take_device -> -13` — `AccessDenied`,
+a **device-level** error, not the `-22` `NotInControl` that meant
+the call never got that far. `src/dbus_session.cyr` plus 45 asserts.
+Every native fn is written to the C shim's ABI including the
+vestigial `bus` argument and out-pointer pairs; the tests call each
+one directly at its declared arity so a wrong arity fails the BUILD
+rather than crashing through `fncallN`. Session selection decided:
+document, not validate. No public API or bundle change.
+
 **0.9.0** — 2026-09-09. **N4** — marshal and unmarshal. **Native
 Cyrius now speaks dbus end to end**: connect, SASL, build a `Hello`
 byte-identical to libsystemd's (128/128 bytes against the capture),
@@ -273,7 +286,7 @@ Live-bus end-to-end validation pending mabda's
   helpers.
 - `src/samvada.cyr` — public API surface (v0.x stable). Full
   surface map in `docs/architecture/public-api.md`.
-  - `samvada_version()` → packed u32 (0.9.0).
+  - `samvada_version()` → packed u32 (0.10.0).
   - `samvada_init(table)` → 0 | -err (opens bus, looks up
     session, **takes session control**). Returns `-EBUSY` (`-16`)
     on re-init without release as of 0.2.2; self-cleans on every
@@ -290,6 +303,9 @@ Live-bus end-to-end validation pending mabda's
     revokes devices taken via `TakeDevice` when control is
     released, so outstanding consumer fds become invalid.
   - `samvada_main(table)` → 0 | -err (C-shim entry point).
+- `src/dbus_session.cyr` — **native backend, N5**. The six logind
+  calls, serial counter, reply correlation, error mapping, and
+  `dbus_native_populate()`.
 - `src/dbus_marshal.cyr` — **native backend, N4**. Message encoder.
 - `src/dbus_unmarshal.cyr` — **native backend, N4**. Field lookup
   by code + an aligned body cursor.

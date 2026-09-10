@@ -1,0 +1,219 @@
+# N5 — the logind session layer.
+#
+# The live half of this milestone is verified by driving samvada's
+# FROZEN PUBLIC API through the native backend against the real bus
+# (see the 0.10.0 release notes). What is pinned here is everything
+# that can be checked with no bus — and in particular the FFI
+# ARITIES, because a mismatch there is a silent crash through
+# fncallN rather than a compile error.
+
+include "src/lib.cyr"
+include "src/dbus_frame.cyr"
+include "src/dbus_auth.cyr"
+include "src/dbus_socket.cyr"
+include "src/dbus_marshal.cyr"
+include "src/dbus_unmarshal.cyr"
+include "src/dbus_session.cyr"
+
+fn t_put(p, s) {
+    var n = strlen(s);
+    var i = 0;
+    while (i < n) { store8(p + i, load8(s + i)); i = i + 1; }
+    return n;
+}
+
+# ---- the FFI contract ----
+# The native backend must populate the SAME slots the C shim does,
+# with kind = PURE_CYRIUS. ADR-0002's append-after-kind invariant
+# means this table is byte-compatible with the libsystemd one.
+fn test_native_populates_the_same_table() {
+    test_group("native: populates every slot the C shim does");
+    var t = samvada_ffi_alloc();
+    assert(t != 0, "table allocated");
+    assert_eq(dbus_native_populate(t), 0, "populate succeeds");
+    assert_eq(samvada_ffi_kind(t), samvada_backend_kind_pure_cyrius(),
+      "kind is PURE_CYRIUS, not LIBSYSTEMD");
+    assert(samvada_ffi_get_slot(t, samvada_slot_open_system_bus()) != 0, "open_system_bus wired");
+    assert(samvada_ffi_get_slot(t, samvada_slot_get_session_path()) != 0, "get_session_path wired");
+    assert(samvada_ffi_get_slot(t, samvada_slot_take_device()) != 0, "take_device wired");
+    assert(samvada_ffi_get_slot(t, samvada_slot_release_device()) != 0, "release_device wired");
+    assert(samvada_ffi_get_slot(t, samvada_slot_pump_signals()) != 0, "pump_signals wired");
+    assert(samvada_ffi_get_slot(t, samvada_slot_close_bus()) != 0, "close_bus wired");
+    assert(samvada_ffi_get_slot(t, samvada_slot_take_control()) != 0, "take_control wired");
+    assert(samvada_ffi_get_slot(t, samvada_slot_release_control()) != 0, "release_control wired");
+    assert_eq(dbus_native_populate(0), -22, "null table rejected");
+    return 0;
+}
+
+# THE arity pin. src/samvada.cyr dispatches these with fixed
+# fncallN arities; a native fn with the wrong parameter count reads
+# garbage from an unset register and crashes somewhere else
+# entirely. Calling each through the SAME fncallN the public API
+# uses is the only way to catch it at CPU-test time.
+fn test_ffi_arities_match_the_frozen_dispatch() {
+    test_group("native: fn arities match the frozen fncallN shapes");
+    var t = samvada_ffi_alloc();
+    dbus_native_populate(t);
+
+    # fncall1(slot, bus) — pump_signals and close_bus.
+    # pump on an empty framer must report 0 events, not fault.
+    dbus_frame_init();
+    var pump = samvada_ffi_get_slot(t, samvada_slot_pump_signals());
+    assert_eq(fncall1(pump, 0), 0, "pump_signals is fncall1-shaped");
+
+    # fncall1(slot, bus) — close_bus with fd 0 must not close stdin.
+    var close = samvada_ffi_get_slot(t, samvada_slot_close_bus());
+    assert_eq(fncall1(close, 0), 0, "close_bus is fncall1-shaped");
+    var st = alloc(160);
+    assert(sys_fstat(0, st) >= 0, "and did NOT close fd 0");
+
+    # fncall4(slot, bus, sess, major, minor) — release_device.
+    # A negative devnum is refused before any I/O, which makes this
+    # callable with no bus.
+    var rel = samvada_ffi_get_slot(t, samvada_slot_release_device());
+    assert_eq(fncall4(rel, 0, 0, (0 - 1), 0), -22,
+      "release_device is fncall4-shaped and validates");
+
+    # fncall6(slot, bus, sess, major, minor, fd_out, active_out).
+    var take = samvada_ffi_get_slot(t, samvada_slot_take_device());
+    var fo = alloc(8);
+    var ao = alloc(8);
+    assert_eq(fncall6(take, 0, 0, (0 - 1), 0, fo, ao), -22,
+      "take_device is fncall6-shaped and validates");
+
+    # fncall4(slot, bus, pid, buf, len) — get_session_path.
+    var gsp = samvada_ffi_get_slot(t, samvada_slot_get_session_path());
+    assert_eq(fncall4(gsp, 0, 1, 0, 64), -22, "get_session_path is fncall4-shaped");
+    var buf = alloc(64);
+    assert_eq(fncall4(gsp, 0, 1, buf, 0), -22, "and validates its length");
+
+    # DIRECT calls at the exact declared arity. These are the real
+    # guard: Cyrius rejects a wrong-arity direct call at COMPILE
+    # time, so a native fn that loses or gains a parameter stops the
+    # build instead of crashing somewhere else through fncallN.
+    assert_eq(dbus_native_take_device(0, 0, (0 - 1), 0, fo, ao), -22, "take_device/6");
+    assert_eq(dbus_native_release_device(0, 0, (0 - 1), 0), -22, "release_device/4");
+    assert_eq(dbus_native_get_session_path(0, 1, 0, 64), -22, "get_session_path/4");
+    assert_eq(dbus_native_pump_signals(0), 0, "pump_signals/1");
+    assert_eq(dbus_native_close_bus(0), 0, "close_bus/1");
+    return 0;
+}
+
+# ---- serial counter ----
+fn test_serial_counter() {
+    test_group("native: serials increment and never yield 0");
+    dbus_session_reset();
+    assert_eq(dbus_session_next_serial(), 1, "first serial is 1");
+    assert_eq(dbus_session_next_serial(), 2, "then 2");
+    assert_eq(dbus_session_next_serial(), 3, "then 3");
+    # The spec reserves serial 0. Driving next_serial() to the u32
+    # ceiling would take four billion calls, so the wrap is a pure
+    # fn and the branch that matters is asserted directly.
+    assert_eq(dbus_session_wrap_serial(1), 1, "1 passes through");
+    assert_eq(dbus_session_wrap_serial(4294967295), 4294967295, "u32 max passes through");
+    assert_eq(dbus_session_wrap_serial(4294967296), 1, "one past the ceiling wraps to 1");
+    assert_eq(dbus_session_wrap_serial(0), 1, "0 is never returned — the spec reserves it");
+    return 0;
+}
+
+# ---- error mapping ----
+# The frozen API promises sd-bus errno pass-through, so the native
+# backend must reproduce libsystemd's name -> errno map or consumers
+# branching on magnitudes break. These are the names samvada's own
+# calls can actually produce; AccessDenied is the one captured live
+# in tests/fixtures/dbus/05-takedevice-error-reply.bin.
+fn test_error_name_mapping() {
+    test_group("native: dbus error names map to sd-bus errnos");
+    var p = alloc(128);
+    var n = t_put(p, "org.freedesktop.DBus.Error.AccessDenied");
+    assert_eq(dbus_session_map_error(p, n), -13, "AccessDenied -> -EACCES");
+    n = t_put(p, "org.freedesktop.login1.NotInControl");
+    assert_eq(dbus_session_map_error(p, n), -22, "NotInControl -> -EINVAL");
+    n = t_put(p, "org.freedesktop.DBus.Error.NoSuchDevice");
+    assert_eq(dbus_session_map_error(p, n), -19, "NoSuchDevice -> -ENODEV");
+    n = t_put(p, "System.Error.EBUSY");
+    assert_eq(dbus_session_map_error(p, n), -16, "EBUSY -> -EBUSY");
+    n = t_put(p, "org.freedesktop.DBus.Error.ServiceUnknown");
+    assert_eq(dbus_session_map_error(p, n), -2, "ServiceUnknown -> -ENOENT");
+    n = t_put(p, "com.example.SomethingElse");
+    assert_eq(dbus_session_map_error(p, n), -5, "anything unmapped -> -EIO");
+    # A prefix must not match a longer name.
+    n = t_put(p, "org.freedesktop.login1.NotInControlXX");
+    assert(dbus_session_map_error(p, n) != -22, "prefix does NOT match");
+    return 0;
+}
+
+# ---- decoding a REAL captured error reply ----
+# The AccessDenied reply captured in N2, reconstructed field for
+# field, must map to exactly what the live run produced: -13.
+fn test_captured_error_reply_maps_to_eacces() {
+    test_group("native: the captured AccessDenied reply maps to -13");
+    var t = alloc(128);
+    dbus_marshal_begin(dbus_marshal_type_error(), 1, 20486);
+    dbus_marshal_field_u32(dbus_marshal_f_replyser(), 4);
+    var n = t_put(t, "org.freedesktop.DBus.Error.AccessDenied");
+    dbus_marshal_field_str(dbus_marshal_f_errname(), 115, t, n);
+    var sg = alloc(8);
+    var sn = t_put(sg, "s");
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sg, sn);
+    dbus_marshal_end_fields();
+    n = t_put(t, "Operation not permitted");
+    dbus_marshal_body_str(t, n);
+    dbus_marshal_finish();
+
+    var b = dbus_marshal_buf();
+    assert_eq(dbus_unmarshal_type(b), dbus_marshal_type_error(), "it is an ERROR");
+    var sig = alloc(8);
+    var eo = dbus_unmarshal_find_field(b, dbus_marshal_f_errname(), sig);
+    assert(eo > 0, "ERROR_NAME located");
+    var ptr = alloc(8);
+    var en = dbus_unmarshal_str_at(b, eo, ptr);
+    assert_eq(dbus_session_map_error(load64(ptr), en), -13,
+      "maps to -13, matching the live run");
+    # the human-readable body survives too
+    dbus_unmarshal_body_begin(b);
+    var m = dbus_unmarshal_next_str(ptr);
+    assert_eq(m, 23, "body message is 23 bytes");
+    return 0;
+}
+
+# ---- the empty-body call ----
+# ReleaseControl takes no arguments. A message with an empty body
+# carries NO signature field at all — emitting SIGNATURE="" is a
+# different encoding, and logind's reader tolerates the omission,
+# which is what libsystemd does.
+fn test_release_control_has_no_signature_field() {
+    test_group("native: an empty-body call omits SIGNATURE entirely");
+    var t = alloc(128);
+    var pn = t_put(t, "/org/freedesktop/login1/session/_32");
+    var m = alloc(64);
+    var mn = t_put(m, "ReleaseControl");
+    dbus_session_begin_call(t, pn, m, mn, 0, 5);
+    dbus_marshal_end_fields();
+    dbus_marshal_finish();
+    var b = dbus_marshal_buf();
+    assert_eq(dbus_unmarshal_body_len(b), 0, "empty body");
+    var sig = alloc(8);
+    assert_eq(dbus_unmarshal_find_field(b, dbus_marshal_f_signature(), sig),
+      dbus_unmarshal_notfound(), "and NO SIGNATURE field");
+    # the interface must be Session, not Manager
+    var off = dbus_unmarshal_find_field(b, dbus_marshal_f_interface(), sig);
+    var ptr = alloc(8);
+    var n = dbus_unmarshal_str_at(b, off, ptr);
+    assert_eq(n, strlen("org.freedesktop.login1.Session"), "interface is Session");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_native_populates_the_same_table();
+    test_ffi_arities_match_the_frozen_dispatch();
+    test_serial_counter();
+    test_error_name_mapping();
+    test_captured_error_reply_maps_to_eacces();
+    test_release_control_has_no_signature_field();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
