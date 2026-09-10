@@ -65,7 +65,7 @@ anything else in this document.
 | HIGH | 2 | Fixed in 1.0.0 |
 | MEDIUM | 1 | Fixed in 1.0.0 |
 | **HIGH (functional)** | **1** | **Fixed in 1.0.0 — AUDIT-4** |
-| LOW (defence-in-depth) | 1 | **Hardened in 1.0.0** — wall-clock timeout still outstanding |
+| LOW (defence-in-depth) | 1 | **Hardened in 1.0.0** |
 | **Total** | **5** | |
 
 AUDIT-1..3 are one defect class: **the unmarshaller trusted
@@ -396,15 +396,55 @@ stale: it began arriving before the request left.
   since the `DESTINATION` check already refuses anything not
   addressed to us.
 
-- **A wall-clock timeout.** Still outstanding, and mutation C above
-  is the evidence for why it matters: `64 spins` is a *message*
-  budget, not a clock, the socket is blocking, and nothing calls
-  `setsockopt`. A bus that accepts a request and never answers hangs
-  the caller indefinitely. **Carried forward as the top 1.0.x
-  item.**
-
 - **Serial randomisation.** Explicitly not a fix. The broker rejects
   on sender identity, not serial secrecy.
+
+**3. A wall-clock timeout — also done, and mutation C was the
+argument for it.** Before this, samvada had no time-based bound of
+any kind: the socket is blocking, nothing called `setsockopt`, and
+the reply loop's `64 spins` counts *messages*, not seconds. A bus
+that accepted a request and then said nothing hung the caller
+indefinitely — inside a compositor, an indefinite freeze. This is
+not hypothetical; it is what mutation C did to the test suite.
+
+Two bounds, because one is not enough:
+
+- **`SO_RCVTIMEO`, armed at connect** (so it covers the SASL
+  handshake too), set to **25 s** to match `DBUS_DEFAULT_TIMEOUT`
+  and sd-bus's `BUS_DEFAULT_TIMEOUT` — samvada gives up on the same
+  schedule as every other client on the bus. Its `-EAGAIN` is
+  translated to `-ETIMEDOUT` rather than surfaced raw, which would
+  reach a consumer as a nonsensical "try again" on a blocking API.
+- **A per-call `CLOCK_MONOTONIC` deadline.** `SO_RCVTIMEO` bounds a
+  single receive but *not the call*: a peer dribbling one byte per
+  read satisfies every individual timeout while the call runs
+  unbounded. `CLOCK_MONOTONIC` specifically, so the deadline cannot
+  be extended (or fired early) by an NTP step or a suspend.
+
+A clock failure disables the deadline rather than failing the call
+— degrade to the previous behaviour, do not invent an error.
+
+Constants were measured on the host rather than copied from
+headers, as the sendmsg numbers were: `SO_RCVTIMEO = 20`,
+`SOL_SOCKET = 1`, `struct timeval` 16 bytes with `tv_usec` at +8,
+`clock_gettime` = 228 on x86_64 / 113 on aarch64. `sys_setsockopt`
+is used rather than a raw syscall because the aarch64 backend
+remaps setsockopt through an x86-compat shim.
+
+Verified live: `getsockopt` on the real bus fd after
+`dbus_native_open_system_bus` reports **25 s**.
+
+Pinned by `test_silent_peer_times_out_instead_of_hanging` and
+`test_expired_deadline_refuses_to_block`. The second exists because
+the deadline branch would otherwise be reachable only by a test
+willing to wait 25 seconds — so `dbus_session_set_timeout_ms` is
+`@internal`-settable purely to make the guard testable. **An
+untestable guard is how AUDIT-4 shipped.**
+
+Mutation-tested, and the two results differ in an instructive way:
+removing the `-EAGAIN` translation *fails* the pin (`got -11,
+expected -110`); removing the deadline does not fail the suite, it
+**hangs** it (exit 124). The hang is the finding.
 
 Pinned by `test_reply_addressed_elsewhere_is_refused`,
 `test_absent_destination_is_permitted` and
@@ -498,11 +538,15 @@ reply authenticity as wholly trusted.
 
 **1.0.0 remains a first stable release, not an audited-hardened
 one.** Resource exhaustion and build/supply-chain were still not
-covered, the consumer-validation lane never cleared, and samvada
-still has **no wall-clock timeout of any kind** — a bus that accepts
-a request and never answers hangs the caller indefinitely.
+covered and the consumer-validation lane never cleared.
 `SECURITY.md` says so, and the C shim is retained as a fallback for
 exactly this reason.
+
+What did change is that samvada no longer depends on the bus being
+well-behaved to make progress: it checks that a reply is addressed
+to it, refuses replies that predate their request, and gives up on
+a clock. All three exceed the synchronous sd-bus path they
+replaced.
 
 The strongest argument for that caution is AUDIT-4 itself: a defect
 that survived five releases, a full hand audit, a differential

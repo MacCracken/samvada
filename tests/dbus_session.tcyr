@@ -542,6 +542,85 @@ fn test_preplanted_reply_cannot_answer_a_later_call() {
     return 0;
 }
 
+# ---- THE TIMEOUT PINS ----
+# Before 1.0.0 samvada had no time-based bound of ANY kind: the
+# socket is blocking, nothing called setsockopt, and the reply
+# loop's "64 spins" counts MESSAGES, not seconds. A peer that
+# accepted the connection and then said nothing hung the caller
+# forever — inside a compositor, an indefinite freeze.
+#
+# This is not hypothetical: while mutation-testing the DESTINATION
+# guard, the over-strict variant did not fail the suite, it HUNG it.
+fn test_silent_peer_times_out_instead_of_hanging() {
+    test_group("native: a peer that never answers times out, it does not hang");
+    var pair = alloc(8);
+    store64(pair, 0);
+    assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, pair), 0,
+      "socketpair created");
+    var a = load64(pair) & 0xFFFFFFFF;
+    var b = (load64(pair) >> 32) & 0xFFFFFFFF;
+
+    # 200 ms rather than the 25 s default, so the pin runs fast. This
+    # is the same setsockopt dbus_socket_connect arms in production.
+    assert_eq(dbus_socket_set_recv_timeout(b, 0, 200000), 0,
+      "SO_RCVTIMEO accepted by the kernel");
+
+    dbus_session_reset();
+    dbus_frame_init();
+
+    # Nothing is EVER planted on `a`. The peer is simply silent.
+    var t0 = dbus_session_now_ms();
+    assert(t0 > 0, "the monotonic clock works — arch syscall number is right");
+    var rc = dbus_session_call(b, 99);
+    var elapsed = dbus_session_now_ms() - t0;
+
+    assert_eq(rc, -110,
+      "THE PIN: -ETIMEDOUT from an expired SO_RCVTIMEO, not a hang and not raw -EAGAIN");
+    var prompt = 0;
+    if (elapsed < 5000) { prompt = 1; }
+    assert_eq(prompt, 1, "and it gave up promptly rather than spinning out 64 reads");
+
+    dbus_session_reset();
+    sys_close(a);
+    sys_close(b);
+    return 0;
+}
+
+# The per-receive timeout above cannot bound the CALL: a peer that
+# dribbles one byte per read satisfies every individual SO_RCVTIMEO
+# while the call runs unbounded. The wall-clock deadline is what
+# closes that. Driving it with a zero budget reaches the branch
+# deterministically, with no slow peer to orchestrate.
+fn test_expired_deadline_refuses_to_block() {
+    test_group("native: an expired wall-clock deadline returns before blocking");
+    var pair = alloc(8);
+    store64(pair, 0);
+    assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, pair), 0,
+      "socketpair created");
+    var a = load64(pair) & 0xFFFFFFFF;
+    var b = (load64(pair) >> 32) & 0xFFFFFFFF;
+
+    dbus_session_reset();
+    dbus_frame_init();
+    assert_eq(dbus_session_set_timeout_ms(0), 0, "budget set to zero");
+
+    # No SO_RCVTIMEO is armed on `b`, so if the deadline check did
+    # NOT fire this call would block on a silent peer forever. That
+    # is precisely what makes this a real pin.
+    var rc = dbus_session_call(b, 77);
+    assert_eq(rc, -110, "THE PIN: the deadline fired before committing to a blocking receive");
+
+    # And reset must restore the default, or a short budget leaks
+    # into every later test in this file.
+    dbus_session_reset();
+    assert_eq(dbus_session_timeout_ms(), 25000,
+      "reset restored the 25 s default (the global resolves correctly)");
+
+    sys_close(a);
+    sys_close(b);
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_native_populates_the_same_table();
@@ -555,6 +634,8 @@ fn main() {
     test_reply_addressed_elsewhere_is_refused();
     test_absent_destination_is_permitted();
     test_preplanted_reply_cannot_answer_a_later_call();
+    test_silent_peer_times_out_instead_of_hanging();
+    test_expired_deadline_refuses_to_block();
     return assert_summary();
 }
 

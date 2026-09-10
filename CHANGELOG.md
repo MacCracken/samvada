@@ -72,6 +72,28 @@ checked neither):
   serials would otherwise leave open. A byte *count*, not an offset,
   because `maybe_compact()` slides the buffer.
 
+**Wall-clock timeouts — samvada previously had none at all.** The
+socket is blocking, nothing called `setsockopt`, and the reply
+loop's `64 spins` counts *messages*, not seconds; a bus that
+accepted a request and then said nothing hung the caller
+indefinitely. Two bounds now, because one is insufficient:
+- **`SO_RCVTIMEO` armed at connect** — so it covers the SASL
+  handshake too — set to **25 s**, matching `DBUS_DEFAULT_TIMEOUT`
+  and sd-bus's `BUS_DEFAULT_TIMEOUT`. Its `-EAGAIN` is translated to
+  `-ETIMEDOUT`, not surfaced raw, which would reach a consumer as a
+  nonsensical "try again" on a blocking API.
+- **A per-call `CLOCK_MONOTONIC` deadline** — `SO_RCVTIMEO` bounds a
+  single receive but not the *call*: a peer dribbling one byte per
+  read satisfies every individual timeout while the call runs
+  unbounded. Monotonic specifically, so no NTP step or suspend can
+  extend or prematurely fire it. A clock failure disables the
+  deadline rather than failing the call.
+
+Constants measured on the host, not copied from headers
+(`SO_RCVTIMEO=20`, `timeval` 16 bytes with `tv_usec` at +8,
+`clock_gettime` 228/x86_64, 113/aarch64). Verified live:
+`getsockopt` on the real bus fd reports 25 s.
+
 **No `SENDER` check, deliberately.** The intuitive guard — require
 `SENDER == org.freedesktop.login1` — would reject **every genuine
 reply**: the broker rewrites `SENDER` to the sender's *unique* id,
@@ -80,9 +102,12 @@ captured logind replies in `tests/fixtures/dbus/`. Pinning logind's
 unique id instead was rejected because a logind restart would
 strand a long-lived consumer with a stale pin.
 
-Live-verified end to end (unique name learned, `GetSessionByPID`
-accepted, `Inhibit` fd intact) and mutation-tested: removing either
-guard fails its own pin.
+Live-verified end to end (timeout armed at 25 s, unique name
+learned, `GetSessionByPID` accepted, `Inhibit` fd intact) and
+mutation-tested. The mutation results differ instructively: removing
+the `-EAGAIN` translation *fails* its pin (`got -11, expected
+-110`), while removing the deadline does not fail the suite — it
+**hangs** it (exit 124). The hang is the finding.
 
 Three further defects found and fixed, all the same class — **the
 unmarshaller trusted wire-supplied lengths without checking them

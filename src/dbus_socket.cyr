@@ -104,6 +104,42 @@ fn dbus_socket_addr_abstract(sa, name, namelen) {
 # them.
 fn dbus_socket_sock_cloexec() { return 524288; }   # SOCK_CLOEXEC
 
+# ---- bounding a blocking receive ----
+# Values verified on the host rather than copied from a header:
+# SOL_SOCKET=1, SO_RCVTIMEO=20, struct timeval is 16 bytes with
+# tv_sec at +0 and tv_usec at +8. A 1-second timeout on an idle
+# socketpair was measured returning -1/EAGAIN after 1.02s.
+#
+# sys_setsockopt is used rather than a raw syscall on purpose: the
+# aarch64 backend remaps setsockopt (54 -> 208) through an
+# x86-compat socket shim, so the stdlib wrapper is the only form
+# that is correct on both arches.
+fn dbus_socket_sol_socket()  { return 1; }
+fn dbus_socket_so_rcvtimeo() { return 20; }
+
+fn dbus_socket_set_recv_timeout(fd, secs, usecs) {
+    if (fd < 0)    { return -22; }
+    if (secs < 0)  { return -22; }
+    if (usecs < 0) { return -22; }
+    var tv = alloc(16);
+    store64(tv + 0, secs);
+    store64(tv + 8, usecs);
+    return sys_setsockopt(fd, dbus_socket_sol_socket(),
+      dbus_socket_so_rcvtimeo(), tv, 16);
+}
+
+# The receive timeout is armed HERE, at connect, not at first call —
+# so it covers the SASL handshake too. Before this, a peer that
+# accepted the connection and then said nothing hung samvada
+# forever: the socket is blocking, nothing else called setsockopt,
+# and the reply loop's "64 spins" is a MESSAGE budget, not a clock.
+# Inside a compositor that is an indefinite freeze.
+#
+# 25 seconds matches DBUS_DEFAULT_TIMEOUT and sd-bus's
+# BUS_DEFAULT_TIMEOUT, so samvada gives up on the same schedule as
+# every other client on the bus.
+fn dbus_socket_default_timeout_secs() { return 25; }
+
 fn dbus_socket_connect(sa, addrlen) {
     if (sa == 0)      { return -22; }
     if (addrlen <= 0) { return -22; }
@@ -115,6 +151,9 @@ fn dbus_socket_connect(sa, addrlen) {
         sys_close(fd);
         return rc;
     }
+    # Best-effort: a kernel that refuses the option must not stop us
+    # connecting. The call-level deadline is the real bound.
+    dbus_socket_set_recv_timeout(fd, dbus_socket_default_timeout_secs(), 0);
     return fd;
 }
 

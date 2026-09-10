@@ -117,6 +117,7 @@ fn dbus_session_reset() {
     _dbs_serial = 0;
     _dbs_last_err = 0;
     _dbs_uniqn = 0;
+    _dbs_timeout_ms = 25000;
     return 0;
 }
 
@@ -149,6 +150,61 @@ fn dbus_session_map_error(p, n) {
     if (_dbs_name_is(p, n, "System.Error.EBUSY") != 0) { return -16; }
     return -5;                                   # -EIO for anything unmapped
 }
+
+# ---- the clock ----
+# clock_gettime is not in the stdlib, so the arch numbers are pinned
+# here under the same house exception as dbus_sys.cyr's recvmsg:
+# 228 on x86_64, 113 on aarch64 (asm-generic). Verified on the host,
+# not copied from a header — as was struct timespec's shape, which
+# is 16 bytes with tv_sec at +0 and tv_nsec at +8.
+fn dbus_session_clock_nr() {
+    #ifdef CYRIUS_ARCH_AARCH64
+    return 113;
+    #endif
+    return 228;
+}
+
+# CLOCK_MONOTONIC, deliberately: a deadline must not be extendable
+# (or fired early) by an NTP step or a suspend/resume adjusting the
+# wall clock.
+fn dbus_session_clock_monotonic() { return 1; }
+
+var _dbs_ts = 0;
+
+# Monotonic milliseconds, or a negative errno if the clock fails.
+fn dbus_session_now_ms() {
+    if (_dbs_ts == 0) { _dbs_ts = alloc(16); }
+    if (_dbs_ts == 0) { return -12; }
+    store64(_dbs_ts + 0, 0);
+    store64(_dbs_ts + 8, 0);
+    var rc = syscall(dbus_session_clock_nr(),
+      dbus_session_clock_monotonic(), _dbs_ts);
+    if (rc < 0) { return rc; }
+    var sec  = load64(_dbs_ts + 0);
+    var nsec = load64(_dbs_ts + 8);
+    return sec * 1000 + nsec / 1000000;
+}
+
+# Matches DBUS_DEFAULT_TIMEOUT / sd-bus's BUS_DEFAULT_TIMEOUT, so
+# samvada gives up on the same schedule as every other bus client.
+var _dbs_timeout_ms = 25000;
+
+fn dbus_session_timeout_ms() { return _dbs_timeout_ms; }
+
+# @internal, and it exists for a specific reason: without it the
+# deadline branch below could only be reached by a test willing to
+# wait 25 seconds, and an untestable guard is how AUDIT-4 shipped.
+# Not reachable from the public API; dbus_session_reset() restores
+# the default so no test can leak a short timeout into another.
+fn dbus_session_set_timeout_ms(ms) {
+    if (ms < 0) { return -22; }
+    _dbs_timeout_ms = ms;
+    return 0;
+}
+
+# -EAGAIN and -EWOULDBLOCK are the same value on Linux (11), which
+# is what SO_RCVTIMEO reports when the receive budget expires.
+fn dbus_session_eagain() { return -11; }
 
 # Two small scratch words, reused rather than alloc'd per message:
 # the reply matcher can examine many messages per call and alloc()
@@ -210,6 +266,20 @@ fn dbus_session_call(fd, serial) {
     # otherwise leave open: an attacker who can get bytes into the
     # buffer early cannot have them answer a later call.
     var stale = dbus_frame_have();
+
+    # WALL-CLOCK DEADLINE for the whole call. SO_RCVTIMEO (armed at
+    # connect) bounds a single receive, but not the call: a peer that
+    # dribbles one byte per read satisfies every individual timeout
+    # while the call runs unbounded. The deadline is what actually
+    # closes that, and it is why the bound is a clock and not the
+    # pre-existing "64 spins", which counts MESSAGES.
+    #
+    # A clock failure disables the deadline rather than failing the
+    # call — degrade to the old behaviour, do not invent an error.
+    var deadline = 0;
+    var t0 = dbus_session_now_ms();
+    if (t0 >= 0) { deadline = t0 + dbus_session_timeout_ms(); }
+
     var total = dbus_marshal_len();
     var w = dbus_socket_write_all(fd, dbus_marshal_buf(), total);
     if (w < 0) { return w; }
@@ -287,6 +357,12 @@ fn dbus_session_call(fd, serial) {
         # fd — so the fd path was never once exercised. Measured on
         # the live bus via Inhibit: UNIX_FDS=1, take_fd() == -1.
         # The pump path always used recvmsg; this one did not.
+        # Out of time before committing to another blocking receive.
+        if (deadline > 0) {
+            var now = dbus_session_now_ms();
+            if (now >= deadline) { return -110; }
+        }
+
         var space = dbus_frame_space();
         if (space <= 0) { dbus_frame_set_eof(); }
         if (space > 0) {
@@ -294,6 +370,11 @@ fn dbus_session_call(fd, serial) {
             var got = dbus_sys_recv_fd_flags(fd, dbus_frame_tail(), space,
               fdslot, 0);
             if (got == 0) { dbus_frame_set_eof(); }
+            # SO_RCVTIMEO expired: the whole receive budget passed
+            # with nothing arriving. Report it as a timeout, not as
+            # the raw -EAGAIN, which would reach the consumer as a
+            # nonsensical "try again" on a blocking API.
+            if (got == dbus_session_eagain()) { return -110; }
             if (got < 0)  { return got; }
             if (got > 0)  { dbus_frame_commit(got); }
             var qfd = load64(fdslot);
@@ -354,6 +435,9 @@ fn dbus_native_open_system_bus(bus_out) {
     var spins = 0;
     while (spins < 32) {
         var got = sys_read(fd, dbus_frame_tail(), dbus_frame_space());
+        # SO_RCVTIMEO covers the handshake too: a peer that accepts
+        # the connection and then says nothing used to hang here.
+        if (got == dbus_session_eagain()) { sys_close(fd); return -110; }
         if (got <= 0) { spins = 99; }
         if (got > 0) {
             dbus_frame_commit(got);
