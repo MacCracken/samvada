@@ -254,3 +254,13 @@ rewritten and now self-sufficient — it includes `fmt`/`string` itself), then
 lesson that *a green gate measures the branch it executes*, run the seated-host
 path as well as the unseated one — a toolchain bump is exactly when a
 never-executed branch would surface.
+
+## Moved from cyrius's roadmap (2026-10-08) — for the next cyrius pin move
+
+cyrius no longer carries this repo's follow-ups; the items below were moved here from its roadmap. Each
+applies from the cyrius version it names. Everything else that changes between this repo's pin and cyrius
+6.7.6 is in cyrius's `CHANGELOG.md` and `docs/development/ecosystem-migration.md`.
+
+- **(cyrius ≥ 6.6.18) `sys_recvmsg` on Windows** — mabda's distlib verify compiles samvada's calls for
+  x86_64-windows and reports `sys_recvmsg` undefined there: the stdlib defines it for Linux and agnos only. Gate
+  the call off Windows, or file an issue with cyrius if a Windows decline stub is wanted.
