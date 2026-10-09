@@ -1,24 +1,29 @@
-# Public API surface (v0.x)
+# Public API surface (v1.0.1)
 
-This page is the canonical map of every exported symbol in
-`dist/samvada.cyr`, what it returns, what it requires, and which
-test pins it. It is written so a v1.0 pure-Cyrius marshaller (or
-a consumer reviewer) has a complete reference without having to
-re-read the source.
+This page is the canonical map of samvada's public contract: what
+each fn returns, what it requires, and which test pins it.
 
-The surface is intentionally small — five consumer-facing fns,
-one version probe, one C-shim entry, plus an internal FFI
-plumbing layer that consumers never see in their own
-signatures.
+The surface is intentionally small — **eight functions**: six
+consumer-facing (including the native entry point), plus two
+C-shim entries a native consumer should never call.
 
-`dist/samvada.cyr` defines 28 fns. Two of them
-(`_samvada_have_table`, `_samvada_slot`) carry the leading-
-underscore private convention and are implementation detail;
-the remaining **26 are exported and all 26 appear below** — 7 in
-§[Public, consumer-facing](#public-consumer-facing), 19 in
-§[Internal — FFI plumbing](#internal--ffi-plumbing). If that
-arithmetic stops holding, this page has rotted:
-`grep -c '^fn samvada' dist/samvada.cyr` is the check.
+**Since 1.0.1 this contract is enforced mechanically.**
+`tools/surface_check.py` diffs `dist/samvada.cyr` against
+`tools/public_surface.txt` on every CI run and fails on a new
+export, a removed one, a re-signature, or a `clean` fn that gains
+a fn-table parameter. Changing any of the eight requires editing
+the manifest *and* this page. Before 1.0.1 both the freeze and the
+no-FFI-types-in-signatures rule were enforced by review, and the
+A-6 audit walked a fn-table-returning public export past every
+gate that existed.
+
+> **What the bundle actually contains.** `dist/samvada.cyr`
+> defines **204** functions — the native dbus implementation
+> (`dbus_*`) and the FFI plumbing are in there too, because Cyrius
+> has no visibility mechanism. `@public` and `@internal` are
+> comments. Only the eight below are stable; everything else may
+> change in any release, and a consumer that calls one is on its
+> own. `grep -c '^fn ' dist/samvada.cyr` is the check.
 
 ## Stability contract
 
@@ -114,7 +119,7 @@ C-shim entry points. The table is allocated once and reused across
 init/release cycles.
 
 > **What the bundle actually exports.** `dist/samvada.cyr` exports
-> **198 functions**; the eight above are the ones this document
+> **204 functions**; the eight above are the ones this document
 > defines and the only ones that are stable. `@public` and
 > `@internal` are comments — Cyrius has no visibility mechanism — so
 > every internal is reachable by a consumer, including
@@ -166,9 +171,19 @@ No state, no allocations, always succeeds. Bumps lock-step with
 fn samvada_init(table) -> 0 | -err
 ```
 
-Stash the FFI fn-table, open the system bus, look up the
-caller's session object path via `GetSessionByPID`, then **take
-session control** via `TakeControl(b force=0)`. Calling
+Stash the FFI fn-table, open the system bus, look up the caller's
+session object path via `GetSessionByPID`, and validate that the
+`take_control` slot is wired.
+
+**It does not take session control.** 0.6.0 moved acquisition to
+the first successful `samvada_session_take_device`, because
+`TakeControl` runs logind's `session_prepare_vt()` — it sets
+`KDSKBMODE=K_OFF` and `KDSETMODE=KD_GRAPHICS`, i.e. it blanks the
+console and disables the keyboard. 0.5.1 did take it here, and so
+muted the user's console before any device had been asked for. See
+[ADR-0004](../adr/0004-session-control-lifecycle-and-signal-visibility.md)
+and §[Session-control lifecycle](#session-control-lifecycle-060-adr-0004),
+which this entry used to contradict. Calling
 `samvada_init` again **without** an intervening
 `samvada_release` returns `-16` (`-EBUSY`) rather than
 overwriting (and leaking) the live bus + scratch — the 0.2.2
@@ -225,12 +240,17 @@ rather than allowed to proceed into a guaranteed failure.
   closed, the public API is disarmed, and the next
   `samvada_init` starts clean instead of returning `-16` (MED-8;
   before 0.5.1 these paths leaked the `sd_bus` *and* left the
-  API armed on a half-initialised samvada). (c) *Failed in
-  between* — a scratch alloc failure (`-12`), a null
-  `open_system_bus` or `get_session_path` slot (`-38`), an
-  `open_system_bus` error, or `-107`: these return without
-  self-cleaning, so `_samvada_table` stays set and the next
-  `samvada_init` returns `-16`. Note that the `-38` from a null
+  API armed on a half-initialised samvada). (c) *Failed after the table was
+  stashed* — **every** such path calls `samvada_release()` itself
+  before returning, so the bus is closed if it was opened, the
+  scratch is wiped, the public API is disarmed, and the next
+  `samvada_init` starts clean rather than returning `-16`. This
+  covers the scratch alloc failure (`-12`), a null
+  `open_system_bus` / `get_session_path` / `take_control` slot
+  (`-38`), an `open_system_bus` error, `-107`, and a
+  `get_session_path` dispatch error — eight paths in
+  `src/samvada.cyr`, all self-cleaning. Pinned by
+  `test_failed_init_does_not_latch_ebusy`. Note that the `-38` from a null
   `get_session_path` slot is reached with the bus already open.
 
   **The rule a consumer should encode: always call
@@ -246,7 +266,7 @@ rather than allowed to proceed into a guaranteed failure.
 | `-12` (`-ENOMEM`) | alloc failure | scratch buffers couldn't be allocated |
 | `-38` (`-ENOSYS`) | slot unwired | the `open_system_bus`, `get_session_path` **or `take_control`** slot is null. The `take_control` case (new in 0.5.1) means the backend table predates 0.5.1 — rebuild the shim against the current `deps/samvada_main.c` |
 | `-107` (`-ENOTCONN`) | bus open returned NULL | C wrapper succeeded but didn't write a bus handle |
-| any other `< 0` | sd-bus errno pass-through | from `GetSessionByPID`: `-2` (no logind), `-13` (perm denied), `-113` (no session for pid). From `TakeControl`: `-13` (`AccessDenied` — the caller's euid is not the session's user, or logind refuses control of this session at all, which is the seatless case) |
+| any other `< 0` | sd-bus errno pass-through | from `GetSessionByPID`: `-2` (no logind / `ServiceUnknown`), `-13` (perm denied). The **native** backend's error mapper can additionally return `-110` (`-ETIMEDOUT`, the 25 s wall-clock deadline or an expired receive timeout), `-71` (`-EPROTO`, a malformed or truncated reply), `-19` (`NoSuchDevice`), `-3` (`NoSuchProcess`) and `-5` (`-EIO`, any unmapped error name). It cannot return `-113`, which earlier revisions of this page listed. From `TakeControl`: `-13` (`AccessDenied` — the caller's euid is not the session's user, or logind refuses control of this session at all, which is the seatless case) |
 
 **`-16` from `samvada_init` is ambiguous.** samvada returns it
 for its own double-init guard, *and* logind answers a
@@ -264,9 +284,10 @@ live verification.
   `test_init_rejects_null_kind`,
   `test_init_rejects_unknown_kind` — the `-22` rejects;
   `test_init_rejects_double_init` — the `-16` guard and its
-  release-clears-it half; `test_init_takes_session_control` —
-  the CRIT-1 regression pin, asserting `TakeControl` is
-  dispatched exactly once and *before* any device call;
+  release-clears-it half; `test_init_does_not_take_control` —
+  the ADR-0004 pin, asserting `TakeControl` is **not** dispatched
+  at init, and that a release which never took a device does not
+  dispatch `ReleaseControl` either;
   `test_init_rejects_table_without_take_control` — the new
   `-38`; `test_init_self_cleans_on_late_failure` — shape (b),
   including that a re-init after a self-clean is not `-16`. All
@@ -308,8 +329,13 @@ that delivered it (see `dbus-marshalling.md` §SCM_RIGHTS).
   which logind answers `NotInControl` unconditionally.
   `major` / `minor` are the caller's intended device node —
   typically `(226, N)` for `/dev/dri/cardN`. Both are
-  **range-checked at the C boundary**: `devnum_ok` in
-  `deps/samvada_main.c` rejects anything outside
+  **range-checked in whichever backend is active**, and both use
+  the same bound. Native: `dbus_session_devnum_ok` in
+  `src/dbus_session.cyr` (added 1.0.1 — the native backend lost
+  this check at the N6 cutover, so a value above `UINT32_MAX` was
+  silently truncated to its low 32 bits and a request for a
+  *different, valid device* went on the wire). C shim: `devnum_ok`
+  in `deps/samvada_main.c` rejects anything outside
   `[0, UINT32_MAX]` with `-EINVAL` (MED-2, 0.5.1). Before that
   they were cast `int64 -> uint32` with no check anywhere, so a
   negative or oversized value was silently truncated into a
@@ -333,6 +359,9 @@ that delivered it (see `dbus-marshalling.md` §SCM_RIGHTS).
   `samvada_release()` → `sys_close(fd)`*, never the reverse, and
   must not treat a surviving fd as a surviving capability.
 - **Post — the fd is close-on-exec.** The duplicate is made with
+  the **native** backend receives the descriptor with
+  `MSG_CMSG_CLOEXEC` on the `recvmsg` itself, so it is never
+  briefly cloexec-less. The **C shim** re-opens it with
   `fcntl(fd, F_DUPFD_CLOEXEC, 0)`, not `dup()`. `dup()` clears
   `FD_CLOEXEC` on the new descriptor, so before 0.5.1 the
   DRM-master fd survived any `execve` the consumer performed and
@@ -342,7 +371,7 @@ that delivered it (see `dbus-marshalling.md` §SCM_RIGHTS).
 
 | rc | Meaning | When |
 |---|---|---|
-| `>= 0` | fd | `TakeDevice` and the `F_DUPFD_CLOEXEC` both succeeded |
+| `>= 0` | fd | `TakeDevice` succeeded and the descriptor arrived — natively via `SCM_RIGHTS` with `MSG_CMSG_CLOEXEC`, or via the shim's `F_DUPFD_CLOEXEC` |
 | `-22` (`-EINVAL`) | not initialized, **or** bad devnum, **or** `NotInControl` | four unrelated causes squash to this one value — see the [error catalog](#error-code-catalog) |
 | `-38` (`-ENOSYS`) | slot unwired | `take_device` slot is null |
 | `-107` (`-ENOTCONN`) | bus not open | `samvada_init` early-failed; `_samvada_bus == 0` |
@@ -788,12 +817,14 @@ page cannot enumerate.
 
 ## Test coverage map
 
-Each public symbol's pins in `tests/samvada.tcyr` — 23 groups,
-**114 asserts**, all green with no bus, no logind and no device:
+Each public symbol's pins in `tests/samvada.tcyr` — **162
+asserts**, all green with no bus, no logind and no device. The
+suite as a whole is **585 asserts** across seven files; see
+[`state.md`](../development/state.md) for the per-file split:
 
 | Fn | Test group | Asserts |
 |---|---|---|
-| `samvada_version` | `v0.5.1 packed triple` | 4 (packed + 3 lanes) |
+| `samvada_version` | `v1.0.1 packed triple` | 4 (packed + 3 lanes) |
 | `samvada_init` (null) | `init rejects null table` | 1 |
 | `samvada_init` (NULL kind) | `init rejects NULL-kind table` | 2 (alloc + reject) |
 | `samvada_init` (unknown kind) | `init rejects an unknown backend kind` | 2 (`kind=99` rejected, `PURE_CYRIUS` accepted) |

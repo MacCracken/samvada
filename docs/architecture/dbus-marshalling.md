@@ -2,7 +2,7 @@
 
 This page documents the bytes that flow across the dbus socket
 when samvada's v0.x C shim calls into logind. It is *not* a
-general dbus tutorial — it is the slice of the spec the v0.5.1
+general dbus tutorial — it is the slice of the spec the v1.0.1
 fn-table actually exercises, written so the v1.0 pure-Cyrius
 marshaller has a concrete target to replace the libsystemd
 calls against.
@@ -18,7 +18,7 @@ Every member name, signature and argument direction below was
 see [§Verification against logind](#verification-against-logind)
 for the exact commands and the raw output.
 
-## What samvada v0.5.1 sends
+## What samvada v1.0.1 sends
 
 Five method calls, one acknowledgement it is *obliged* to send
 but does not yet, and two signals it does not yet receive. Every

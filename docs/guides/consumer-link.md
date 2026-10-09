@@ -1,22 +1,95 @@
-# Linking samvada into a consumer (v0.5.1)
+# Linking samvada into a consumer (v1.0.1)
 
-samvada ships **only** the Cyrius API surface. It does not link
-`libsystemd`. Consumer projects that want logind DRM-master
-delegation build the C shim (`deps/samvada_main.c`) and link
-`libsystemd` themselves.
+**Read the native path and stop.** As of 1.0, samvada speaks dbus
+natively in Cyrius — no C, no `libsystemd`, no `pkg-config`, no
+two-stage build, nothing to link. Adding the dependency and
+calling one function is the entire integration.
 
-The libsystemd dependency lives at the consumer's edge, and
-disappears at v1.0 when native Cyrius dbus lands
-([ADR-0003](../adr/0003-native-cyrius-dbus.md)) — without
-touching consumer `.cyr` code.
+The libsystemd **C shim** (`deps/samvada_main.c`) is still in the
+tree as a fallback and as the differential reference, and it
+retires at 1.1.0. Its two-stage recipe is documented further down
+because it is verified and someone may need it — but **new
+consumers should not use it.**
 
-> **Every command on this page was executed and verified against
-> cyrius 6.6.1, libsystemd 261 and a running `systemd-logind` on
-> 2026-09-09.** The pre-0.5.1 version of this guide documented a
-> build that could not link and a compiler flag that does not
-> exist; see [§What changed in 0.5.1](#what-changed-in-051).
+> **Every command on this page was executed and verified against a
+> running `systemd-logind`.** The native path was re-verified on
+> cyrius 6.6.2 for 1.0.1; the C-shim commands were verified
+> against cyrius 6.6.1 and libsystemd 261 on 2026-09-09.
 
-## Prerequisites
+## Adding samvada to your `cyrius.cyml`
+
+```cyml
+[deps.samvada]
+git     = "https://github.com/MacCracken/samvada.git"
+tag     = "1.0.1"
+modules = ["dist/samvada.cyr"]
+```
+
+samvada's tags are **unprefixed** — `1.0.1`, not `v1.0.1`. Every
+tag pushed to the repo is bare.
+
+> **Do not pin below 1.0.1**, and there are two independent
+> reasons, either of which is disqualifying.
+>
+> **Below 0.5.1**, `samvada_session_take_device()` could not
+> succeed in **any** environment — samvada never sent logind's
+> mandatory `TakeControl`, so every call returned
+> `org.freedesktop.login1.NotInControl`
+> ([audit CRIT-1](../audit/2026-09-09-audit.md)).
+>
+> **Below 1.0.1**, the native backend read replies with plain
+> `read()`, which makes the kernel **discard** the `SCM_RIGHTS`
+> payload — so `take_device` could only ever return `-EBADF`
+> (AUDIT-4) — and it popped a shared fd queue FIFO, so once
+> descriptors did arrive it could hand back the one from an
+> unrelated `ResumeDevice` signal. Both are fixed in 1.0.1.
+
+> **Commit your `cyrius.lock`.** The bundle is fetched from a git
+> tag and samvada's tags are lightweight and unsigned, so the
+> lock's commit pin is the only thing that makes a repointed tag
+> fail loudly rather than resolve silently. See
+> [`SECURITY.md`](../../SECURITY.md).
+
+## The native build
+
+Nothing to compile but your own Cyrius code.
+
+```sh
+cyrius deps                                  # pulls dist/samvada.cyr + dist/samvada.deps
+cyrius build src/main.cyr build/myapp        # done
+```
+
+```cyr
+include "lib/samvada.cyr"
+
+var rc = samvada_native_init();                 # connect: socket, SASL, Hello, session
+if (rc < 0) { return rc; }
+
+var fd = samvada_session_take_device(226, 0);   # a DRM node
+if (fd < 0) { samvada_release(); return fd; }
+# ... use fd ...
+samvada_session_release_device(226, 0);
+samvada_release();
+```
+
+`samvada_native_init()` takes no arguments **by design**: CLAUDE.md
+forbids exposing an FFI table in a public signature, so a native
+consumer never handles one. Do not call `samvada_init()` or
+`samvada_main()` — those are the C-shim entry points.
+
+### Prerequisites (native)
+
+The Cyrius toolchain. That is the whole list. No C compiler, no
+`pkg-config`, no `libsystemd`, no `cycc`, no `objcopy`.
+
+---
+
+## The C-shim build (fallback — retires at 1.1.0)
+
+Everything below this line is the **libsystemd** path. Skip it
+unless you are deliberately linking the reference backend.
+
+### Prerequisites (C shim only)
 
 - **libsystemd headers + library**:
   - Debian / Ubuntu: `apt install libsystemd-dev`
@@ -34,28 +107,6 @@ pkg-config --modversion libsystemd      # 245+ recommended
 command -v cycc
 ```
 
-## Adding samvada to your `cyrius.cyml`
-
-```cyml
-[deps.samvada]
-git = "https://github.com/MacCracken/samvada.git"
-tag = "0.5.1"
-modules = ["dist/samvada.cyr"]
-```
-
-samvada's tags are **unprefixed** — `0.5.1`, not `v0.5.1`. Every
-tag pushed to the repo is bare (`git tag` → `0.2.0 … 0.5.0`); the
-`tag = "v0.2.0"` line this guide carried until 0.5.1 resolves to
-nothing at all.
-
-> **Do not pin below 0.5.1.** Every release from 0.2.0 through
-> 0.5.0 shipped a `samvada_session_take_device()` that could not
-> succeed in **any** environment — samvada never sent logind's
-> mandatory `TakeControl`, so every call returned
-> `org.freedesktop.login1.NotInControl`
-> ([audit CRIT-1](../audit/2026-09-09-audit.md)). Those tags are
-> not merely older; they are non-functional for the one thing
-> this library exists to do.
 
 `cyrius deps` copies each path in `modules` into `lib/`, so the
 API surface lands at `lib/samvada.cyr` and the compiler
@@ -77,11 +128,11 @@ builds the fn-table and hands it to samvada; you never see it.
 `cyrius deps` copies only the `modules` list into `lib/`. It does
 **not** create a `lib/samvada/` directory — the path
 `lib/samvada/deps/samvada_main.c`, which this guide gave until
-0.5.1, does not exist on any machine. The full checkout is cached
+1.0.1, does not exist on any machine. The full checkout is cached
 whole, keyed by tag:
 
 ```
-~/.cyrius/deps/samvada/0.5.1/deps/samvada_main.c
+~/.cyrius/deps/samvada/1.0.1/deps/samvada_main.c
 ```
 
 Most consumers vendor a copy into their own `deps/` rather than
@@ -90,7 +141,7 @@ way — and the release artifact bundle ships the shim source for
 exactly this. It is one self-contained `.c` file with no private
 headers. The recipes below assume a vendored `deps/`.
 
-## The build
+### The build steps
 
 Three objects get linked: the C shim, your Cyrius code, and your
 own `main()`.
@@ -206,7 +257,11 @@ and fixed in 6.6.2.
 `samvada_shim_init()` builds the fn-table in file-scope static
 storage and calls `samvada_main(table)`, which calls
 `samvada_init`: it opens the system bus, resolves your session
-via `GetSessionByPID`, and **takes session control**. The table
+via `GetSessionByPID`, and validates the backend's `take_control`
+slot is populated. It does **not** take session control — 0.6.0
+moved that to the first `take_device`, because `TakeControl` runs
+logind's `session_prepare_vt()` and blanks the console
+([ADR-0004](../adr/0004-session-control-lifecycle-and-signal-visibility.md)). The table
 must be static because samvada *borrows* the pointer and re-reads
 it on every dispatch — it never copies it.
 
@@ -395,8 +450,9 @@ A second bus connection is not a workaround: per
 bound to the connection that called `TakeControl` — which is
 samvada's. See
 [`dbus-marshalling.md`](../architecture/dbus-marshalling.md) for
-the wire detail and roadmap §N0, which is where the
-signal-visibility contract gets decided before any of it is
+the wire detail, and
+[ADR-0004](../adr/0004-session-control-lifecycle-and-signal-visibility.md)
+for the conditions under which any of it is
 built.
 
 The practical consequence for a compositor: logind revokes
@@ -454,7 +510,7 @@ Two more things worth stating plainly:
    success value leaking through — and now returns `0` as the
    contract always said. Both are non-negative, so a consumer
    branching on `rc < 0` needs no edit.
-7. **Re-pin to `0.5.1`.**
+7. **Re-pin to `1.0.1`.**
 
 Behaviour you get for free, with no code change:
 `TakeControl` / `ReleaseControl` around the session (which is
@@ -464,6 +520,33 @@ survives your `execve`, major/minor range-checking at the C
 boundary, a 256-event cap on `samvada_pump_signals()`, and
 `samvada_init()` self-cleaning on late failures so a failed init
 no longer leaks the bus and leaves the API armed.
+
+## Upgrading from 0.5.1 to 1.0.1
+
+No `.cyr` signature changes — the eight-fn public surface is
+frozen, and since 1.0.1 it is frozen *mechanically*
+(`tools/surface_check.py` runs in CI). What changes underneath
+you:
+
+1. **Switch to `samvada_native_init()`** and delete the entire C
+   build: the shim object, `pkg-config`, the `cycc` object step,
+   `objcopy`, and your `samvada_shim_init()` call. Your own
+   `main()` no longer needs to exist for samvada's sake.
+2. **Session control moved** (0.6.0, ADR-0004). `samvada_init` no
+   longer takes it; the first `take_device` does, and the last
+   `release_device` gives it back. If you relied on control being
+   held from init, you were relying on the behaviour that blanked
+   the console.
+3. **New error codes reach you** from the native backend: `-110`
+   (`-ETIMEDOUT`, the 25 s wall-clock deadline or an expired
+   receive timeout) and `-71` (`-EPROTO`, a malformed or truncated
+   reply). Both are `< 0`, so existing branching is unaffected.
+4. **Out-of-range device numbers are now rejected**
+   (`0 ≤ v ≤ UINT32_MAX`, `-EINVAL`) rather than silently
+   truncated to 32 bits. If you were passing a value above
+   `UINT32_MAX` you were opening a *different device*.
+5. Nothing to do about the C shim: it still builds and still
+   works. It retires at 1.1.0.
 
 ## What changed in 0.5.1
 

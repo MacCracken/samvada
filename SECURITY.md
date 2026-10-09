@@ -202,7 +202,7 @@ defence is so a deployment can judge whether it holds.
   against and substituted bytes are accepted silently. Consumers
   should commit `cyrius.lock` and review the commit a version bump
   moves to.
-- **`dist/samvada.cyr` exports 198 functions; the documented public
+- **`dist/samvada.cyr` exports 204 functions; the documented public
   surface is eight.** `@public` and `@internal` are comments with no
   mechanical meaning — Cyrius has no visibility mechanism — so every
   internal is consumer-reachable. This is the premise AUDIT-1 already
@@ -274,8 +274,28 @@ defended is misleading about what is wired.
 
 | Date       | Pass                                   | Target  | Report |
 |------------|----------------------------------------|---------|--------|
+| 2026-09-10 | A-lane completion — the dimensions 1.0.0 did not cover | 1.0.1 | [`docs/audit/2026-09-09-native-audit.md`](docs/audit/2026-09-09-native-audit.md) §A lane, and [`CHANGELOG.md`](CHANGELOG.md) |
+| 2026-09-09 | Pre-1.0 audit of the native marshaller + reply forgery | 1.0.0 | [`docs/audit/2026-09-09-native-audit.md`](docs/audit/2026-09-09-native-audit.md) |
 | 2026-09-09 | P(-1) hardening review + security audit | 0.5.1  | [`docs/audit/2026-09-09-audit.md`](docs/audit/2026-09-09-audit.md) |
 | 2026-05-01 | Hardening review                       | 0.2.2   | [`docs/audit/2026-05-01-hardening-review.md`](docs/audit/2026-05-01-hardening-review.md) |
+
+**The 1.0 line's two passes, and what they did not cover.** The
+1.0.0 audit planned seven dimensions and covered four, finding
+four defects (AUDIT-1..4) — including one that meant `take_device`
+could never return a working descriptor at all — and closing the
+reply-forgery question. The remaining dimensions became the
+roadmap's *A lane*, and 1.0.1 worked through them, fixing ten more
+defects. Between them: fourteen defects, two of which meant
+samvada handed a consumer the wrong descriptor or the wrong
+device, silently, and returned success.
+
+**1.0.1 is a stable release, not an audited-hardened one.**
+Resource exhaustion is partly covered, build/supply-chain partly,
+and the protocol state machine beyond reply forgery only partly.
+What is still uncovered is listed in
+[`docs/development/roadmap.md`](docs/development/roadmap.md) §The
+A lane rather than omitted, and the C shim is retained as a
+fallback for exactly that reason.
 
 The project uses two tiers deliberately. A **hardening review**
 is an internal per-file walk of the current surface plus its

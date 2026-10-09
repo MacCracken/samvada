@@ -23,7 +23,24 @@ Cyrius dbus client for the AGNOS suite.
 3. Build the smoke binary: `cyrius build src/main.cyr build/samvada`.
 4. Run the test suite: `cyrius test`.
 5. Make changes under `src/`, `tests/`, `deps/`, or `docs/`.
-6. Re-run lint / fmt / vet locally before opening a PR.
+6. Re-run the full local gate sweep before opening a PR:
+
+   ```sh
+   cyrius lint src/*.cyr
+   cyrius fmt --check src/*.cyr tests/*.tcyr
+   cyrius vet src/main.cyr
+   cyrius distlib                                    # must leave dist/ clean
+   cyrius build src/main.cyr build/samvada
+   cyrius test
+   python3 tools/surface_check.py . tools/public_surface.txt
+   ```
+
+   The last one freezes the eight-fn public API. **If you add,
+   remove or re-sign a public fn, CI fails until you edit
+   `tools/public_surface.txt` and document the change in
+   `docs/architecture/public-api.md`.** That is deliberate — until
+   1.0.1 the freeze was enforced by review, and an audit walked a
+   fn-table-returning public export past every other gate.
 7. Submit a PR.
 
 ## Project Structure
@@ -34,7 +51,13 @@ src/lib.cyr            Include chain — single source of truth for [lib].
 src/samvada.cyr        Public API surface (stable across v0.x).
 src/samvada_ffi.cyr    FFI fn-table layout (slot offsets + helpers).
 src/test.cyr           Top-level test entry referenced by [build].test.
-tests/samvada.tcyr     Primary CPU test suite.
+tests/samvada.tcyr     Public API + FFI layout (162 asserts).
+tests/dbus_session.tcyr  logind layer, reply provenance, fd ownership (131).
+tests/dbus_frame.tcyr    Framing, receive buffer, fd queue (79).
+tests/dbus_codec.tcyr    Marshal / unmarshal (76).
+tests/dbus_sys.tcyr      SCM_RIGHTS, cmsg guards (66).
+tests/dbus_auth.tcyr     SASL handshake (65).
+tests/fixtures/dbus/     Real captured wire bytes.
 tests/samvada.bcyr     Benchmark harness.
 tests/samvada.fcyr     Fuzz harness.
 deps/samvada_main.c    libsystemd C shim — built by consumers.

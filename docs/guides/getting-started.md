@@ -1,26 +1,44 @@
 # Getting started with samvada
 
+> **Consuming samvada?** You want
+> [`consumer-link.md`](consumer-link.md) instead — the whole
+> integration is one dependency and one function call. This page
+> is for working *on* samvada.
+
 ## Build
 
 ```sh
-cyrius deps                              # resolve dependencies
-cyrius build src/main.cyr build/samvada    # compile
-cyrius test                              # run [build].test + tests/*.tcyr
+cyrius deps                                 # resolve stdlib
+cyrius build src/main.cyr build/samvada     # smoke build
+cyrius test                                 # [build].test + tests/*.tcyr (585 asserts)
 ```
 
 ## Layout
 
-- `src/main.cyr` — entry point. Top-level `var r = main(); syscall(SYS_EXIT, r);`.
-- `src/test.cyr` — top-level test entry referenced by `cyrius.cyml [build].test`. Add unit cases here or in `tests/samvada.tcyr`.
-- `tests/samvada.tcyr` — primary test suite (`cyrius test` auto-discovers).
-- `tests/samvada.bcyr` — benchmarks (`cyrius bench`).
-- `tests/samvada.fcyr` — fuzz harness (`cyrius fuzz`).
+- `src/main.cyr` — standalone smoke entry. Top-level
+  `var r = main(); syscall(SYS_EXIT, r);`.
+- `src/samvada.cyr` — the eight-fn public surface.
+- `src/samvada_ffi.cyr` — fn-table layout (11 slots, 88 bytes).
+- `src/dbus_*.cyr` — the native dbus implementation. See
+  [`state.md`](../development/state.md) for what each module owns.
+- `src/test.cyr` — `cyrius.cyml [build].test` entry.
+- `tests/*.tcyr` — the suite; `cyrius test` auto-discovers.
+- `tests/fixtures/dbus/` — real captured wire bytes, labelled real
+  vs synthetic in `MANIFEST.md`.
 
 ## Adding a feature
 
-1. Edit `src/main.cyr` (or add a new module and `include` it).
-2. Add a test case to `tests/samvada.tcyr`.
-3. Run `cyrius test`.
-4. Bump `VERSION` and add a CHANGELOG entry before tagging.
+1. Write the code and a test in the same change.
+2. Run `cyrius test`.
+3. **Prove the test can fail.** Break the code deliberately and
+   confirm the test catches it. This project's three worst bugs
+   all shipped behind green suites, because every test that could
+   have caught them took the error branch. A test you have not
+   watched fail is not evidence.
+4. Run the full gate sweep — see
+   [`CONTRIBUTING.md`](../../CONTRIBUTING.md). Changing the public
+   surface requires editing `tools/public_surface.txt`.
+5. Update `CHANGELOG.md`; bump `VERSION` before tagging.
 
-See [`../adr/template.md`](../adr/template.md) when a non-trivial design choice deserves an ADR.
+See [`../adr/template.md`](../adr/template.md) when a non-trivial
+design choice deserves an ADR.

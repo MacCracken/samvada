@@ -19,8 +19,8 @@
 #
 # SCOPE: only `samvada_*` names are frozen here, minus the
 # samvada_ffi_ / samvada_slot_ / samvada_backend_kind_ plumbing. The
-# bundle exports ~198 functions in total (the dbus_* internals among
-# them) because Cyrius has no visibility mechanism; that larger
+# bundle exports far more than that in total (the dbus_* internals
+# among them) because Cyrius has no visibility mechanism; that larger
 # surface is documented as UNSTABLE in docs/architecture/public-api.md
 # and is deliberately not frozen.
 #

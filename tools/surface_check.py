@@ -20,7 +20,7 @@ something.
 
 SCOPE, stated rather than implied: only functions named `samvada_*`
 are treated as public, minus the `samvada_ffi_` / `samvada_slot_` /
-`samvada_backend_kind_` plumbing. The bundle exports ~198 functions in
+`samvada_backend_kind_` plumbing. The bundle exports far more than that in
 total (the `dbus_*` internals among them) because Cyrius has no
 visibility mechanism; that larger surface is documented as unstable in
 docs/architecture/public-api.md and is NOT frozen here.
