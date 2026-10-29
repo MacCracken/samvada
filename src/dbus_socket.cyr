@@ -113,11 +113,17 @@ fn dbus_socket_sock_cloexec() { return 524288; }   # SOCK_CLOEXEC
 fn dbus_socket_sol_socket()  { return 1; }
 fn dbus_socket_so_rcvtimeo() { return 20; }
 
+# One timeval, allocated on first use: this runs on every connect, and
+# alloc() never frees (1.1.1, A-1).
+var _dbsk_tv = 0;
+
 fn dbus_socket_set_recv_timeout(fd, secs, usecs) {
     if (fd < 0)    { return -22; }
     if (secs < 0)  { return -22; }
     if (usecs < 0) { return -22; }
-    var tv = alloc(16);
+    if (_dbsk_tv == 0) { _dbsk_tv = alloc(16); }
+    if (_dbsk_tv == 0) { return -12; }
+    var tv = _dbsk_tv;
     store64(tv + 0, secs);
     store64(tv + 8, usecs);
     return sys_setsockopt(fd, dbus_socket_sol_socket(),

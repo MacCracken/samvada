@@ -18,12 +18,16 @@ checked-in manifest. Adding, removing or re-signing a public fn now
 requires editing the manifest, which is what makes "frozen" mean
 something.
 
-SCOPE, stated rather than implied: only functions named `samvada_*`
-are treated as public, minus the `samvada_ffi_` / `samvada_slot_` /
-`samvada_backend_kind_` plumbing. The bundle exports far more than that in
-total (the `dbus_*` internals among them) because Cyrius has no
-visibility mechanism; that larger surface is documented as unstable in
-docs/architecture/public-api.md and is NOT frozen here.
+SCOPE, from 1.1.1 (A-6): the bundle is private-by-default
+(src/visibility.cyr), so the public surface is exactly its `public fn`s,
+and this gate checks two things about it: that set equals the manifest,
+and the bundle really opens with its `private` marker, before any
+top-level declaration. That is stricter than any toolchain needs — what
+breaks is a marker after a top-level STATEMENT — but it is valid on all
+of them, and consumers may pin as low as 6.6.5. Until 1.1.1 Cyrius-level
+visibility was unused, every one of the bundle's 204 fns was reachable,
+and this gate approximated "public" as `samvada_*` minus the FFI plumbing.
+tools/boundary_check.py proves the boundary by compiling against it.
 
 Usage:  surface_check.py <repo-root> <manifest>
 Exit:   0 clean, 1 drift, 2 usage/IO error.
@@ -35,8 +39,10 @@ import sys
 # A public fn declared "clean" must not name a fn-table-ish parameter.
 # Word-bounded so a legitimate `slots` or `table_len` does not trip it.
 LEAKY_PARAM = re.compile(r'\b(table|fn_table|fntable|slot|fp|fnptr)\b')
-PLUMBING = re.compile(r'^samvada_(ffi_|slot_|backend_kind_)')
-FN_DECL = re.compile(r'^fn\s+(samvada_[A-Za-z0-9_]*)\s*\(([^)]*)\)', re.M)
+PUBLIC_DECL = re.compile(r'^public\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)', re.M)
+# A top-level declaration: what must not come before the `private` marker.
+TOP_DECL = re.compile(r'^(public\s+)?(fn|var|const|enum|struct|union|impl)\b', re.M)
+MARKER = re.compile(r'^private\s*;?\s*$', re.M)
 
 
 def die(msg, code=2):
@@ -49,15 +55,25 @@ def parse_bundle(path):
         src = open(path, encoding="utf-8").read()
     except OSError as e:
         die(f"cannot read {path}: {e}")
+    marker = MARKER.search(src)
+    if marker is None:
+        print("BUNDLE IS NOT PRIVATE: no top-level `private` marker, so every "
+              "internal fn is consumer-reachable (src/visibility.cyr missing from [lib] modules?)")
+        return None
+    first = TOP_DECL.search(src)
+    if first is not None and first.start() < marker.start():
+        print("`private` IS NOT THE BUNDLE'S FIRST DECLARATION: keep src/visibility.cyr "
+              "first in [lib] modules. Measured: after a top-level statement cyrius 6.6.5 and "
+              "6.7.5 refuse the marker ('unexpected private') and 6.7.18 refuses every later "
+              "`public`; leading the bundle is valid on all of them")
+        return None
     found = {}
-    for m in FN_DECL.finditer(src):
+    for m in PUBLIC_DECL.finditer(src):
         name, args = m.group(1), m.group(2).strip()
-        if PLUMBING.match(name):
-            continue
         arity = len([a for a in args.split(',') if a.strip()]) if args else 0
         found[f"{name}/{arity}"] = args
     if not found:
-        die(f"{path} declared no samvada_* public fns — bundle stale or unparsable?")
+        die(f"{path} declared no public fns — bundle stale or unparsable?")
     return found
 
 
@@ -91,6 +107,8 @@ def main():
     root, manifest_path = sys.argv[1], sys.argv[2]
     bundle = os.path.join(root, 'dist', 'samvada.cyr')
     found = parse_bundle(bundle)
+    if found is None:
+        return 1
     want = parse_manifest(manifest_path)
 
     bad = 0

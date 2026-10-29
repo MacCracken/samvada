@@ -43,6 +43,17 @@ fn dbus_frame_endian_be() { return 66; }
 # protocol could not.
 fn dbus_frame_cap() { return 8192; }
 
+# The protocol's own ceiling: "The maximum length of a message,
+# including header, header alignment padding, and body is 2 to the 27th
+# power or 134217728 (128 MiB)" (D-Bus specification, Message Format).
+# A header declaring that much or more is not a large message, it is an
+# invalid one, and sd-bus refuses it with -ENOBUFS (bus-socket.c,
+# BUS_MESSAGE_SIZE_MAX). Until 1.1.1 the framer drained ANY declared
+# length: one forged 16-byte header (body and fields both 0xFFFFFFFF)
+# committed it to discarding ~8 GiB of stream before it would frame
+# another message (A-1). Now that header is refused on sight.
+fn dbus_frame_msg_max() { return 134217728; }
+
 # Pending-fd queue depth. Fixed, because alloc() never frees and a
 # growable queue leaks per push. On overflow the arriving fd is
 # CLOSED, not dropped — an unbounded fd leak inside a compositor is
@@ -63,6 +74,7 @@ fn dbus_frame_truncated() { return -1002; }   # EOF mid-message
 fn dbus_frame_badendian() { return -1003; }
 fn dbus_frame_badproto()  { return -1004; }
 fn dbus_frame_overflow()  { return -1005; }   # fd queue full
+fn dbus_frame_toolong()   { return -1006; }   # declares >= msg_max: invalid
 
 # ---- arithmetic ----
 fn dbus_frame_align8(n) {
@@ -145,10 +157,17 @@ var _dbf_eof   = 0;   # peer closed
 var _dbf_fdq   = 0;   # pending-fd ring
 var _dbf_fdn   = 0;   # fds queued
 var _dbf_ready = 0;
+# Bytes compaction has moved since init. Kept only so A-1's bound is a
+# test, not an argument: each message is moved at most once — compaction
+# runs only when the tail hits the cap, and it leaves the one partial
+# message at offset 0, where it stays until consumed — so this can never
+# exceed the bytes received, however a peer sizes its messages.
+var _dbf_moved = 0;
 
 fn dbus_frame_init() {
     if (_dbf_ready != 0) {
         _dbf_off = 0; _dbf_have = 0; _dbf_skip = 0; _dbf_eof = 0; _dbf_fdn = 0;
+        _dbf_moved = 0;
         return 0;
     }
     _dbf_buf = alloc(dbus_frame_cap());
@@ -156,6 +175,7 @@ fn dbus_frame_init() {
     _dbf_fdq = alloc(dbus_frame_fdq_cap() * 8);
     if (_dbf_fdq == 0) { return -12; }
     _dbf_off = 0; _dbf_have = 0; _dbf_skip = 0; _dbf_eof = 0; _dbf_fdn = 0;
+    _dbf_moved = 0;
     _dbf_ready = 1;
     return 0;
 }
@@ -182,6 +202,7 @@ fn dbus_frame_consume(n) {
 }
 
 fn dbus_frame_set_eof() { _dbf_eof = 1; return 0; }
+fn dbus_frame_moved()   { return _dbf_moved; }
 
 # Slide unconsumed bytes to the front. Run only when a header can no
 # longer be appended, so compaction is rare rather than per-read.
@@ -194,6 +215,7 @@ fn dbus_frame_compact() {
     if (_dbf_off == 0) { return 0; }
     var live = _dbf_have - _dbf_off;
     if (live > 0) { memcpy(_dbf_buf, _dbf_buf + _dbf_off, live); }
+    _dbf_moved = _dbf_moved + live;
     _dbf_off = 0;
     _dbf_have = live;
     return 0;
@@ -255,6 +277,7 @@ fn dbus_frame_close_fds() {
 #           eof         peer closed cleanly with nothing pending
 #           truncated   peer closed mid-message
 #           badendian / badproto   unrecoverable, stream is lost
+#           toolong     declares >= 128 MiB: invalid, stream is lost
 fn dbus_frame_next() {
     # Finish discarding an over-cap message first.
     if (_dbf_skip > 0) {
@@ -283,6 +306,10 @@ fn dbus_frame_next() {
     var total = dbus_frame_total(p, avail);
     if (total == dbus_frame_badendian()) { return dbus_frame_badendian(); }
     if (total == dbus_frame_badproto())  { return dbus_frame_badproto(); }
+    # Refused, not drained, and not consumed: the stream cannot be
+    # resynchronised past a header the protocol says cannot exist, so
+    # every later call sees the same answer — as with a bad endian byte.
+    if (total >= dbus_frame_msg_max())   { return dbus_frame_toolong(); }
 
     # Over-cap: the message can never fit, so discard exactly `total`
     # bytes and resynchronise. Every queued fd goes with it — the

@@ -4,6 +4,174 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-10-29
+
+**The A lane, closed with evidence.** The roadmap's four open A items
+(resource exhaustion, build and supply chain, the protocol state
+machine, the public API contract) each closed with a test, a gate or
+a measurement, never with "the code was reviewed". The one exception
+is signing release tags, which needs the maintainer's key and is
+written up as a procedure in `CONTRIBUTING.md`. Every item but A-6's
+turned up at least one real defect, listed under Breaking and Security.
+Same toolchain (cyrius 6.7.18); FFI
+layout (11 slots / 88 bytes, `kind` at +64), the eight public
+signatures and the C shim unchanged. 879 asserts (was 586).
+
+### Breaking
+- **The bundle is private-by-default: a consumer can name only the
+  eight public fns** (A-6). In 1.1.0 all 201 fns in
+  `dist/samvada.cyr` were reachable, because samvada never used Cyrius's
+  visibility. It now opens with a bare `private` (`src/visibility.cyr`,
+  first in `[lib] modules`), and the eight frozen fns are
+  `public fn`. Calling anything else — `dbus_session_set_timeout_ms`,
+  `samvada_ffi_alloc`, any `dbus_*` — is a compile error: `'…' is
+  private to its file`. **Migration:** use the public API; the
+  internals were documented unstable. mabda, the differential harness
+  and the C shim reach only public fns and are unaffected (checked).
+- **The native backend's error names map exactly as sd-bus's do**
+  (A-4). The map held eight names and disagreed with libsystemd 262 on
+  the errors a logind restart or a bus disconnect produce:
+
+  | Error name | was | now (sd-bus) |
+  |---|---|---|
+  | `org.freedesktop.DBus.Error.ServiceUnknown` | -2 | **-113** `EHOSTUNREACH` |
+  | `org.freedesktop.DBus.Error.NoReply` / `Timeout` | -5 | **-110** `ETIMEDOUT` |
+  | `org.freedesktop.DBus.Error.Disconnected` | -5 | **-104** `ECONNRESET` |
+  | `org.freedesktop.DBus.Error.NameHasNoOwner` | -5 | **-6** `ENXIO` |
+  | `org.freedesktop.login1.NoSessionForPID` / `NoSuchSession` | -5 | **-6** `ENXIO` |
+  | `org.freedesktop.login1.DeviceIsTaken` | -5 | **-22** `EINVAL` |
+  | `org.freedesktop.DBus.Error.NotSupported` | -5 | **-95** `EOPNOTSUPP` |
+  | `System.Error.<ERRNO>` (any errno name) | -5 except `EBUSY` | **that errno** |
+  | `org.freedesktop.DBus.Error.NoSuchDevice` | -19 | **-5** (not an sd-bus name) |
+
+  **Migration:** a consumer that branched on `-2` for "logind is not
+  there" must branch on `-113`; anything that worked against the C
+  shim now gets the same answer from the native backend.
+- **A dead connection is reported, as sd-bus reports it** (A-4). Until
+  now a bus that went away was invisible to `samvada_pump_signals()` —
+  0 events, every call, forever — and a call after it wrote to the
+  dead socket. Now: the call that sees the drop returns **-104**
+  (`-ECONNRESET`; was -107 on EOF, -71 on a cut stream, -32 on a failed
+  send), every later call **-107** without writing, and the pump
+  **-104**. **Migration:** treat -104 or -107 from any call as "the bus
+  is gone": `samvada_release()`, then re-init.
+- **A message declaring 128 MiB or more is refused, -105** (A-1), as
+  sd-bus refuses it (`BUS_MESSAGE_SIZE_MAX`). Until now one forged
+  16-byte header committed the framer to draining ~8 GiB.
+
+### Security
+- **Stray descriptors could be handed to `take_device`** (A-4, the
+  1.0.1 shape again). An ERROR reply was consumed without dropping its
+  descriptors, and so was the reply to every call but `take_device`
+  (TakeControl, ReleaseControl, ReleaseDevice, GetSessionByPID,
+  Hello). A descriptor riding on one stayed at the head of the queue,
+  and the next `take_device` popped it FIFO as its own — the mutant
+  that removes the ERROR-path drop makes the test's `take_device`
+  return inode 7311388, the stray's, instead of 7311390. Every
+  consumed message now takes its descriptors with it
+  (`dbus_session_done`), and `take_device` takes one only if its reply
+  declared one. Defence in depth: only the broker and logind can send a
+  reply (the 1.0.0 forgery audit), and neither puts descriptors on
+  these.
+- **The heap grew on every logind call, and one path was peer-driven**
+  (A-1; `alloc()` never frees). Measured on 1.1.0: take_control 200 B
+  per call, release_control 192, take_device and release_device 200,
+  GetSessionByPID 336 — each `alloc()`ed a buffer to copy a string
+  literal into — and a full init/release cycle **600 B**, measured live.
+  Worse, the `MSG_CTRUNC` branch of the fd receive did an `alloc(8)`
+  per truncation, and truncation is chosen by the peer: attach two
+  descriptors to every message and the heap grows 8 B per message
+  without bound. All now **0 B**, the live cycle included; the wire
+  bytes of every call are byte-identical before and after.
+
+### Changed
+- **`tools/boundary_check.py`, a new CI gate.** It compiles two
+  consumers generated from the bundle: one calling every `public fn`
+  (must build), one calling every other fn (must fail, each named
+  private — all 204). `tools/surface_check.py` now reads `public fn`
+  and refuses a bundle whose `private` marker is missing or not its
+  first declaration. Mutation-verified: no marker, a late marker and
+  an extra `public` each fail.
+- **`tests/fixtures/sdbus_errno_map.tsv` + `tools/sdbus_errno_probe.c`,
+  and a CI gate.** The probe asks libsystemd itself for each name's
+  errno; the fixture is its output (186 rows: every sd-bus
+  `org.freedesktop.DBus.Error.*`, every `login1.*`, every glibc errno
+  name). The test asserts every row, and the c-shim job re-runs the
+  probe against the runner's libsystemd and checks the test's rows are
+  the fixture's. Checked on libsystemd 262 (host) and 259 (Ubuntu
+  26.04); `EFTYPE`, the one row they disagree on, is left out.
+- **`release.yml` refuses to publish a bundle that is not the tag's**
+  (A-2), and publishes the `.deps` sidecar as `samvada-<tag>.deps`
+  with a `SHA256SUMS` row, so a consumer can check a first resolve —
+  recipe in `docs/guides/consumer-link.md`.
+- The framer keeps a count of bytes compaction has moved
+  (`dbus_frame_moved`), so A-1's bound is a test, not an argument.
+- `samvada_version()` packed triple `(1,1,0)` → `(1,1,1)`.
+
+### Notes
+- **The A lane, item by item, and what closed each.**
+  - *A-1, resource exhaustion.* Compaction is linear: bytes moved never
+    exceed bytes received, for seven message sizes chosen to straddle
+    the cap, fed by a fast peer and a 13-byte dribbler (a mutant that
+    compacts after every message breaks it). 200 drained 64 KiB
+    messages allocate nothing and the stream resynchronises. 1000
+    fd-bearing ResumeDevice signals leave no descriptor, no queue and
+    no heap; 300 forced truncations likewise.
+  - *A-2, build and supply chain.* `dist/` rebuilt from two clean
+    copies of the tree, at different paths, `TZ` and locale, with the
+    release-tarball toolchain: byte-identical, and the bundle carries
+    no path or timestamp. The first-resolve recipe was checked against
+    a real release: mabda's resolved `samvada.cyr` is the
+    `samvada-1.0.1.cyr` row of 1.0.1's `SHA256SUMS`. **Still open,
+    and the maintainer's to do:** signing tags. Also: the repository's
+    releases are not marked immutable (GitHub API `immutable: false`),
+    so published assets can be replaced — a repository setting.
+  - *A-4, protocol state machine.* Mid-session disconnect, above. A
+    logind restart: systemd v262 `session_load()` restores a session's
+    controller if its bus name still has an owner
+    (`logind-session.c:705-708`), so samvada keeps control and its
+    cached state stays true; the mock test drives the new sender, the
+    broker's NameOwnerChanged pair and a NoReply for the in-flight call.
+    PauseDevice/ResumeDevice orderings around a TakeDevice keep every
+    descriptor with its message; `PauseDevice("pause")` is drained and
+    not acknowledged, per ADR-0004. The Hello-ordering divergence stays
+    documented, not matched.
+  - *A-6, public API contract.* Above.
+- **Each fix is mutation-tested**, and every mutant fails a test:
+  - the old error map and the System.Error family removed;
+  - the pump hiding EOF, the closed latch removed, and EOF mapped back
+    to -107;
+  - reply and ERROR descriptors kept;
+  - a per-call `alloc` reinstated in take_control and in the CTRUNC
+    branch, and the pump keeping signal descriptors;
+  - eager compaction, and the 128 MiB check removed (on the call
+    path, a hang into the timeout).
+- **Verified, and what was not.**
+  - The full `ci.yml` passes locally and in an `ubuntu:26.04`
+    container.
+  - The native handshake and the init/release cycle ran live on the
+    system bus from the 1.1.1 bundle, unseated.
+  - mabda (cyrius 6.7.5) compiles against the private bundle under
+    `-D MABDA_LOGIND`.
+  - The bundle builds for consumers on cyrius 6.6.5, 6.7.5 and 6.7.18,
+    with stdlib leaves before or after it.
+  - **Not verified:** `take_device` on a seated session (CG lane); the
+    C-shim binary executed; `release.yml`'s new steps (the tag push is
+    their first run); aarch64 hardware.
+- **The boundary is Cyrius-level.** An `object;` build still exports
+  every fn as a GLOBAL DEFAULT symbol on 6.7.18, the private ones
+  included, although the cyrius guide says private fns are omitted
+  from the exported symbol table. C code linked against the object can
+  therefore still declare an internal `extern`. Worth filing with
+  cyrius.
+- **Corrupt-stream divergence, kept and documented.** A bad endian byte
+  is -71 (`EPROTO`) here and -74 (`EBADMSG`) in sd-bus. On a bad
+  protocol version, sd-bus drops the message and samvada fails the
+  stream. samvada is the stricter of the two; a well-behaved broker
+  sends neither.
+- Benches flat; the smoke binary is unchanged in size. See
+  `docs/benchmarks.md` Run 9.
+
 ## [1.1.0] — 2026-10-28
 
 Toolchain minor. Pinned Cyrius bumped `6.6.20` → `6.7.18` (the 6.7

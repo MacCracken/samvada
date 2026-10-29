@@ -59,13 +59,13 @@ stdlib); see `tests/samvada.bcyr` for the four call sites.
 
 ## Run history
 
-| | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Run 6 | Run 7 | Run 8 |
-|---|---|---|---|---|---|---|---|---|
-| **Date (UTC)** | `2026-05-01T21:47:19Z` | `2026-05-01T21:58:21Z` | `2026-06-02T22:52:43Z` | `2026-09-09T15:42:03Z` | `2026-09-09T17:58:00Z` | `2026-09-09T19:40:00Z` | `2026-10-29T00:54:07Z` | `2026-10-29T06:02:55Z` |
-| **Commit** | `4c7ada9` | (`0.2.2` release commit) | (`0.3.0` release commit) | (`0.5.0` release commit) | (`0.5.1` release commit) | (`0.5.2` release commit) | (`1.0.2` release commit) | (`1.1.0` release commit) |
-| **samvada** | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | `0.5.1` | `0.5.2` | `1.0.2` | `1.1.0` |
-| **Toolchain** | `cyrius 5.7.48` | `cyrius 5.7.48` | `cyrius 6.0.40` | `cyrius 6.6.1` | `cyrius 6.6.1` | `cyrius 6.6.2` | `cyrius 6.6.20` | `cyrius 6.7.18` |
-| **Host** | `Linux 7.0.2-arch1-1 x86_64`, AMD Ryzen 7 5800H (16T) | same | `Linux 7.0.10-arch1-1 x86_64`, same CPU | `Linux 7.2.3-arch1-3 x86_64`, same CPU | same as Run 4 | same as Run 4 | `Linux 7.2.11-arch1-1 x86_64`, same CPU | same as Run 7 |
+| | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Run 6 | Run 7 | Run 8 | Run 9 |
+|---|---|---|---|---|---|---|---|---|---|
+| **Date (UTC)** | `2026-05-01T21:47:19Z` | `2026-05-01T21:58:21Z` | `2026-06-02T22:52:43Z` | `2026-09-09T15:42:03Z` | `2026-09-09T17:58:00Z` | `2026-09-09T19:40:00Z` | `2026-10-29T00:54:07Z` | `2026-10-29T06:02:55Z` | `2026-10-29T07:42:00Z` |
+| **Commit** | `4c7ada9` | (`0.2.2` release commit) | (`0.3.0` release commit) | (`0.5.0` release commit) | (`0.5.1` release commit) | (`0.5.2` release commit) | (`1.0.2` release commit) | (`1.1.0` release commit) | (`1.1.1` release commit) |
+| **samvada** | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | `0.5.1` | `0.5.2` | `1.0.2` | `1.1.0` | `1.1.1` |
+| **Toolchain** | `cyrius 5.7.48` | `cyrius 5.7.48` | `cyrius 6.0.40` | `cyrius 6.6.1` | `cyrius 6.6.1` | `cyrius 6.6.2` | `cyrius 6.6.20` | `cyrius 6.7.18` | `cyrius 6.7.18` |
+| **Host** | `Linux 7.0.2-arch1-1 x86_64`, AMD Ryzen 7 5800H (16T) | same | `Linux 7.0.10-arch1-1 x86_64`, same CPU | `Linux 7.2.3-arch1-3 x86_64`, same CPU | same as Run 4 | same as Run 4 | `Linux 7.2.11-arch1-1 x86_64`, same CPU | same as Run 7 | same as Run 7 |
 
 > **Gap, stated rather than papered over.** `0.4.0` and `0.4.1`
 > shipped without appending a row, so there is no Run between
@@ -85,12 +85,12 @@ stdlib); see `tests/samvada.bcyr` for the four call sites.
 
 ### Results
 
-| Benchmark | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | `0.5.1` | `0.5.2` | `1.0.2` | `1.1.0` | Δ (0.3.0→0.5.0) | Δ (0.5.0→0.5.1) | Δ (0.5.1→0.5.2) | Δ (1.0.1→1.0.2, same day) | Δ (1.0.2→1.1.0, same day) |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `ffi_alloc` | 56 ns | 59 ns | 63 ns | 28 ns | 32 ns | 30 ns | 31 ns | 29 ns | **−55.6%** | **+14.3%** (expected — see note) | −2 ns (noise) | −1 ns (noise) | −1 ns (noise) |
-| `ffi_get_slot` | 9 ns | 11 ns | 11 ns | 9 ns | 9 ns | 8 ns | 9 ns | 8 ns | −18.2% | 0% | −1 ns (noise) | 0 ns | 0 ns |
-| `init_reject_null` | 6 ns | 7 ns | 7 ns | 6 ns | 6 ns | 5 ns | 5 ns | 5 ns | −14.3% | 0% | −1 ns (noise) | −1 ns (noise) | 0 ns |
-| `release_idempotent` | 6 ns | 6 ns | 7 ns | 6 ns | 6 ns | 7 ns | 6 ns | 6 ns | −14.3% | 0% | +1 ns (noise) | −1 ns (noise) | 0 ns |
+| Benchmark | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | `0.5.1` | `0.5.2` | `1.0.2` | `1.1.0` | `1.1.1` | Δ (0.3.0→0.5.0) | Δ (0.5.0→0.5.1) | Δ (0.5.1→0.5.2) | Δ (1.0.1→1.0.2, same day) | Δ (1.0.2→1.1.0, same day) | Δ (1.1.0→1.1.1, same day) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `ffi_alloc` | 56 ns | 59 ns | 63 ns | 28 ns | 32 ns | 30 ns | 31 ns | 29 ns | 31 ns | **−55.6%** | **+14.3%** (expected — see note) | −2 ns (noise) | −1 ns (noise) | −1 ns (noise) | −1 ns (noise) |
+| `ffi_get_slot` | 9 ns | 11 ns | 11 ns | 9 ns | 9 ns | 8 ns | 9 ns | 8 ns | 9 ns | −18.2% | 0% | −1 ns (noise) | 0 ns | 0 ns | 0 ns |
+| `init_reject_null` | 6 ns | 7 ns | 7 ns | 6 ns | 6 ns | 5 ns | 5 ns | 5 ns | 5 ns | −14.3% | 0% | −1 ns (noise) | −1 ns (noise) | 0 ns | 0 ns |
+| `release_idempotent` | 6 ns | 6 ns | 7 ns | 6 ns | 6 ns | 7 ns | 6 ns | 6 ns | 7 ns | −14.3% | 0% | +1 ns (noise) | −1 ns (noise) | 0 ns | +1 ns (noise) |
 
 Notes:
 
@@ -206,6 +206,18 @@ Notes:
   is stdlib code the smoke binary never reaches; what survives DCE
   moves by 32 B. The live-bus rows were not re-run, for the same
   reason as Run 7.
+- Run 9 (`1.1.1`) is the **A-lane close-out**: same toolchain, and
+  source changes in the session layer, the framer, the socket and the
+  fd receive path — none on a benched path. Same-day comparator, three
+  rounds alternating: 1.1.0 read `ffi_alloc` 31/32/32,
+  `ffi_get_slot` 9/9/9, `init_reject_null` 5/5/6, `release_idempotent`
+  6/7/6 ns; 1.1.1 read 31/31/31, 9/9/9, 5/5/5 and 7/7/7 ns. Medians
+  as in Run 8; flat. The smoke binary is byte-identical in size
+  (111,032 B, DCE 20,920 B): it never reaches the session code.
+  **What 1.1.1 does change is memory, not time.** Measured live, an
+  init/release cycle against the system bus allocated **600 B** on
+  1.1.0 and **0 B** on 1.1.1; each logind call 192–336 B before, 0 after
+  (tests/dbus_session.tcyr pins it). The live-bus rows were not re-run.
 
 ## Live-bus rows — the v1.0 gate, FILLED (0.11.0 / 1.0.0)
 

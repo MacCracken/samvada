@@ -49,8 +49,8 @@ var _SAMVADA_OUTS_BUFLEN = 16;
 # Version triple packed into a u32 (major << 16 | minor << 8 | patch).
 # Bumps lock-step with VERSION; consumers can do
 # `if (samvada_version() < ((1<<16)|(0<<8)|0)) { ... }` for gates.
-fn samvada_version() {
-    return (1 << 16) | (1 << 8) | 0;
+public fn samvada_version() {
+    return (1 << 16) | (1 << 8) | 1;
 }
 
 # ---- private helpers ----
@@ -70,7 +70,7 @@ fn _samvada_slot(off) {
 # object path for our own pid. Returns 0 on success or a negative
 # sd-bus errno on failure (-EINVAL if table is null or its kind
 # doesn't match a known backend).
-fn samvada_init(table) {
+public fn samvada_init(table) {
     if (table == 0) { return -22; }   # -EINVAL
     # Reject re-init without an intervening release (HIGH-1 in
     # 2026-05-01 hardening review). _samvada_table != 0 catches
@@ -172,7 +172,7 @@ fn _samvada_drop_control() {
 # the dup'd unix_fd on success, or a negative sd-bus errno on
 # failure. The fd's lifetime is the caller's; close() it (or pass
 # it to ReleaseDevice + close) on teardown.
-fn samvada_session_take_device(major, minor) {
+public fn samvada_session_take_device(major, minor) {
     if (_samvada_have_table() == 0) { return -22; }
     if (_samvada_bus == 0)          { return -107; }
     var slot = _samvada_slot(samvada_slot_take_device());
@@ -218,7 +218,7 @@ fn samvada_session_take_device(major, minor) {
 
 # Tell logind we're done with the device. Pairs with TakeDevice
 # at teardown (and on PauseDevice if the consumer chooses to drop).
-fn samvada_session_release_device(major, minor) {
+public fn samvada_session_release_device(major, minor) {
     if (_samvada_have_table() == 0) { return -22; }
     if (_samvada_bus == 0)          { return -107; }
     var slot = _samvada_slot(samvada_slot_release_device());
@@ -242,7 +242,7 @@ fn samvada_session_release_device(major, minor) {
 # Drain any pending bus messages. Returns the number of events
 # processed (>=0) or a negative sd-bus errno on failure. Consumers
 # typically call this once per frame / event-loop tick.
-fn samvada_pump_signals() {
+public fn samvada_pump_signals() {
     if (_samvada_have_table() == 0) { return -22; }
     if (_samvada_bus == 0)          { return -107; }
     var slot = _samvada_slot(samvada_slot_pump_signals());
@@ -253,7 +253,7 @@ fn samvada_pump_signals() {
 # Close the bus and clear module state. Idempotent — safe to call
 # on a partially-initialized samvada (e.g. after samvada_init returned
 # an error). Buffers are not freed (bump allocator).
-fn samvada_release() {
+public fn samvada_release() {
     if (_samvada_bus != 0) {
         # Drop session control before closing, so logind restores the VT
         # (session_restore_vt) rather than leaving it in graphics mode until
@@ -286,7 +286,7 @@ fn samvada_release() {
 # the consumer drives all subsequent calls. Smoke build (no shim)
 # never reaches this; `src/main.cyr` keeps its own pure-Cyrius
 # entry for `cyrius build`.
-fn samvada_main(table) {
+public fn samvada_main(table) {
     var r = samvada_init(table);
     return r;
 }

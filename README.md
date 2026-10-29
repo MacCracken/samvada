@@ -1,6 +1,6 @@
 # samvada
 
-**Status: v1.1.0.** samvada speaks dbus natively, in Cyrius, over
+**Status: v1.1.1.** samvada speaks dbus natively, in Cyrius, over
 a raw unix socket. **No libsystemd, no C shim, no `pkg-config`,
 nothing for a consumer to link.**
 
@@ -56,7 +56,7 @@ samvada_session_take_device(major, minor)    -> fd | -err
 samvada_session_release_device(major, minor) -> 0 | -err
 samvada_pump_signals()                       -> events_drained | -err
 samvada_release()                            -> 0   (idempotent)
-samvada_version()                            -> packed u32 — (1 << 16) | (1 << 8) | 0
+samvada_version()                            -> packed u32 — (1 << 16) | (1 << 8) | 1
 
 samvada_init(table)                          -> 0 | -err   ← C-shim entry
 samvada_main(table)                          -> 0 | -err   ← C-shim entry
@@ -67,9 +67,10 @@ and the C convention passes through unchanged. Full map —
 preconditions, every error code, the test that pins it:
 [`docs/architecture/public-api.md`](docs/architecture/public-api.md).
 
-> `dist/samvada.cyr` exports 204 functions in total, because
-> Cyrius has no visibility mechanism. **Only the eight above are
-> stable**; everything else may change in any release.
+> **The eight above are the only fns a consumer can call.**
+> `dist/samvada.cyr` is private-by-default since 1.1.1: naming any of
+> its other 204 fns is a compile error (`'…' is private to its file`),
+> and CI proves it for every one of them.
 
 ## What samvada does natively
 
@@ -106,7 +107,7 @@ of them.
 ```sh
 cyrius deps                                  # resolve stdlib
 cyrius build src/main.cyr build/samvada      # smoke build
-cyrius test                                  # 586 asserts
+cyrius test                                  # 879 asserts
 ```
 
 ### Linking into a consumer
@@ -117,14 +118,16 @@ whole integration — no C, no `pkg-config`, no `objcopy`.
 ```toml
 [deps.samvada]
 git     = "https://github.com/MacCracken/samvada.git"
-tag     = "1.1.0"
+tag     = "1.1.1"
 modules = ["dist/samvada.cyr"]
 ```
 
 > Commit your `cyrius.lock`. The bundle is fetched from a git tag,
 > and samvada's tags are lightweight and unsigned — the lock's
-> commit pin is what makes a repointed tag fail loudly. See
-> [`SECURITY.md`](SECURITY.md).
+> commit pin is what makes a repointed tag fail loudly. For the first
+> resolve, check the bytes against the release's `SHA256SUMS`
+> ([`consumer-link.md`](docs/guides/consumer-link.md) § Checking a
+> first resolve). See [`SECURITY.md`](SECURITY.md).
 
 The **libsystemd C shim** (`deps/samvada_main.c`) is retained as a
 fallback and as `tools/differential/`'s reference backend, and is
@@ -140,6 +143,7 @@ samvada/
 ├── src/
 │   ├── main.cyr           — standalone smoke entry (not linked by consumers)
 │   ├── lib.cyr            — include chain
+│   ├── visibility.cyr     — makes the bundle private-by-default (bundle only)
 │   ├── samvada.cyr        — public Cyrius API surface
 │   ├── samvada_ffi.cyr    — fn-table slot offsets (11 slots, 88 bytes)
 │   ├── dbus_sys.cyr       — SCM_RIGHTS / cmsg
@@ -151,15 +155,17 @@ samvada/
 │   └── dbus_session.cyr   — the logind calls, reply matching
 ├── deps/samvada_main.c    — libsystemd shim (fallback; retires at 1.2.0)
 ├── dist/                  — tracked bundle consumers resolve via [deps.samvada]
-├── tests/                 — 586 asserts + fixtures/dbus/ (real captured wire bytes)
+├── tests/                 — 879 asserts + fixtures/ (real captured wire bytes, sd-bus's errno table)
 ├── tools/
 │   ├── surface_check.py   — freezes the public surface (CI gate)
+│   ├── boundary_check.py  — proves a consumer reaches only that surface (CI gate)
+│   ├── sdbus_errno_probe.c — libsystemd's errno for each error name (CI gate)
 │   ├── dbus_tap.py        — AF_UNIX relay for capturing traffic
 │   ├── dbus_decode.py     — spec decoder for captured bytes
 │   └── differential/      — runs both backends in one process, compares error codes
 ├── docs/                  — adr/ architecture/ guides/ development/ audit/ proposals/
 ├── cyrius.cyml            — package manifest; the toolchain pin lives here
-└── VERSION                — 1.1.0
+└── VERSION                — 1.1.1
 ```
 
 The fn-table obeys ADR-0002's **append-after-kind** invariant:
@@ -170,12 +176,14 @@ slot fns on every run.
 
 ## Security
 
-Two audits have shipped: the pre-1.0 pass over the native
-marshaller ([1.0.0](docs/audit/2026-09-09-native-audit.md)) and the
-A-lane completion (1.0.1), which together fixed fourteen defects
-and closed the reply-forgery question. **1.0.1 is a stable
-release, not an audited-hardened one** — what remains uncovered is
-listed in [`SECURITY.md`](SECURITY.md) and
+Three audit passes have shipped: the pre-1.0 pass over the native
+marshaller ([1.0.0](docs/audit/2026-09-09-native-audit.md)), the
+A-lane completion (1.0.1), and its close-out
+([1.1.1](docs/audit/2026-10-29-audit.md)), which closed the lane but
+for signing release tags. **samvada is a stable release, not an
+audited-hardened one** — tags are unsigned and the seated
+`TakeDevice` path has never run; both are listed in
+[`SECURITY.md`](SECURITY.md) and
 [the roadmap](docs/development/roadmap.md), not omitted.
 
 Report vulnerabilities per [`SECURITY.md`](SECURITY.md).

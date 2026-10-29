@@ -26,8 +26,14 @@ output = "samvada"
 #
 # Order matters: each module is included in dependency order, and
 # samvada.cyr last because it is what dispatches through the table.
+#
+# 1.1.1 (A-6): src/visibility.cyr comes FIRST. It holds only a bare
+# `private`, which makes the whole bundle private-by-default, so a
+# consumer can name only the eight `public fn`s. It is listed here and
+# nowhere else — see the file.
 [lib]
 modules = [
+    "src/visibility.cyr",
     "src/samvada_ffi.cyr",
     "src/dbus_sys.cyr",
     "src/dbus_frame.cyr",

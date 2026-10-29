@@ -104,6 +104,22 @@ jobs:
       - name: Regenerate dist bundle
         run: cyrius distlib
 
+      - name: Verify the published bundle IS the tag's bundle
+        # 1.1.1 (A-2). A [deps.samvada] consumer fetches dist/samvada.cyr and
+        # dist/samvada.deps from the git TAG; SHA256SUMS describes the
+        # release ASSETS. Those are only one thing if the regenerated dist/
+        # equals what the tag committed — which is what lets a consumer check
+        # a first resolve against SHA256SUMS (docs/guides/consumer-link.md).
+        # Until 1.1.1 nothing compared them; the CI gate's freshness check
+        # runs on a push, not on the tagged tree this job builds.
+        run: |
+          if ! git diff --quiet HEAD -- dist/; then
+            echo "ERROR: cyrius distlib on the tagged tree differs from the tag's dist/"
+            git --no-pager diff --stat HEAD -- dist/
+            exit 1
+          fi
+          echo "dist/ is byte-identical to the tag's"
+
       - name: Clean toolchain artifacts
         run: rm -f cyrius-*.tar.gz
 
@@ -117,6 +133,9 @@ jobs:
           # as dist/samvada.cyr, renamed with version suffix so
           # it survives outside the source tree.
           cp dist/samvada.cyr "samvada-${TAG}.cyr"
+          # The sidecar a consumer's `cyrius deps` also fetches from the tag
+          # (1.1.1, A-2) — published so a first resolve can check it too.
+          cp dist/samvada.deps "samvada-${TAG}.deps"
           # Standalone smoke binary so contributors can verify
           # the build without a Cyrius toolchain.
           cp build/samvada "samvada-${TAG}-x86_64-linux"
@@ -124,7 +143,7 @@ jobs:
           # so consumers that point at this release artifact
           # don't have to clone the repo to get the shim.
           cp deps/samvada_main.c "samvada-${TAG}-shim.c"
-          sha256sum samvada-*.tar.gz samvada-*.cyr samvada-*-linux samvada-*-shim.c > SHA256SUMS
+          sha256sum samvada-*.tar.gz samvada-*.cyr samvada-*.deps samvada-*-linux samvada-*-shim.c > SHA256SUMS
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
@@ -132,6 +151,7 @@ jobs:
           path: |
             samvada-*.tar.gz
             samvada-*.cyr
+            samvada-*.deps
             samvada-*-linux
             samvada-*-shim.c
             SHA256SUMS
@@ -168,6 +188,7 @@ jobs:
           files: |
             samvada-*.tar.gz
             samvada-*.cyr
+            samvada-*.deps
             samvada-*-linux
             samvada-*-shim.c
             SHA256SUMS

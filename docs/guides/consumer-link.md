@@ -1,4 +1,4 @@
-# Linking samvada into a consumer (v1.1.0)
+# Linking samvada into a consumer (v1.1.1)
 
 **Read the native path and stop.** As of 1.0, samvada speaks dbus
 natively in Cyrius — no C, no `libsystemd`, no `pkg-config`, no
@@ -34,11 +34,11 @@ consumers should not use it.**
 ```cyml
 [deps.samvada]
 git     = "https://github.com/MacCracken/samvada.git"
-tag     = "1.1.0"
+tag     = "1.1.1"
 modules = ["dist/samvada.cyr"]
 ```
 
-samvada's tags are **unprefixed** — `1.1.0`, not `v1.1.0`. Every
+samvada's tags are **unprefixed** — `1.1.1`, not `v1.1.1`. Every
 tag pushed to the repo is bare.
 
 > **Do not pin below 1.0.1**, and there are two independent
@@ -62,6 +62,33 @@ tag pushed to the repo is bare.
 > lock's commit pin is the only thing that makes a repointed tag
 > fail loudly rather than resolve silently. See
 > [`SECURITY.md`](../../SECURITY.md).
+
+### Checking a first resolve
+
+The lock protects every resolve **after** the first. On the first
+one, and on every version bump, there is nothing to compare against,
+so check the bytes `cyrius deps` fetched against the release's
+`SHA256SUMS`. Its `samvada-<tag>.cyr` row is the tag's
+`dist/samvada.cyr`; from 1.1.1 the release job refuses to publish if
+they differ, and `samvada-<tag>.deps` covers the sidecar too:
+
+```sh
+curl -sSfLO https://github.com/MacCracken/samvada/releases/download/1.1.1/SHA256SUMS
+grep -E ' samvada-1\.1\.1\.(cyr|deps)$' SHA256SUMS
+sha256sum lib/samvada.cyr ~/.cyrius/deps/samvada/1.1.1/dist/samvada.deps
+```
+
+The sums must match row for row. Verified against a real release:
+mabda's `lib/samvada.cyr`, resolved from tag `1.0.1`, hashes to
+`d21c97bd…7fba55`, which is the `samvada-1.0.1.cyr` row of 1.0.1's
+`SHA256SUMS`. (1.0.1 published no `.deps` row; check that file
+against the tag by hand.)
+
+This is a second object, not a second authority: the release assets
+and the tag are both served by GitHub, so whoever can rewrite one
+can rewrite the other. What it catches is a tag repointed without the
+release being rebuilt to match. Signed tags would make it a real
+check; samvada does not sign them yet (`SECURITY.md`).
 
 ## The native build
 
@@ -145,7 +172,7 @@ builds the fn-table and hands it to samvada; you never see it.
 whole, keyed by tag:
 
 ```
-~/.cyrius/deps/samvada/1.1.0/deps/samvada_main.c
+~/.cyrius/deps/samvada/1.1.1/deps/samvada_main.c
 ```
 
 Most consumers vendor a copy into their own `deps/` rather than
@@ -538,7 +565,7 @@ Two more things worth stating plainly:
    success value leaking through — and now returns `0` as the
    contract always said. Both are non-negative, so a consumer
    branching on `rc < 0` needs no edit.
-7. **Re-pin to `1.1.0`.**
+7. **Re-pin to `1.1.1`.**
 
 Behaviour you get for free, with no code change:
 `TakeControl` / `ReleaseControl` around the session (which is

@@ -548,6 +548,48 @@ fn test_scm_rights_no_fd_leak() {
     return 0;
 }
 
+# ---- A-1 (1.1.1): a peer that truncates every message ----
+# MSG_CTRUNC is peer-driven: attach more descriptors than the 1-fd cmsg
+# buffer holds and the kernel truncates every receive. Until 1.1.1 the
+# truncation branch did an alloc(8) each time, so such a peer grew the
+# never-freeing heap by 8 bytes per message, forever.
+fn test_sustained_ctrunc_is_bounded() {
+    test_group("SCM_RIGHTS: 300 truncated receives leak no descriptor and no heap");
+    var fds = alloc(8);
+    sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, fds);
+    var a = load64(fds) & 0xFFFFFFFF;
+    var b = (load64(fds) >> 32) & 0xFFFFFFFF;
+    var pa = alloc(8);
+    sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, pa);
+    var f1 = load64(pa) & 0xFFFFFFFF;
+    var f2 = (load64(pa) >> 32) & 0xFFFFFFFF;
+    var pb = alloc(8);
+    sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, pb);
+    var f3 = load64(pb) & 0xFFFFFFFF;
+    var f4 = (load64(pb) >> 32) & 0xFFFFFFFF;
+    var buf = alloc(64);
+    var out = alloc(8);
+    # Warm the path once.
+    t_send_three_fds(a, f1, f2, f3);
+    dbus_sys_recv_fd(b, buf, 64, out);
+    var open0 = t_count_open_fds();
+    var heap0 = alloc_used();
+    var eproto = 0;
+    var i = 0;
+    while (i < 300) {
+        if (t_send_three_fds(a, f1, f2, f3) == 1) {
+            if (dbus_sys_recv_fd(b, buf, 64, out) == -71) { eproto = eproto + 1; }
+        }
+        i = i + 1;
+    }
+    assert_eq(eproto, 300, "every receive was truncated and reported -EPROTO");
+    assert_eq(t_count_open_fds(), open0, "no descriptor leaked across 300 truncations");
+    assert_eq(alloc_used() - heap0, 0, "THE PIN: and the heap did not grow (was 8 bytes per truncation)");
+    sys_close(f1); sys_close(f2); sys_close(f3); sys_close(f4);
+    sys_close(a); sys_close(b);
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_dbus_sys_layout();
@@ -561,6 +603,7 @@ fn main() {
     test_parser_guards();
     test_parser_sign_extension();
     test_scm_rights_no_fd_leak();
+    test_sustained_ctrunc_is_bounded();
     return assert_summary();
 }
 

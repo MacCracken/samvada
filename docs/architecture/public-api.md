@@ -1,4 +1,4 @@
-# Public API surface (v1.1.0)
+# Public API surface (v1.1.1)
 
 This page is the canonical map of samvada's public contract: what
 each fn returns, what it requires, and which test pins it.
@@ -17,13 +17,15 @@ no-FFI-types-in-signatures rule were enforced by review, and the
 A-6 audit walked a fn-table-returning public export past every
 gate that existed.
 
-> **What the bundle actually contains.** `dist/samvada.cyr`
-> defines **204** functions — the native dbus implementation
-> (`dbus_*`) and the FFI plumbing are in there too, because Cyrius
-> has no visibility mechanism. `@public` and `@internal` are
-> comments. Only the eight below are stable; everything else may
-> change in any release, and a consumer that calls one is on its
-> own. `grep -c '^fn ' dist/samvada.cyr` is the check.
+> **What the bundle actually contains, and what a consumer can
+> reach.** `dist/samvada.cyr` defines 212 functions — the native dbus
+> implementation (`dbus_*`) and the FFI plumbing are in there too —
+> but since 1.1.1 it is **private-by-default** (`src/visibility.cyr`),
+> so a consumer can name only the eight `public fn`s below; naming any
+> of the other 204 is a compile error, `'…' is private to its file`.
+> `tools/boundary_check.py` proves that in CI for every one of them.
+> The boundary is Cyrius-level: an `object;` build still exports every
+> fn as a global symbol, so C code linked against it can reach them.
 
 ## Stability contract
 
@@ -118,16 +120,14 @@ calls this and **not** `samvada_init` / `samvada_main`, which are the
 C-shim entry points. The table is allocated once and reused across
 init/release cycles.
 
-> **What the bundle actually exports.** `dist/samvada.cyr` exports
-> **204 functions**; the eight above are the ones this document
-> defines and the only ones that are stable. `@public` and
-> `@internal` are comments — Cyrius has no visibility mechanism — so
-> every internal is reachable by a consumer, including
+> **The eight above are the only fns a consumer can call** (1.1.1).
+> Through 1.1.0 every internal was reachable — including
 > `dbus_session_set_timeout_ms`, `dbus_frame_close_fds` and the whole
-> `dbus_unmarshal_*` surface. Anything not listed above may change in
-> any release without notice. This is stated because the alternative
-> is implying a boundary that is not enforced; it is also the premise
-> AUDIT-1 rests on.
+> `dbus_unmarshal_*` surface — because samvada never used Cyrius's
+> visibility, and this page could only say they were unstable. The
+> bundle is now private-by-default and the eight are `public fn`; see
+> the box at the top of this page for how it is enforced and where it
+> stops.
 >
 > **The eight above ARE enforced.** `tools/surface_check.py` diffs
 > this surface out of `dist/samvada.cyr` against
@@ -266,7 +266,7 @@ rather than allowed to proceed into a guaranteed failure.
 | `-12` (`-ENOMEM`) | alloc failure | scratch buffers couldn't be allocated |
 | `-38` (`-ENOSYS`) | slot unwired | the `open_system_bus`, `get_session_path` **or `take_control`** slot is null. The `take_control` case (new in 0.5.1) means the backend table predates 0.5.1 — rebuild the shim against the current `deps/samvada_main.c` |
 | `-107` (`-ENOTCONN`) | bus open returned NULL | C wrapper succeeded but didn't write a bus handle |
-| any other `< 0` | sd-bus errno pass-through | from `GetSessionByPID`: `-2` (no logind / `ServiceUnknown`), `-13` (perm denied). The **native** backend's error mapper can additionally return `-110` (`-ETIMEDOUT`, the 25 s wall-clock deadline or an expired receive timeout), `-71` (`-EPROTO`, a malformed or truncated reply), `-19` (`NoSuchDevice`), `-3` (`NoSuchProcess`) and `-5` (`-EIO`, any unmapped error name). It cannot return `-113`, which earlier revisions of this page listed. From `TakeControl`: `-13` (`AccessDenied` — the caller's euid is not the session's user, or logind refuses control of this session at all, which is the seatless case) |
+| any other `< 0` | sd-bus errno pass-through | from `GetSessionByPID`: `-113` (`ServiceUnknown` — logind is not on the bus), `-6` (`NoSessionForPID` — this process is in no session), `-13` (perm denied); from connecting, `-2` (no system-bus socket). **Both backends agree on every named error** since 1.1.1: the native mapper is sd-bus's own table (`tests/fixtures/sdbus_errno_map.tsv`, from libsystemd), including `System.Error.<ERRNO>`; before 1.1.1 it returned `-2` for `ServiceUnknown` and `-5` for most other names. The native transport can add `-110` (`-ETIMEDOUT`, the 25 s deadline or an expired receive timeout), `-104` (`-ECONNRESET`, the connection dropped during the call), `-107` (`-ENOTCONN`, a call after it dropped), `-71` (`-EPROTO`, a malformed reply or corrupt stream) and `-105` (`-ENOBUFS`, a message declaring ≥ 128 MiB). From `TakeControl`: `-13` (`AccessDenied` — the caller's euid is not the session's user, or logind refuses control of this session at all, which is the seatless case) |
 
 **`-16` from `samvada_init` is ambiguous.** samvada returns it
 for its own double-init guard, *and* logind answers a
@@ -376,7 +376,7 @@ that delivered it (see `dbus-marshalling.md` §SCM_RIGHTS).
 | `-38` (`-ENOSYS`) | slot unwired | `take_device` slot is null |
 | `-107` (`-ENOTCONN`) | bus not open | `samvada_init` early-failed; `_samvada_bus == 0` |
 | `-9` (`-EBADF`) | reply carried `fd < 0` | the `TakeDevice` reply read back a negative descriptor — a peer-bus contract violation. **Not** a duplication failure |
-| any other `< 0` | sd-bus errno pass-through, or a failed duplication | typically `-13` (no DRM master / access denied), `-2` (device not found); or `-errno` from `fcntl(F_DUPFD_CLOEXEC)`, which is `-24` (`-EMFILE`, per-process descriptor limit) or `-23` (`-ENFILE`, system-wide file-table exhaustion) |
+| any other `< 0` | sd-bus errno pass-through, or a failed duplication | typically `-13` (no DRM master / access denied), `-19` / `-2` (device not found — logind's `System.Error.ENODEV` / `ENOENT`), `-22` (`DeviceIsTaken`); `-104` / `-107` once the connection has dropped (native, 1.1.1); or `-errno` from `fcntl(F_DUPFD_CLOEXEC)`, which is `-24` (`-EMFILE`, per-process descriptor limit) or `-23` (`-ENFILE`, system-wide file-table exhaustion) |
 
 logind's reply is `(h fd, b inactive)` — the boolean is
 **inactive**, not active. It is written to `_samvada_outs + 8`
@@ -538,6 +538,8 @@ should expect more work pending and may pump again immediately.
 |---|---|
 | `0` | queue was empty |
 | `1`..`256` | messages dispatched; `256` means the cap was hit, not that the queue drained |
+| `-104` (`-ECONNRESET`) | **the connection is gone** — what sd-bus's `sd_bus_process` answers once a bus has closed, and what the native backend answers since 1.1.1 (until then it returned `0` forever). Release and re-init |
+| `-71` / `-105` | native only: a corrupt stream, or a message declaring ≥ 128 MiB — the stream is lost; release and re-init |
 | `-22` / `-38` / `-107` / sd-bus negatives | as above; a negative from `sd_bus_process` is passed through unchanged |
 
 - **Test**: `test_pump_signals_behaviour` — dispatch, count
@@ -758,7 +760,8 @@ are `-errno` semantics inherited from sd-bus — magnitudes match
 
 | Magnitude | Symbol | Source | Meaning in samvada |
 |---|---|---|---|
-| 2 | `ENOENT` | sd-bus | logind not running, or session has no caller pid |
+| 2 | `ENOENT` | samvada **or** logind | no system-bus socket to connect to; or logind's `System.Error.ENOENT` (e.g. no such device node) |
+| 6 | `ENXIO` | sd-bus | no logind session for the caller's pid (`NoSessionForPID`), or `NameHasNoOwner`. Earlier revisions of this page listed 113 here; libsystemd 262 says 6 |
 | 9 | `EBADF` | C shim | the `TakeDevice` reply read back successfully but carried `fd < 0` — a peer-bus contract violation. `sb_take_device` returns this explicitly rather than reading a stale `errno` from a syscall it never made. **It is not a duplication failure** — see 23 / 24 below |
 | 12 | `ENOMEM` | samvada | scratch buffer alloc failed |
 | 13 | `EACCES` | sd-bus | logind denied. Two distinct callers now: `TakeControl` during `samvada_init` (logind refuses control of this session — the seatless case), and `TakeDevice` (no DRM master available) |
@@ -767,9 +770,12 @@ are `-errno` semantics inherited from sd-bus — magnitudes match
 | 23 | `ENFILE` | C shim | `fcntl(fd, F_DUPFD_CLOEXEC, 0)` failed: system-wide file-table exhaustion |
 | 24 | `EMFILE` | C shim | `fcntl(fd, F_DUPFD_CLOEXEC, 0)` failed: this process hit `RLIMIT_NOFILE` |
 | 38 | `ENOSYS` | samvada | requested slot is null (backend doesn't implement that fn). Since 0.5.1 this also means a **pre-0.5.1 backend table** when it comes from `samvada_init` and the null slot is `take_control` |
-| 105 | `ENOBUFS` | C shim | session path didn't fit in the 512-byte scratch |
-| 107 | `ENOTCONN` | samvada | bus open returned `NULL` without an explicit error |
-| 113 | `EHOSTUNREACH` | sd-bus | no logind session for caller pid (typical for ssh shells) |
+| 71 | `EPROTO` | native | a malformed reply or corrupt stream (sd-bus would say 74 `EBADMSG` for a bad endian byte — a documented divergence) |
+| 104 | `ECONNRESET` | sd-bus **and** native | the connection dropped: from the call that saw it, and from every pump after (native since 1.1.1) |
+| 105 | `ENOBUFS` | C shim **or** native | session path didn't fit in the 512-byte scratch; or (native) a message declaring ≥ 128 MiB |
+| 107 | `ENOTCONN` | samvada | bus open returned `NULL` without an explicit error; or (native, 1.1.1) a call after the connection dropped |
+| 110 | `ETIMEDOUT` | samvada **or** sd-bus | the 25 s call deadline; or the broker's `NoReply` for a call logind died holding |
+| 113 | `EHOSTUNREACH` | sd-bus | `ServiceUnknown`: logind is not on the bus and could not be activated |
 | any other | (sd-bus) | sd-bus | pass-through; consumer logs and aborts |
 
 ### `-22` is ambiguous
@@ -819,12 +825,12 @@ page cannot enumerate.
 
 Each public symbol's pins in `tests/samvada.tcyr` — **162
 asserts**, all green with no bus, no logind and no device. The
-suite as a whole is **586 asserts** across seven files; see
+suite as a whole is **879 asserts** across seven files; see
 [`state.md`](../development/state.md) for the per-file split:
 
 | Fn | Test group | Asserts |
 |---|---|---|
-| `samvada_version` | `v1.1.0 packed triple` | 4 (packed + 3 lanes) |
+| `samvada_version` | `v1.1.1 packed triple` | 4 (packed + 3 lanes) |
 | `samvada_init` (null) | `init rejects null table` | 1 |
 | `samvada_init` (NULL kind) | `init rejects NULL-kind table` | 2 (alloc + reject) |
 | `samvada_init` (unknown kind) | `init rejects an unknown backend kind` | 2 (`kind=99` rejected, `PURE_CYRIUS` accepted) |

@@ -17,12 +17,12 @@
 #   clean           the signature must not name a fn-table parameter
 #   leaks-fn-table  it does, deliberately, and public-api.md says why
 #
-# SCOPE: only `samvada_*` names are frozen here, minus the
-# samvada_ffi_ / samvada_slot_ / samvada_backend_kind_ plumbing. The
-# bundle exports far more than that in total (the dbus_* internals
-# among them) because Cyrius has no visibility mechanism; that larger
-# surface is documented as UNSTABLE in docs/architecture/public-api.md
-# and is deliberately not frozen.
+# SCOPE (1.1.1, A-6): these are the bundle's `public fn`s, and they are
+# ALL a consumer can reach. dist/samvada.cyr is private-by-default
+# (src/visibility.cyr); every other fn in it — 204 at 1.1.1 — is
+# refused at compile time as "private to its file", which
+# tools/boundary_check.py proves in CI by calling every one of them.
+# Until 1.1.1 all of them were reachable and only documented unstable.
 #
 # samvada_init and samvada_main take a fn-table because they are the
 # C-shim entry points and predate the invariant; samvada_native_init

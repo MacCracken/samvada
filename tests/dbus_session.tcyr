@@ -123,24 +123,228 @@ fn test_serial_counter() {
 # branching on magnitudes break. These are the names samvada's own
 # calls can actually produce; AccessDenied is the one captured live
 # in tests/fixtures/dbus/05-takedevice-error-reply.bin.
+# Every row of tests/fixtures/sdbus_errno_map.tsv — sd-bus's own answer,
+# produced by tools/sdbus_errno_probe.c from libsystemd 262 — asserted
+# against the native map. CI checks that these rows ARE the fixture's
+# rows and that the runner's libsystemd still prints the fixture back,
+# so the chain libsystemd == fixture == this test == the code is
+# mechanical. Until 1.1.1 this group pinned eight names, two of them to
+# the wrong errno (ServiceUnknown -2, a made-up NoSuchDevice -19).
+fn t_err(p, s) {
+    var n = t_put(p, s);
+    return dbus_session_map_error(p, n);
+}
+
 fn test_error_name_mapping() {
     test_group("native: dbus error names map to sd-bus errnos");
     var p = alloc(128);
-    var n = t_put(p, "org.freedesktop.DBus.Error.AccessDenied");
-    assert_eq(dbus_session_map_error(p, n), -13, "AccessDenied -> -EACCES");
-    n = t_put(p, "org.freedesktop.login1.NotInControl");
-    assert_eq(dbus_session_map_error(p, n), -22, "NotInControl -> -EINVAL");
-    n = t_put(p, "org.freedesktop.DBus.Error.NoSuchDevice");
-    assert_eq(dbus_session_map_error(p, n), -19, "NoSuchDevice -> -ENODEV");
-    n = t_put(p, "System.Error.EBUSY");
-    assert_eq(dbus_session_map_error(p, n), -16, "EBUSY -> -EBUSY");
-    n = t_put(p, "org.freedesktop.DBus.Error.ServiceUnknown");
-    assert_eq(dbus_session_map_error(p, n), -2, "ServiceUnknown -> -ENOENT");
-    n = t_put(p, "com.example.SomethingElse");
-    assert_eq(dbus_session_map_error(p, n), -5, "anything unmapped -> -EIO");
-    # A prefix must not match a longer name.
-    n = t_put(p, "org.freedesktop.login1.NotInControlXX");
-    assert(dbus_session_map_error(p, n) != -22, "prefix does NOT match");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.Failed"), -13, "org.freedesktop.DBus.Error.Failed");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.NoMemory"), -12, "org.freedesktop.DBus.Error.NoMemory");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.ServiceUnknown"), -113, "org.freedesktop.DBus.Error.ServiceUnknown");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.NameHasNoOwner"), -6, "org.freedesktop.DBus.Error.NameHasNoOwner");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.NoReply"), -110, "org.freedesktop.DBus.Error.NoReply");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.IOError"), -5, "org.freedesktop.DBus.Error.IOError");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.BadAddress"), -99, "org.freedesktop.DBus.Error.BadAddress");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.NotSupported"), -95, "org.freedesktop.DBus.Error.NotSupported");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.LimitsExceeded"), -105, "org.freedesktop.DBus.Error.LimitsExceeded");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.AccessDenied"), -13, "org.freedesktop.DBus.Error.AccessDenied");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.AuthFailed"), -13, "org.freedesktop.DBus.Error.AuthFailed");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.NoServer"), -112, "org.freedesktop.DBus.Error.NoServer");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.Timeout"), -110, "org.freedesktop.DBus.Error.Timeout");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.NoNetwork"), -64, "org.freedesktop.DBus.Error.NoNetwork");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.AddressInUse"), -98, "org.freedesktop.DBus.Error.AddressInUse");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.Disconnected"), -104, "org.freedesktop.DBus.Error.Disconnected");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.InvalidArgs"), -22, "org.freedesktop.DBus.Error.InvalidArgs");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.FileNotFound"), -2, "org.freedesktop.DBus.Error.FileNotFound");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.FileExists"), -17, "org.freedesktop.DBus.Error.FileExists");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.UnknownMethod"), -53, "org.freedesktop.DBus.Error.UnknownMethod");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.UnknownObject"), -53, "org.freedesktop.DBus.Error.UnknownObject");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.UnknownInterface"), -53,
+      "org.freedesktop.DBus.Error.UnknownInterface");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.UnknownProperty"), -53,
+      "org.freedesktop.DBus.Error.UnknownProperty");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.PropertyReadOnly"), -30,
+      "org.freedesktop.DBus.Error.PropertyReadOnly");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.UnixProcessIdUnknown"), -3,
+      "org.freedesktop.DBus.Error.UnixProcessIdUnknown");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.InvalidSignature"), -22,
+      "org.freedesktop.DBus.Error.InvalidSignature");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.InconsistentMessage"), -74,
+      "org.freedesktop.DBus.Error.InconsistentMessage");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.TimedOut"), -110, "org.freedesktop.DBus.Error.TimedOut");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.MatchRuleNotFound"), -2,
+      "org.freedesktop.DBus.Error.MatchRuleNotFound");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.MatchRuleInvalid"), -22,
+      "org.freedesktop.DBus.Error.MatchRuleInvalid");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.InteractiveAuthorizationRequired"), -13,
+      "org.freedesktop.DBus.Error.InteractiveAuthorizationRequired");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.InvalidFileContent"), -22,
+      "org.freedesktop.DBus.Error.InvalidFileContent");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.SELinuxSecurityContextUnknown"), -3,
+      "org.freedesktop.DBus.Error.SELinuxSecurityContextUnknown");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.ObjectPathInUse"), -16,
+      "org.freedesktop.DBus.Error.ObjectPathInUse");
+    assert_eq(t_err(p, "org.freedesktop.login1.BlockedByInhibitorLock"), -13,
+      "org.freedesktop.login1.BlockedByInhibitorLock");
+    assert_eq(t_err(p, "org.freedesktop.login1.DeviceIsTaken"), -22, "org.freedesktop.login1.DeviceIsTaken");
+    assert_eq(t_err(p, "org.freedesktop.login1.DeviceNotTaken"), -22, "org.freedesktop.login1.DeviceNotTaken");
+    assert_eq(t_err(p, "org.freedesktop.login1.NoSessionForPID"), -6, "org.freedesktop.login1.NoSessionForPID");
+    assert_eq(t_err(p, "org.freedesktop.login1.NoSuchSeat"), -6, "org.freedesktop.login1.NoSuchSeat");
+    assert_eq(t_err(p, "org.freedesktop.login1.NoSuchSession"), -6, "org.freedesktop.login1.NoSuchSession");
+    assert_eq(t_err(p, "org.freedesktop.login1.NoSuchUser"), -6, "org.freedesktop.login1.NoSuchUser");
+    assert_eq(t_err(p, "org.freedesktop.login1.NoUserForPID"), -6, "org.freedesktop.login1.NoUserForPID");
+    assert_eq(t_err(p, "org.freedesktop.login1.NotInControl"), -22, "org.freedesktop.login1.NotInControl");
+    assert_eq(t_err(p, "org.freedesktop.login1.NotYourDevice"), -1, "org.freedesktop.login1.NotYourDevice");
+    assert_eq(t_err(p, "org.freedesktop.login1.OperationInProgress"), -115,
+      "org.freedesktop.login1.OperationInProgress");
+    assert_eq(t_err(p, "org.freedesktop.login1.SessionBusy"), -16, "org.freedesktop.login1.SessionBusy");
+    assert_eq(t_err(p, "org.freedesktop.login1.SessionNotOnSeat"), -22, "org.freedesktop.login1.SessionNotOnSeat");
+    assert_eq(t_err(p, "org.freedesktop.login1.SleepVerbNotSupported"), -95,
+      "org.freedesktop.login1.SleepVerbNotSupported");
+    assert_eq(t_err(p, "System.Error.EPERM"), -1, "System.Error.EPERM");
+    assert_eq(t_err(p, "System.Error.ENOENT"), -2, "System.Error.ENOENT");
+    assert_eq(t_err(p, "System.Error.ESRCH"), -3, "System.Error.ESRCH");
+    assert_eq(t_err(p, "System.Error.EINTR"), -4, "System.Error.EINTR");
+    assert_eq(t_err(p, "System.Error.EIO"), -5, "System.Error.EIO");
+    assert_eq(t_err(p, "System.Error.ENXIO"), -6, "System.Error.ENXIO");
+    assert_eq(t_err(p, "System.Error.E2BIG"), -7, "System.Error.E2BIG");
+    assert_eq(t_err(p, "System.Error.ENOEXEC"), -8, "System.Error.ENOEXEC");
+    assert_eq(t_err(p, "System.Error.EBADF"), -9, "System.Error.EBADF");
+    assert_eq(t_err(p, "System.Error.ECHILD"), -10, "System.Error.ECHILD");
+    assert_eq(t_err(p, "System.Error.EAGAIN"), -11, "System.Error.EAGAIN");
+    assert_eq(t_err(p, "System.Error.ENOMEM"), -12, "System.Error.ENOMEM");
+    assert_eq(t_err(p, "System.Error.EACCES"), -13, "System.Error.EACCES");
+    assert_eq(t_err(p, "System.Error.EFAULT"), -14, "System.Error.EFAULT");
+    assert_eq(t_err(p, "System.Error.ENOTBLK"), -15, "System.Error.ENOTBLK");
+    assert_eq(t_err(p, "System.Error.EBUSY"), -16, "System.Error.EBUSY");
+    assert_eq(t_err(p, "System.Error.EEXIST"), -17, "System.Error.EEXIST");
+    assert_eq(t_err(p, "System.Error.EXDEV"), -18, "System.Error.EXDEV");
+    assert_eq(t_err(p, "System.Error.ENODEV"), -19, "System.Error.ENODEV");
+    assert_eq(t_err(p, "System.Error.ENOTDIR"), -20, "System.Error.ENOTDIR");
+    assert_eq(t_err(p, "System.Error.EISDIR"), -21, "System.Error.EISDIR");
+    assert_eq(t_err(p, "System.Error.EINVAL"), -22, "System.Error.EINVAL");
+    assert_eq(t_err(p, "System.Error.ENFILE"), -23, "System.Error.ENFILE");
+    assert_eq(t_err(p, "System.Error.EMFILE"), -24, "System.Error.EMFILE");
+    assert_eq(t_err(p, "System.Error.ENOTTY"), -25, "System.Error.ENOTTY");
+    assert_eq(t_err(p, "System.Error.ETXTBSY"), -26, "System.Error.ETXTBSY");
+    assert_eq(t_err(p, "System.Error.EFBIG"), -27, "System.Error.EFBIG");
+    assert_eq(t_err(p, "System.Error.ENOSPC"), -28, "System.Error.ENOSPC");
+    assert_eq(t_err(p, "System.Error.ESPIPE"), -29, "System.Error.ESPIPE");
+    assert_eq(t_err(p, "System.Error.EROFS"), -30, "System.Error.EROFS");
+    assert_eq(t_err(p, "System.Error.EMLINK"), -31, "System.Error.EMLINK");
+    assert_eq(t_err(p, "System.Error.EPIPE"), -32, "System.Error.EPIPE");
+    assert_eq(t_err(p, "System.Error.EDOM"), -33, "System.Error.EDOM");
+    assert_eq(t_err(p, "System.Error.ERANGE"), -34, "System.Error.ERANGE");
+    assert_eq(t_err(p, "System.Error.EDEADLK"), -35, "System.Error.EDEADLK");
+    assert_eq(t_err(p, "System.Error.ENAMETOOLONG"), -36, "System.Error.ENAMETOOLONG");
+    assert_eq(t_err(p, "System.Error.ENOLCK"), -37, "System.Error.ENOLCK");
+    assert_eq(t_err(p, "System.Error.ENOSYS"), -38, "System.Error.ENOSYS");
+    assert_eq(t_err(p, "System.Error.ENOTEMPTY"), -39, "System.Error.ENOTEMPTY");
+    assert_eq(t_err(p, "System.Error.ELOOP"), -40, "System.Error.ELOOP");
+    assert_eq(t_err(p, "System.Error.ENOMSG"), -42, "System.Error.ENOMSG");
+    assert_eq(t_err(p, "System.Error.EIDRM"), -43, "System.Error.EIDRM");
+    assert_eq(t_err(p, "System.Error.ECHRNG"), -44, "System.Error.ECHRNG");
+    assert_eq(t_err(p, "System.Error.EL2NSYNC"), -45, "System.Error.EL2NSYNC");
+    assert_eq(t_err(p, "System.Error.EL3HLT"), -46, "System.Error.EL3HLT");
+    assert_eq(t_err(p, "System.Error.EL3RST"), -47, "System.Error.EL3RST");
+    assert_eq(t_err(p, "System.Error.ELNRNG"), -48, "System.Error.ELNRNG");
+    assert_eq(t_err(p, "System.Error.EUNATCH"), -49, "System.Error.EUNATCH");
+    assert_eq(t_err(p, "System.Error.ENOCSI"), -50, "System.Error.ENOCSI");
+    assert_eq(t_err(p, "System.Error.EL2HLT"), -51, "System.Error.EL2HLT");
+    assert_eq(t_err(p, "System.Error.EBADE"), -52, "System.Error.EBADE");
+    assert_eq(t_err(p, "System.Error.EBADR"), -53, "System.Error.EBADR");
+    assert_eq(t_err(p, "System.Error.EXFULL"), -54, "System.Error.EXFULL");
+    assert_eq(t_err(p, "System.Error.ENOANO"), -55, "System.Error.ENOANO");
+    assert_eq(t_err(p, "System.Error.EBADRQC"), -56, "System.Error.EBADRQC");
+    assert_eq(t_err(p, "System.Error.EBADSLT"), -57, "System.Error.EBADSLT");
+    assert_eq(t_err(p, "System.Error.EBFONT"), -59, "System.Error.EBFONT");
+    assert_eq(t_err(p, "System.Error.ENOSTR"), -60, "System.Error.ENOSTR");
+    assert_eq(t_err(p, "System.Error.ENODATA"), -61, "System.Error.ENODATA");
+    assert_eq(t_err(p, "System.Error.ETIME"), -62, "System.Error.ETIME");
+    assert_eq(t_err(p, "System.Error.ENOSR"), -63, "System.Error.ENOSR");
+    assert_eq(t_err(p, "System.Error.ENONET"), -64, "System.Error.ENONET");
+    assert_eq(t_err(p, "System.Error.ENOPKG"), -65, "System.Error.ENOPKG");
+    assert_eq(t_err(p, "System.Error.EREMOTE"), -66, "System.Error.EREMOTE");
+    assert_eq(t_err(p, "System.Error.ENOLINK"), -67, "System.Error.ENOLINK");
+    assert_eq(t_err(p, "System.Error.EADV"), -68, "System.Error.EADV");
+    assert_eq(t_err(p, "System.Error.ESRMNT"), -69, "System.Error.ESRMNT");
+    assert_eq(t_err(p, "System.Error.ECOMM"), -70, "System.Error.ECOMM");
+    assert_eq(t_err(p, "System.Error.EPROTO"), -71, "System.Error.EPROTO");
+    assert_eq(t_err(p, "System.Error.EMULTIHOP"), -72, "System.Error.EMULTIHOP");
+    assert_eq(t_err(p, "System.Error.EDOTDOT"), -73, "System.Error.EDOTDOT");
+    assert_eq(t_err(p, "System.Error.EBADMSG"), -74, "System.Error.EBADMSG");
+    assert_eq(t_err(p, "System.Error.EOVERFLOW"), -75, "System.Error.EOVERFLOW");
+    assert_eq(t_err(p, "System.Error.ENOTUNIQ"), -76, "System.Error.ENOTUNIQ");
+    assert_eq(t_err(p, "System.Error.EBADFD"), -77, "System.Error.EBADFD");
+    assert_eq(t_err(p, "System.Error.EREMCHG"), -78, "System.Error.EREMCHG");
+    assert_eq(t_err(p, "System.Error.ELIBACC"), -79, "System.Error.ELIBACC");
+    assert_eq(t_err(p, "System.Error.ELIBBAD"), -80, "System.Error.ELIBBAD");
+    assert_eq(t_err(p, "System.Error.ELIBSCN"), -81, "System.Error.ELIBSCN");
+    assert_eq(t_err(p, "System.Error.ELIBMAX"), -82, "System.Error.ELIBMAX");
+    assert_eq(t_err(p, "System.Error.ELIBEXEC"), -83, "System.Error.ELIBEXEC");
+    assert_eq(t_err(p, "System.Error.EILSEQ"), -84, "System.Error.EILSEQ");
+    assert_eq(t_err(p, "System.Error.ERESTART"), -85, "System.Error.ERESTART");
+    assert_eq(t_err(p, "System.Error.ESTRPIPE"), -86, "System.Error.ESTRPIPE");
+    assert_eq(t_err(p, "System.Error.EUSERS"), -87, "System.Error.EUSERS");
+    assert_eq(t_err(p, "System.Error.ENOTSOCK"), -88, "System.Error.ENOTSOCK");
+    assert_eq(t_err(p, "System.Error.EDESTADDRREQ"), -89, "System.Error.EDESTADDRREQ");
+    assert_eq(t_err(p, "System.Error.EMSGSIZE"), -90, "System.Error.EMSGSIZE");
+    assert_eq(t_err(p, "System.Error.EPROTOTYPE"), -91, "System.Error.EPROTOTYPE");
+    assert_eq(t_err(p, "System.Error.ENOPROTOOPT"), -92, "System.Error.ENOPROTOOPT");
+    assert_eq(t_err(p, "System.Error.EPROTONOSUPPORT"), -93, "System.Error.EPROTONOSUPPORT");
+    assert_eq(t_err(p, "System.Error.ESOCKTNOSUPPORT"), -94, "System.Error.ESOCKTNOSUPPORT");
+    assert_eq(t_err(p, "System.Error.EOPNOTSUPP"), -95, "System.Error.EOPNOTSUPP");
+    assert_eq(t_err(p, "System.Error.EPFNOSUPPORT"), -96, "System.Error.EPFNOSUPPORT");
+    assert_eq(t_err(p, "System.Error.EAFNOSUPPORT"), -97, "System.Error.EAFNOSUPPORT");
+    assert_eq(t_err(p, "System.Error.EADDRINUSE"), -98, "System.Error.EADDRINUSE");
+    assert_eq(t_err(p, "System.Error.EADDRNOTAVAIL"), -99, "System.Error.EADDRNOTAVAIL");
+    assert_eq(t_err(p, "System.Error.ENETDOWN"), -100, "System.Error.ENETDOWN");
+    assert_eq(t_err(p, "System.Error.ENETUNREACH"), -101, "System.Error.ENETUNREACH");
+    assert_eq(t_err(p, "System.Error.ENETRESET"), -102, "System.Error.ENETRESET");
+    assert_eq(t_err(p, "System.Error.ECONNABORTED"), -103, "System.Error.ECONNABORTED");
+    assert_eq(t_err(p, "System.Error.ECONNRESET"), -104, "System.Error.ECONNRESET");
+    assert_eq(t_err(p, "System.Error.ENOBUFS"), -105, "System.Error.ENOBUFS");
+    assert_eq(t_err(p, "System.Error.EISCONN"), -106, "System.Error.EISCONN");
+    assert_eq(t_err(p, "System.Error.ENOTCONN"), -107, "System.Error.ENOTCONN");
+    assert_eq(t_err(p, "System.Error.ESHUTDOWN"), -108, "System.Error.ESHUTDOWN");
+    assert_eq(t_err(p, "System.Error.ETOOMANYREFS"), -109, "System.Error.ETOOMANYREFS");
+    assert_eq(t_err(p, "System.Error.ETIMEDOUT"), -110, "System.Error.ETIMEDOUT");
+    assert_eq(t_err(p, "System.Error.ECONNREFUSED"), -111, "System.Error.ECONNREFUSED");
+    assert_eq(t_err(p, "System.Error.EHOSTDOWN"), -112, "System.Error.EHOSTDOWN");
+    assert_eq(t_err(p, "System.Error.EHOSTUNREACH"), -113, "System.Error.EHOSTUNREACH");
+    assert_eq(t_err(p, "System.Error.EALREADY"), -114, "System.Error.EALREADY");
+    assert_eq(t_err(p, "System.Error.EINPROGRESS"), -115, "System.Error.EINPROGRESS");
+    assert_eq(t_err(p, "System.Error.ESTALE"), -116, "System.Error.ESTALE");
+    assert_eq(t_err(p, "System.Error.EUCLEAN"), -117, "System.Error.EUCLEAN");
+    assert_eq(t_err(p, "System.Error.ENOTNAM"), -118, "System.Error.ENOTNAM");
+    assert_eq(t_err(p, "System.Error.ENAVAIL"), -119, "System.Error.ENAVAIL");
+    assert_eq(t_err(p, "System.Error.EISNAM"), -120, "System.Error.EISNAM");
+    assert_eq(t_err(p, "System.Error.EREMOTEIO"), -121, "System.Error.EREMOTEIO");
+    assert_eq(t_err(p, "System.Error.EDQUOT"), -122, "System.Error.EDQUOT");
+    assert_eq(t_err(p, "System.Error.ENOMEDIUM"), -123, "System.Error.ENOMEDIUM");
+    assert_eq(t_err(p, "System.Error.EMEDIUMTYPE"), -124, "System.Error.EMEDIUMTYPE");
+    assert_eq(t_err(p, "System.Error.ECANCELED"), -125, "System.Error.ECANCELED");
+    assert_eq(t_err(p, "System.Error.ENOKEY"), -126, "System.Error.ENOKEY");
+    assert_eq(t_err(p, "System.Error.EKEYEXPIRED"), -127, "System.Error.EKEYEXPIRED");
+    assert_eq(t_err(p, "System.Error.EKEYREVOKED"), -128, "System.Error.EKEYREVOKED");
+    assert_eq(t_err(p, "System.Error.EKEYREJECTED"), -129, "System.Error.EKEYREJECTED");
+    assert_eq(t_err(p, "System.Error.EOWNERDEAD"), -130, "System.Error.EOWNERDEAD");
+    assert_eq(t_err(p, "System.Error.ENOTRECOVERABLE"), -131, "System.Error.ENOTRECOVERABLE");
+    assert_eq(t_err(p, "System.Error.ERFKILL"), -132, "System.Error.ERFKILL");
+    assert_eq(t_err(p, "System.Error.EHWPOISON"), -133, "System.Error.EHWPOISON");
+    assert_eq(t_err(p, "System.Error.EWOULDBLOCK"), -11, "System.Error.EWOULDBLOCK");
+    assert_eq(t_err(p, "System.Error.EDEADLOCK"), -35, "System.Error.EDEADLOCK");
+    assert_eq(t_err(p, "System.Error.ENOTSUP"), -95, "System.Error.ENOTSUP");
+    assert_eq(t_err(p, "System.Error.NOTANERRNO"), -5, "System.Error.NOTANERRNO");
+    assert_eq(t_err(p, "System.Error."), -5, "System.Error.");
+    assert_eq(t_err(p, "org.freedesktop.DBus.Error.NoSuchDevice"), -5, "org.freedesktop.DBus.Error.NoSuchDevice");
+    assert_eq(t_err(p, "com.example.SomethingElse"), -5, "com.example.SomethingElse");
+    # A prefix must not match a longer name, and an errno name must
+    # match whole.
+    assert(t_err(p, "org.freedesktop.login1.NotInControlXX") != -22, "prefix does NOT match");
+    assert_eq(t_err(p, "System.Error.EBUSYX"), -5, "an errno name matches whole");
+    assert_eq(t_err(p, "System.Error"), -5, "no trailing dot is not the System.Error family");
+    assert_eq(t_err(p, "System.Error.EFTYPE"), -5, "EFTYPE is left out of the table: -EIO, as libsystemd <= 259");
     return 0;
 }
 
@@ -1059,6 +1263,600 @@ fn test_sasl_reader_survives_hostile_input() {
     return 0;
 }
 
+# ==== A-4 (1.1.1): the protocol state machine ====
+# The roadmap's A-4 named three states no test had driven: a bus that
+# goes away mid-session, a logind restart, and PauseDevice /
+# ResumeDevice arriving around a TakeDevice. Each is reproduced here
+# over a socketpair, with the bytes and descriptors the real peers send.
+
+# shutdown(fd, SHUT_WR). The stdlib has no wrapper, so the x86_64
+# number is written at a literal site — cyrius's syscall rule 2, which
+# ELF-aarch64 routes 48 -> 210 through its compat chain. A half-closed
+# peer is how these tests watch for bytes samvada must NOT send: the
+# peer stops writing, but its read side stays open.
+fn s_shut_wr(fd) {
+    return syscall(48, fd, 1);
+}
+
+# Whatever the peer can read right now, without blocking: bytes, or -11.
+fn s_peer_reads(fd) {
+    var slot = alloc(8);
+    var buf = alloc(256);
+    store64(slot, (0 - 1));
+    var n = dbus_sys_recv_fd_flags(fd, buf, 256, slot, dbus_sys_msg_dontwait());
+    var qfd = load64(slot);
+    if (qfd >= 0) { sys_close(qfd); }
+    return n;
+}
+
+fn s_wire() {
+    var w = alloc(512);
+    s_copy(w, dbus_marshal_buf(), dbus_marshal_len());
+    return w;
+}
+
+fn s_cstr(lit) {
+    var p = alloc(128);
+    var n = t_put(p, lit);
+    store8(p + n, 0);
+    return p;
+}
+
+fn s_sig(lit) {
+    return s_cstr(lit);
+}
+
+# logind's PauseDevice(u major, u minor, s type).
+fn s_build_pause(major, minor, kind) {
+    dbus_marshal_begin(dbus_marshal_type_signal(), 1, 9100);
+    var m = s_cstr("PauseDevice");
+    dbus_marshal_field_str(dbus_marshal_f_member(), 115, m, strlen(m));
+    var sg = s_sig("uus");
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sg, 3);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_u32(major);
+    dbus_marshal_body_u32(minor);
+    var k = s_cstr(kind);
+    dbus_marshal_body_str(k, strlen(k));
+    dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
+    return dbus_marshal_len();
+}
+
+# logind's ResumeDevice(u major, u minor, h fd): ONE descriptor rides on it.
+fn s_build_resume(major, minor) {
+    dbus_marshal_begin(dbus_marshal_type_signal(), 1, 9101);
+    var m = s_cstr("ResumeDevice");
+    dbus_marshal_field_str(dbus_marshal_f_member(), 115, m, strlen(m));
+    var sg = s_sig("uuh");
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sg, 3);
+    dbus_marshal_field_u32(dbus_marshal_f_unixfds(), 1);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_u32(major);
+    dbus_marshal_body_u32(minor);
+    dbus_marshal_body_u32(0);
+    dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
+    return dbus_marshal_len();
+}
+
+# TakeDevice's METHOD_RETURN: (h fd, b inactive), one descriptor.
+fn s_build_take_reply(rser) {
+    dbus_marshal_begin(dbus_marshal_type_return(), 1, 5100);
+    dbus_marshal_field_u32(dbus_marshal_f_replyser(), rser);
+    var sg = s_sig("hb");
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sg, 2);
+    dbus_marshal_field_u32(dbus_marshal_f_unixfds(), 1);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_u32(0);
+    dbus_marshal_body_bool(0);
+    dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
+    return dbus_marshal_len();
+}
+
+# An empty METHOD_RETURN, optionally naming its DESTINATION and SENDER
+# and optionally declaring `nfds` descriptors it should not carry.
+fn s_build_return(rser, dest, sender, nfds) {
+    dbus_marshal_begin(dbus_marshal_type_return(), 1, 5200);
+    dbus_marshal_field_u32(dbus_marshal_f_replyser(), rser);
+    if (dest != 0) {
+        dbus_marshal_field_str(dbus_marshal_f_dest(), 115, dest, strlen(dest));
+    }
+    if (sender != 0) {
+        dbus_marshal_field_str(dbus_marshal_f_sender(), 115, sender, strlen(sender));
+    }
+    if (nfds > 0) { dbus_marshal_field_u32(dbus_marshal_f_unixfds(), nfds); }
+    dbus_marshal_end_fields();
+    dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
+    return dbus_marshal_len();
+}
+
+fn s_build_error(rser, name, dest, sender, nfds) {
+    dbus_marshal_begin(dbus_marshal_type_error(), 1, 5300);
+    dbus_marshal_field_u32(dbus_marshal_f_replyser(), rser);
+    dbus_marshal_field_str(dbus_marshal_f_errname(), 115, name, strlen(name));
+    if (dest != 0) {
+        dbus_marshal_field_str(dbus_marshal_f_dest(), 115, dest, strlen(dest));
+    }
+    if (sender != 0) {
+        dbus_marshal_field_str(dbus_marshal_f_sender(), 115, sender, strlen(sender));
+    }
+    if (nfds > 0) { dbus_marshal_field_u32(dbus_marshal_f_unixfds(), nfds); }
+    dbus_marshal_end_fields();
+    dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
+    return dbus_marshal_len();
+}
+
+# org.freedesktop.DBus.NameOwnerChanged(s name, s old, s new).
+fn s_build_owner_changed(name, old, new) {
+    dbus_marshal_begin(dbus_marshal_type_signal(), 1, 9200);
+    var m = s_cstr("NameOwnerChanged");
+    dbus_marshal_field_str(dbus_marshal_f_member(), 115, m, strlen(m));
+    var snd = s_cstr("org.freedesktop.DBus");
+    dbus_marshal_field_str(dbus_marshal_f_sender(), 115, snd, strlen(snd));
+    var sg = s_sig("sss");
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sg, 3);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_str(name, strlen(name));
+    dbus_marshal_body_str(old, strlen(old));
+    dbus_marshal_body_str(new, strlen(new));
+    dbus_marshal_finish();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
+    return dbus_marshal_len();
+}
+
+# ---- mid-session disconnect ----
+# Until 1.1.1 a bus that went away was invisible to pump_signals —
+# 0 events, every call, forever — and a call after it wrote to the
+# dead socket. sd-bus enters CLOSING at the drop and answers from state
+# from then on; so does samvada now (_dbs_closed).
+fn test_disconnect_is_a_state() {
+    test_group("native: a disconnect is a state — reported once seen, nothing written after it");
+    var before = s_count_open();
+    var bus = s_pair();
+    var a = bus & 0xFFFFFFFF;
+    var b = (bus >> 32) & 0xFFFFFFFF;
+    dbus_session_reset();
+    dbus_frame_init();
+
+    assert_eq(dbus_native_pump_signals(b), 0, "a quiet live bus is 0 events, not an error");
+    assert_eq(dbus_session_closed(), 0, "and the connection is open");
+    assert_eq(s_shut_wr(a), 0, "the peer half-closes: it stops sending but still reads");
+    assert_eq(dbus_native_pump_signals(b), -104,
+      "THE PIN: the pump reports the drop as -ECONNRESET, as sd-bus does (until 1.1.1: 0, forever)");
+    assert_eq(dbus_session_closed(), 1, "and the connection is now known closed");
+    assert_eq(dbus_native_pump_signals(b), -104, "every later pump says so too");
+
+    var n = s_build_return(1, 0, 0, 0);
+    assert_eq(dbus_session_call(b, 1), -107,
+      "a call after the drop is -ENOTCONN, as sd-bus's !BUS_IS_OPEN");
+    assert_eq(s_peer_reads(a), -11, "and it wrote NOTHING: the peer reads EAGAIN");
+
+    sys_close(a);
+    dbus_native_close_bus(b);
+    dbus_session_reset();
+    assert_eq(dbus_session_closed(), 0, "a fresh connection starts open");
+    assert_eq(s_count_open(), before, "no descriptor leaked");
+    return 0;
+}
+
+fn test_drop_mid_call_is_connreset() {
+    test_group("native: a connection that drops mid-call ends with -ECONNRESET, and stays ended");
+    var before = s_count_open();
+
+    # (1) The peer sends HALF a reply and stops: EOF mid-message.
+    var bus = s_pair();
+    var a = bus & 0xFFFFFFFF;
+    var b = (bus >> 32) & 0xFFFFFFFF;
+    dbus_session_reset();
+    dbus_frame_init();
+    var n = s_build_return(1, 0, 0, 0);
+    var w = s_wire();
+    assert_eq(sys_write(a, w, 20), 20, "20 bytes of a reply planted");
+    assert_eq(s_shut_wr(a), 0, "then the peer stops sending");
+    assert_eq(dbus_session_call(b, 1), -104,
+      "THE PIN: EOF mid-reply is the connection going: -ECONNRESET (until 1.1.1: -EPROTO)");
+    assert_eq(dbus_session_call(b, 2), -107, "and the next call is -ENOTCONN without a send");
+    sys_close(a);
+    sys_close(b);
+
+    # (2) The peer is gone before the call: the SEND fails.
+    var bus2 = s_pair();
+    var c = bus2 & 0xFFFFFFFF;
+    var d = (bus2 >> 32) & 0xFFFFFFFF;
+    dbus_session_reset();
+    dbus_frame_init();
+    sys_close(c);
+    n = s_build_return(1, 0, 0, 0);
+    assert_eq(dbus_session_call(d, 1), -104,
+      "a send to a departed peer is -ECONNRESET, not -EPIPE — EPIPE is a disconnect errno (and no SIGPIPE)");
+    assert_eq(dbus_session_closed(), 1, "and it latches the connection closed");
+    sys_close(d);
+    dbus_session_reset();
+    assert_eq(s_count_open(), before, "no descriptor leaked");
+    return 0;
+}
+
+# ---- logind restart ----
+# systemd v262 session_load() (logind-session.c:705-708) restores a
+# session's controller on restart if the controller's bus name still has
+# an owner — samvada's connection is to the BROKER, so it does — and its
+# devices with it. So samvada keeps control across the restart, and its
+# cached `_samvada_control` stays true. What changes on the wire is
+# logind's unique name, plus the broker's NameOwnerChanged traffic, plus
+# an error for any call that was in flight when the old instance died.
+fn test_logind_restart_is_survived() {
+    test_group("native: a logind restart — a new sender, NameOwnerChanged, NoReply — is survived");
+    var bus = s_pair();
+    var a = bus & 0xFFFFFFFF;
+    var b = (bus >> 32) & 0xFFFFFFFF;
+    dbus_session_reset();
+    dbus_frame_init();
+    var me = s_cstr(":1.42");
+    dbus_session_set_unique(me, strlen(me));
+
+    var n = s_build_return(1, me, s_cstr(":1.5"), 0);
+    var w = s_wire();
+    assert_eq(sys_write(a, w, n), n, "a reply from logind's first instance, :1.5");
+    assert_eq(dbus_session_call(b, 1), 0, "accepted");
+    dbus_session_done();
+
+    var l1 = s_cstr("org.freedesktop.login1");
+    n = s_build_owner_changed(l1, s_cstr(":1.5"), s_cstr(""));
+    w = s_wire();
+    assert_eq(sys_write(a, w, n), n, "the broker: login1 lost its owner");
+    n = s_build_owner_changed(l1, s_cstr(""), s_cstr(":1.99"));
+    w = s_wire();
+    assert_eq(sys_write(a, w, n), n, "the broker: login1 has a new owner, :1.99");
+    n = s_build_return(2, me, s_cstr(":1.99"), 0);
+    w = s_wire();
+    assert_eq(sys_write(a, w, n), n, "a reply from the NEW instance");
+    assert_eq(dbus_session_call(b, 2), 0,
+      "THE PIN: accepted — samvada never pins logind's unique name, which a restart changes");
+    dbus_session_done();
+
+    var nr = s_cstr("org.freedesktop.DBus.Error.NoReply");
+    n = s_build_error(3, nr, me, s_cstr("org.freedesktop.DBus"), 0);
+    w = s_wire();
+    assert_eq(sys_write(a, w, n), n, "the broker answers a call logind died holding");
+    assert_eq(dbus_session_call(b, 3), -110,
+      "-ETIMEDOUT, as sd-bus maps NoReply (until 1.1.1: -EIO)");
+    assert_eq(dbus_session_closed(), 0, "and an error reply is not a disconnect");
+
+    sys_close(a);
+    sys_close(b);
+    dbus_session_reset();
+    return 0;
+}
+
+# ---- PauseDevice / ResumeDevice around a TakeDevice (ADR-0004) ----
+# Signals are not surfaced (ADR-0004 §2), so their descriptors must be
+# closed in stream order — never left for the next take_device. The
+# two 1.0.1 tests cover a lone signal; these drive the orderings a VT
+# switch actually produces.
+fn test_pause_resume_around_take_device() {
+    test_group("native: Pause and Resume around a TakeDevice keep each descriptor with its own message");
+    var before = s_count_open();
+    var bus = s_pair();
+    var a = bus & 0xFFFFFFFF;
+    var b = (bus >> 32) & 0xFFFFFFFF;
+    var px = s_pair();
+    var x = px & 0xFFFFFFFF;
+    var xp = (px >> 32) & 0xFFFFFFFF;
+    var py = s_pair();
+    var y = py & 0xFFFFFFFF;
+    var yp = (py >> 32) & 0xFFFFFFFF;
+    var pz = s_pair();
+    var z = pz & 0xFFFFFFFF;
+    var zp = (pz >> 32) & 0xFFFFFFFF;
+    var pv = s_pair();
+    var v = pv & 0xFFFFFFFF;
+    var vp = (pv >> 32) & 0xFFFFFFFF;
+    var sess = s_cstr("/org/freedesktop/login1/session/_31");
+    var fo = alloc(8);
+    var ao = alloc(8);
+
+    # (1) A VT switch lands before the reply: Pause("force"), Resume(X).
+    dbus_session_reset();
+    dbus_frame_init();
+    var n = s_build_pause(226, 0, "force");
+    var w = s_wire();
+    assert_eq(sys_write(a, w, n), n, "PauseDevice(force) planted");
+    n = s_build_resume(226, 0);
+    w = s_wire();
+    assert_eq(s_send_with_fd(a, w, n, x), n, "ResumeDevice + its descriptor X planted");
+    n = s_build_take_reply(1);
+    w = s_wire();
+    assert_eq(s_send_with_fd(a, w, n, y), n, "the TakeDevice reply + Y planted");
+    assert_eq(dbus_native_take_device(b, sess, 226, 0, fo, ao), 0, "take_device succeeded");
+    assert_eq(s_ino(load64(fo)), s_ino(y),
+      "THE PIN: it got the REPLY's descriptor, past a Pause and a Resume");
+    assert_eq(dbus_frame_fd_count(), 0, "and the Resume's was closed, not left queued");
+    sys_close(load64(fo));
+
+    # (2) The reply first, a Resume(Z) right behind it — then the
+    # consumer takes a SECOND device (say, input) without pumping.
+    dbus_session_reset();
+    dbus_frame_init();
+    n = s_build_take_reply(1);
+    w = s_wire();
+    assert_eq(s_send_with_fd(a, w, n, y), n, "reply + Y");
+    n = s_build_resume(226, 0);
+    w = s_wire();
+    assert_eq(s_send_with_fd(a, w, n, z), n, "Resume + Z, right behind it");
+    assert_eq(dbus_native_take_device(b, sess, 226, 0, fo, ao), 0, "the first take");
+    assert_eq(s_ino(load64(fo)), s_ino(y), "got Y");
+    sys_close(load64(fo));
+    n = s_build_take_reply(2);
+    w = s_wire();
+    assert_eq(s_send_with_fd(a, w, n, v), n, "the second take's reply + V");
+    assert_eq(dbus_native_take_device(b, sess, 13, 64, fo, ao), 0, "the second take");
+    assert_eq(s_ino(load64(fo)), s_ino(v),
+      "THE PIN: the second take got V, not the Resume's Z queued ahead of it");
+    assert_eq(dbus_frame_fd_count(), 0, "and Z was closed on the way past");
+    sys_close(load64(fo));
+
+    sys_close(x);  sys_close(xp);
+    sys_close(y);  sys_close(yp);
+    sys_close(z);  sys_close(zp);
+    sys_close(v);  sys_close(vp);
+    sys_close(a);  sys_close(b);
+    dbus_session_reset();
+    assert_eq(s_count_open(), before, "no descriptor leaked");
+    return 0;
+}
+
+fn test_pause_needing_an_ack_is_drained_not_acked() {
+    test_group("native: PauseDevice(\"pause\") is drained and NOT acknowledged (ADR-0004)");
+    var bus = s_pair();
+    var a = bus & 0xFFFFFFFF;
+    var b = (bus >> 32) & 0xFFFFFFFF;
+    dbus_session_reset();
+    dbus_frame_init();
+    var n = s_build_pause(226, 0, "pause");
+    var w = s_wire();
+    assert_eq(sys_write(a, w, n), n, "PauseDevice(pause) planted — the one type wanting PauseDeviceComplete");
+    assert_eq(dbus_native_pump_signals(b), 1, "the pump drained it");
+    assert_eq(s_peer_reads(a), -11,
+      "and sent nothing back: no PauseDeviceComplete. ADR-0004 finding 3: unreachable on a VT seat, and nothing waits");
+    sys_close(a);
+    sys_close(b);
+    dbus_session_reset();
+    return 0;
+}
+
+# ---- descriptors on replies that should carry none ----
+fn test_stray_reply_descriptors_are_closed() {
+    test_group("native: a descriptor on a reply that should carry none is closed, never handed to take_device");
+    var before = s_count_open();
+    var bus = s_pair();
+    var a = bus & 0xFFFFFFFF;
+    var b = (bus >> 32) & 0xFFFFFFFF;
+    var ps = s_pair();
+    var st = ps & 0xFFFFFFFF;
+    var stp = (ps >> 32) & 0xFFFFFFFF;
+    var pe = s_pair();
+    var e = pe & 0xFFFFFFFF;
+    var ep = (pe >> 32) & 0xFFFFFFFF;
+    var py = s_pair();
+    var y = py & 0xFFFFFFFF;
+    var yp = (py >> 32) & 0xFFFFFFFF;
+    var sess = s_cstr("/org/freedesktop/login1/session/_31");
+    var fo = alloc(8);
+    var ao = alloc(8);
+    dbus_session_reset();
+    dbus_frame_init();
+
+    var n = s_build_return(1, 0, 0, 1);
+    var w = s_wire();
+    assert_eq(s_send_with_fd(a, w, n, st), n, "a TakeControl reply carrying a stray descriptor");
+    assert_eq(dbus_native_take_control(b, sess), 0, "take_control succeeded");
+    assert_eq(dbus_frame_fd_count(), 0,
+      "THE PIN: the stray went with its reply (until 1.1.1 it stayed at the head of the queue)");
+
+    var ad = s_cstr("org.freedesktop.DBus.Error.AccessDenied");
+    n = s_build_error(2, ad, 0, 0, 1);
+    w = s_wire();
+    assert_eq(s_send_with_fd(a, w, n, e), n, "an ERROR reply carrying one");
+    assert_eq(dbus_native_release_control(b, sess), -13, "release_control: -EACCES");
+    assert_eq(dbus_frame_fd_count(), 0, "and the ERROR reply's descriptor went with it too");
+
+    n = s_build_take_reply(3);
+    w = s_wire();
+    assert_eq(s_send_with_fd(a, w, n, y), n, "then a real TakeDevice reply + Y");
+    assert_eq(dbus_native_take_device(b, sess, 226, 0, fo, ao), 0, "take_device succeeded");
+    assert_eq(s_ino(load64(fo)), s_ino(y), "and it got Y, not either stray");
+    sys_close(load64(fo));
+
+    sys_close(st); sys_close(stp);
+    sys_close(e);  sys_close(ep);
+    sys_close(y);  sys_close(yp);
+    sys_close(a);  sys_close(b);
+    dbus_session_reset();
+    assert_eq(s_count_open(), before, "no descriptor leaked");
+    return 0;
+}
+
+# ==== A-1 (1.1.1): resource exhaustion ====
+
+# ---- every logind call, not only the pump ----
+# The 1.0.1 pin covers the 60 Hz pump and the reply loop. A-1's
+# question is whether a long-running consumer grows without bound, and
+# alloc() never frees — so EVERY repeating path counts, including the
+# ones a compositor runs per device per VT switch. Measured before
+# 1.1.1: take_control 200 bytes per call, release_control 192,
+# release_device 200, take_device 200, GetSessionByPID 336 — a literal
+# copied into a fresh alloc() each time. Each call here gets a real mock
+# reply, so the whole path runs, parse included; the reply bytes and the
+# descriptors are prepared BEFORE the measured loop, so only the call
+# itself is inside it.
+fn s_heap_per_call(b, a, which, sess) {
+    var fo = alloc(8);
+    var ao = alloc(8);
+    var out = alloc(128);
+    var n = 0;
+    if (which == 3) { n = s_build_take_reply(1); }
+    if (which == 4) {
+        var path = s_cstr("/org/freedesktop/login1/session/_31");
+        n = s_build_reply(1, 0, 0, path, strlen(path));
+    }
+    if (which < 3) { n = s_build_return(1, 0, 0, 0); }
+    var w = s_wire();
+    var fds = alloc(12 * 16);
+    var k = 0;
+    while (k < 12) {
+        var pp = s_pair();
+        store64(fds + k * 16, pp & 0xFFFFFFFF);
+        store64(fds + k * 16 + 8, (pp >> 32) & 0xFFFFFFFF);
+        k = k + 1;
+    }
+    var rc = 0;
+    var before = 0;
+    var i = 0;
+    # The first call warms one-time state; the next ten are measured.
+    while (i < 11) {
+        if (i == 1) { before = alloc_used(); }
+        dbus_session_reset();
+        dbus_frame_init();
+        if (which == 3) {
+            s_send_with_fd(a, w, n, load64(fds + i * 16));
+        }
+        if (which != 3) { sys_write(a, w, n); }
+        if (which == 0) { rc = dbus_native_take_control(b, sess); }
+        if (which == 1) { rc = dbus_native_release_control(b, sess); }
+        if (which == 2) { rc = dbus_native_release_device(b, sess, 226, 0); }
+        if (which == 3) {
+            rc = dbus_native_take_device(b, sess, 226, 0, fo, ao);
+            sys_close(load64(fo));
+        }
+        if (which == 4) { rc = dbus_native_get_session_path(b, 1000, out, 128); }
+        if (rc != 0) { return (0 - 1000000) + rc; }
+        i = i + 1;
+    }
+    var grew = alloc_used() - before;
+    k = 0;
+    while (k < 12) {
+        sys_close(load64(fds + k * 16));
+        sys_close(load64(fds + k * 16 + 8));
+        k = k + 1;
+    }
+    return grew;
+}
+
+fn test_logind_calls_do_not_grow_the_heap() {
+    test_group("native: every logind call allocates nothing per call");
+    var before = s_count_open();
+    var bus = s_pair();
+    var a = bus & 0xFFFFFFFF;
+    var b = (bus >> 32) & 0xFFFFFFFF;
+    var sess = s_cstr("/org/freedesktop/login1/session/_31");
+    assert_eq(s_heap_per_call(b, a, 0, sess), 0, "take_control: ten calls allocate nothing (was 200 B each)");
+    assert_eq(s_heap_per_call(b, a, 1, sess), 0, "release_control: ten calls allocate nothing (was 192 B each)");
+    assert_eq(s_heap_per_call(b, a, 2, sess), 0, "release_device: ten calls allocate nothing (was 200 B each)");
+    assert_eq(s_heap_per_call(b, a, 3, sess), 0, "take_device: ten calls allocate nothing (was 200 B each)");
+    assert_eq(s_heap_per_call(b, a, 4, sess), 0, "GetSessionByPID: ten calls allocate nothing (was 336 B each)");
+    sys_close(a);
+    sys_close(b);
+    dbus_session_reset();
+    assert_eq(s_count_open(), before, "no descriptor leaked");
+    return 0;
+}
+
+# ---- sustained fd-bearing traffic ----
+# A-1's third item: the fd queue under a peer that never stops sending
+# descriptors. logind's ResumeDevice is the realistic one; a hostile
+# peer is the worst case. Neither may grow the queue, the descriptor
+# table or the heap, and a take afterwards must still get its own.
+fn test_sustained_fd_traffic_is_bounded() {
+    test_group("native: 1000 fd-bearing signals leave no descriptor, no queue and no heap behind");
+    var bus = s_pair();
+    var a = bus & 0xFFFFFFFF;
+    var b = (bus >> 32) & 0xFFFFFFFF;
+    var px = s_pair();
+    var x = px & 0xFFFFFFFF;
+    var xp = (px >> 32) & 0xFFFFFFFF;
+    var py = s_pair();
+    var y = py & 0xFFFFFFFF;
+    var yp = (py >> 32) & 0xFFFFFFFF;
+    var sess = s_cstr("/org/freedesktop/login1/session/_31");
+    var fo = alloc(8);
+    var ao = alloc(8);
+    dbus_session_reset();
+    dbus_frame_init();
+    var n = s_build_resume(226, 0);
+    var w = s_wire();
+    # Warm, then measure.
+    s_send_with_fd(a, w, n, x);
+    dbus_native_pump_signals(b);
+    var open0 = s_count_open();
+    var heap0 = alloc_used();
+    var drained = 0;
+    var worst_q = 0;
+    var round = 0;
+    while (round < 100) {
+        var k = 0;
+        while (k < 10) { s_send_with_fd(a, w, n, x); k = k + 1; }
+        var got = 1;
+        while (got > 0) {
+            got = dbus_native_pump_signals(b);
+            if (got > 0) { drained = drained + got; }
+            if (dbus_frame_fd_count() > worst_q) { worst_q = dbus_frame_fd_count(); }
+        }
+        round = round + 1;
+    }
+    var grew = alloc_used() - heap0;            # before s_count_open, which allocates
+    assert_eq(drained, 1000, "all 1000 ResumeDevice signals were drained");
+    # Between pumps the queue may hold ONE descriptor: when the buffer has
+    # less room than a message, a receive brings part of it and its fd,
+    # and the fd waits for the rest of its own message. Never more.
+    var bounded = 0;
+    if (worst_q <= 1) { bounded = 1; }
+    assert_eq(bounded, 1, "the queue never held more than the one partial message's descriptor");
+    assert_eq(dbus_frame_fd_count(), 0, "and holds none once drained");
+    assert_eq(s_count_open(), open0, "THE PIN: 1000 received descriptors, every one closed");
+    assert_eq(grew, 0, "and the heap did not grow");
+    n = s_build_take_reply(1);
+    w = s_wire();
+    s_send_with_fd(a, w, n, y);
+    assert_eq(dbus_native_take_device(b, sess, 226, 0, fo, ao), 0, "a take afterwards succeeds");
+    assert_eq(s_ino(load64(fo)), s_ino(y), "and gets its own descriptor");
+    sys_close(load64(fo));
+    sys_close(x);  sys_close(xp);
+    sys_close(y);  sys_close(yp);
+    sys_close(a);  sys_close(b);
+    dbus_session_reset();
+    return 0;
+}
+
+fn test_declared_128mib_fails_both_paths() {
+    test_group("native: a header declaring >= 128 MiB is -ENOBUFS on the call and the pump");
+    var bus = s_pair();
+    var a = bus & 0xFFFFFFFF;
+    var b = (bus >> 32) & 0xFFFFFFFF;
+    dbus_session_reset();
+    dbus_frame_init();
+    var h = alloc(16);
+    var i = 0;
+    while (i < 16) { store8(h + i, 0); i = i + 1; }
+    store8(h + 0, 108); store8(h + 1, 2); store8(h + 3, 1);
+    store64(h + 4, 0xFFFFFFFF);
+    store8(h + 8, 9);
+    store64(h + 12, 0xFFFFFFFF);
+    assert_eq(sys_write(a, h, 16), 16, "a 16-byte header declaring ~8 GiB");
+    var n = s_build_return(1, 0, 0, 0);
+    assert_eq(dbus_session_call(b, 1), -105,
+      "THE PIN: the call is -ENOBUFS, as sd-bus (until 1.1.1 it began an ~8 GiB drain)");
+    assert_eq(dbus_native_pump_signals(b), -105, "and so is the pump");
+    assert_eq(dbus_session_closed(), 0, "a refused message is not a disconnect");
+    sys_close(a);
+    sys_close(b);
+    dbus_session_reset();
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_native_populates_the_same_table();
@@ -1079,6 +1877,15 @@ fn main() {
     test_out_of_range_devnum_is_refused_not_truncated();
     test_repeating_paths_do_not_grow_the_heap();
     test_sasl_reader_survives_hostile_input();
+    test_disconnect_is_a_state();
+    test_drop_mid_call_is_connreset();
+    test_logind_restart_is_survived();
+    test_pause_resume_around_take_device();
+    test_pause_needing_an_ack_is_drained_not_acked();
+    test_stray_reply_descriptors_are_closed();
+    test_logind_calls_do_not_grow_the_heap();
+    test_sustained_fd_traffic_is_bounded();
+    test_declared_128mib_fails_both_paths();
     return assert_summary();
 }
 

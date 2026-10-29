@@ -85,14 +85,16 @@ trusts vs. validates:
 | Source | Trust | Notes |
 |---|---|---|
 | Consumer-supplied fn-table pointer (`samvada_init`) | `kind` whitelisted, slots trusted | `samvada_init` rejects a null table, and rejects any `kind` word at `+64` outside `{LIBSYSTEMD=1, PURE_CYRIUS=2}` with `-EINVAL` (`src/samvada.cyr`). The slot fn-pointers themselves are dispatched unvalidated — they *are* the backend. samvada **borrows** the table and re-reads it with `load64` on every call, so keeping it alive and unmodified from `samvada_init()` to `samvada_release()` is the consumer's contract; the shim satisfies it with a file-scope `static int64_t samvada_fn_table[]` |
-| Consumer-supplied `major` / `minor` device numbers | validated at the C boundary | `devnum_ok()` in `deps/samvada_main.c` gates both `sb_take_device` and `sb_release_device` on `0 <= v <= UINT32_MAX` and returns `-EINVAL` otherwise — **before** the 64→32 narrowing cast, which previously truncated silently. Values that pass go to `TakeDevice` / `ReleaseDevice` as `uu`; logind enforces the ACLs. The check lives in the shim, so a future `PURE_CYRIUS` backend must re-supply it |
+| Consumer-supplied `major` / `minor` device numbers | validated at the C boundary | `devnum_ok()` in `deps/samvada_main.c` gates both `sb_take_device` and `sb_release_device` on `0 <= v <= UINT32_MAX` and returns `-EINVAL` otherwise — **before** the 64→32 narrowing cast, which previously truncated silently. Values that pass go to `TakeDevice` / `ReleaseDevice` as `uu`; logind enforces the ACLs. The native backend re-supplies the same check (`dbus_session_devnum_ok`, since 1.0.1) |
 | `pid` for `GetSessionByPID` | not consumer-supplied | samvada resolves its own session: `samvada_init` calls `sys_getpid()` and passes that (`src/samvada.cyr`). No consumer-supplied pid reaches the bus, and no public fn accepts one |
 | Bytes from the system dbus socket (**C-shim backend**) | validated by libsystemd | `sd_bus_message_read` enforces signature match before we see the data. `sb_get_session_path` adds its own bounds: it rejects `out_buf == 0` or `out_buf_len <= 0` before the `(size_t)` cast, rejects a `NULL` path from a successful read, and returns `-ENOBUFS` rather than truncating a path that does not fit |
 | Bytes from the system dbus socket (**native backend**, default at 1.0) | validated by samvada itself | The native marshaller owns framing, alignment, endianness and bounds checking — libsystemd is not present to do it. **The bus is not trusted input.** Every wire-supplied length is checked against the bytes actually present via `dbus_unmarshal_set_limit`, which the 2026-09-09 pre-1.0 audit added after finding three lengths trusted unchecked (AUDIT-1..3). The framer yields a message only once `avail >= total` |
 | **Authenticity of a reply** | **checked by samvada, and enforced by the bus** | samvada correlates a reply to its call on `REPLY_SERIAL`, and since 1.0.0 additionally requires that the reply's `DESTINATION` (field 6) equal the unique name the bus assigned it at `Hello`, and that the reply did not already sit in the receive buffer when the request was written (send-time watermark). Both **exceed** the synchronous `sd_bus_call` path they replace, which checked neither. The bus remains the primary defence and the stronger one: dbus-broker and reference dbus-daemon route a `METHOD_RETURN`/`ERROR` only to the peer that made the matching call, so a hostile peer's forged reply is dropped before arrival (verified live — see the audit's *Reply forgery* section). samvada does **not** check `SENDER` (field 7): the broker rewrites it to the sender's *unique* id, so the intuitive "require `SENDER == org.freedesktop.login1`" would reject every genuine reply, and pinning logind's unique id would break on a logind restart. An attacker interposed on the `AF_UNIX` socket can still substitute a reply that satisfies both checks — the descriptor itself cannot be conjured, but the session path, `active` flag and errno can be chosen |
 | FDs arriving on a **reply** (`TakeDevice`, `Inhibit`) | received via `recvmsg` + `SCM_RIGHTS`, queued by the framer | Until 1.0.0 this path used plain `read()`, which makes the kernel **discard** the descriptor while still delivering the bytes — the reply parsed cleanly, `UNIX_FDS` still said 1, and the fd was gone (AUDIT-4). Fixed and pinned by `test_reply_fd_survives_the_call_path` |
 | **Liveness of the bus** | **bounded, not trusted** | Since 1.0.0 samvada refuses to wait indefinitely on a peer. `SO_RCVTIMEO` is armed at connect (25 s, matching `DBUS_DEFAULT_TIMEOUT`, covering the SASL handshake), and every call carries a `CLOCK_MONOTONIC` deadline so a peer dribbling bytes cannot extend it — `SO_RCVTIMEO` alone bounds a receive, not a call. Both surface as `-ETIMEDOUT`. Before this samvada had no time-based bound of any kind and a bus that accepted a request then went silent froze the caller — which, in a compositor, is indefinite |
-| FDs received via `SCM_RIGHTS` | re-duplicated `CLOEXEC` before the message is unref'd | see the fd-passing design principle below |
+| **Loss of the connection** | **a state, reported as sd-bus reports it** (1.1.1) | The call that sees the drop — EOF, a stream cut mid-message, or a disconnect errno on send or receive — returns `-ECONNRESET`; every later call `-ENOTCONN` without touching the socket; `samvada_pump_signals()` `-ECONNRESET`. Until 1.1.1 the pump returned 0 events forever after the bus went away, so a consumer could not tell a quiet bus from a gone one |
+| Error names in an `ERROR` reply | **mapped exactly as sd-bus maps them** (1.1.1) | `dbus_session_map_error` reproduces libsystemd's table for `org.freedesktop.DBus.Error.*`, `org.freedesktop.login1.*` and `System.Error.<ERRNO>`; `tests/fixtures/sdbus_errno_map.tsv` is libsystemd's own output, re-checked against the runner's libsystemd in CI. Until 1.1.1 it held eight names, two with the wrong errno |
+| FDs received via `SCM_RIGHTS` | re-duplicated `CLOEXEC` before the message is unref'd; **every consumed message closes its own** | see the fd-passing design principle below. Since 1.1.1 an ERROR reply, and the reply to every call but `TakeDevice`, closes any descriptor it carried; until then one could sit at the head of the queue for the next `take_device` to return as its own |
 | logind's `PauseDevice` / `ResumeDevice` signals | **not surfaced, by decision** | samvada does not deliver session signals in the 0.x line — ratified in [ADR-0004](docs/adr/0004-session-control-lifecycle-and-signal-visibility.md), not an unfixed gap. logind emits them only to the session *controller*, which samvada now is only while it holds a device. See "Known Limitations" for what a consumer must plan around |
 | logind session control (`TakeControl`) | **acquired only while a device is held** | `TakeControl` runs logind's `session_prepare_vt()`: on a session with `vtnr >= 1` it sets `KDSKBMODE=K_OFF` and `KDSETMODE=KD_GRAPHICS`, i.e. **it disables the keyboard and blanks the console**. 0.5.1 took control at init and so muted the console before any device was requested; 0.6.0 scopes it to device ownership (ADR-0004). Treat `TakeControl` as a privileged, user-visible action, not bookkeeping |
 
@@ -192,32 +194,40 @@ defence is so a deployment can judge whether it holds.
   cannot be driven to zero by releasing devices you do not hold. That
   defence is **logind's, not samvada's**, and samvada does not verify
   it. Releasing a device you did not take is undefined.
-- **The consumer fetch path is authenticated only by the lock.** A
+- **The consumer fetch path is authenticated only by the lock — and,
+  on a first resolve, by `SHA256SUMS` from the same host.** A
   `[deps.samvada]` consumer fetches `dist/samvada.cyr` from a git
-  clone of the release **tag**; it never touches the release
-  artifacts or `SHA256SUMS`. samvada's tags are lightweight and
+  clone of the release **tag**. samvada's tags are lightweight and
   unsigned. With a `cyrius.lock` present, a repointed tag is refused
-  (commit-pin mismatch — verified); on a **first** resolve, or when a
-  consumer bumps the pinned version, there is nothing to check
-  against and substituted bytes are accepted silently. Consumers
-  should commit `cyrius.lock` and review the commit a version bump
-  moves to.
-- **`dist/samvada.cyr` exports 204 functions; the documented public
-  surface is eight.** `@public` and `@internal` are comments with no
-  mechanical meaning — Cyrius has no visibility mechanism — so every
-  internal is consumer-reachable. This is the premise AUDIT-1 already
-  rested on. Only the documented eight are stable; anything else may
-  change in any release. Notably `dbus_session_set_timeout_ms` is
-  reachable and can set every subsequent call's budget to zero.
+  (commit-pin mismatch — verified). On a **first** resolve, or a
+  version bump, the lock has nothing to compare; since 1.1.1 the
+  release job refuses to publish unless the release's
+  `samvada-<tag>.cyr` and `.deps` are byte-identical to the tag's
+  `dist/`, so a consumer can check against `SHA256SUMS`
+  (`docs/guides/consumer-link.md` § Checking a first resolve). Both are
+  served by GitHub, so that is a second object, not a second
+  authority, and the repository's releases are not marked immutable.
+  **Signed tags are the fix**, and need the maintainer's key
+  (`CONTRIBUTING.md` § Releasing). Consumers should commit
+  `cyrius.lock` and review the commit a version bump moves to.
+- **The bundle's private-by-default boundary is Cyrius-level only**
+  (1.1.1). A consumer compiling `dist/samvada.cyr` can name only the
+  eight `public fn`s — every other fn is a compile error, which CI
+  proves for all 204 (`tools/boundary_check.py`). But an `object;`
+  build still exports every fn as a GLOBAL DEFAULT symbol (measured on
+  cyrius 6.7.18, contrary to the cyrius guide), so **C code** linked
+  against that object — the libsystemd-shim path — can still declare
+  an internal `extern` and call it, `dbus_session_set_timeout_ms`
+  included. Through 1.1.0 every internal was reachable from Cyrius too.
 - **The unmarshaller is little-endian only** while the framer is
   endian-aware. A big-endian peer's reply is framed, then every field
   read returns malformed and the call times out at `-ETIMEDOUT`. It
   fails **safe** — no out-of-bounds read — but samvada cannot
   interoperate with a BE peer. Both target arches are little-endian.
-- **Two invariants are enforced by review, not mechanically**: "no
-  FFI types in public signatures" and "the exported symbol set is
-  unchanged". A demonstrated manifest gate catches both but is not
-  yet wired into CI. Review is what AUDIT-4 survived.
+- ~~**Two invariants are enforced by review, not mechanically**~~ —
+  closed: `tools/surface_check.py` has gated "no FFI types in public
+  signatures" and the public set since 1.0.1, and
+  `tools/boundary_check.py` gates reachability since 1.1.1.
 
 
 Named here because a security document that only lists what is
@@ -265,15 +275,17 @@ defended is misleading about what is wired.
   rate-limit a peer that sustains a flood, which still consumes
   the pump budget on every tick. Rate-limiting is a v1.0 design
   item.
-- **Input validation lives in the shim, not the core.** The
-  `major` / `minor` range check is in `deps/samvada_main.c`.
-  The Cyrius side passes both through unexamined, so a backend
-  that is not the libsystemd shim must supply the check itself.
+- **Input validation lives in each backend, not the core.** The
+  `major` / `minor` range check is in `deps/samvada_main.c` and,
+  for the native backend, in `dbus_session_devnum_ok` (since
+  1.0.1). The public layer passes both through, so any future
+  backend must supply the check itself.
 
 ## Audit History
 
 | Date       | Pass                                   | Target  | Report |
 |------------|----------------------------------------|---------|--------|
+| 2026-10-29 | A-lane close-out — A-1, A-2, A-4, A-6 | 1.1.1 | [`docs/audit/2026-10-29-audit.md`](docs/audit/2026-10-29-audit.md), and [`CHANGELOG.md`](CHANGELOG.md) 1.1.1 |
 | 2026-09-10 | A-lane completion — the dimensions 1.0.0 did not cover | 1.0.1 | [`docs/audit/2026-09-09-native-audit.md`](docs/audit/2026-09-09-native-audit.md) §A lane, and [`CHANGELOG.md`](CHANGELOG.md) |
 | 2026-09-09 | Pre-1.0 audit of the native marshaller + reply forgery | 1.0.0 | [`docs/audit/2026-09-09-native-audit.md`](docs/audit/2026-09-09-native-audit.md) |
 | 2026-09-09 | P(-1) hardening review + security audit | 0.5.1  | [`docs/audit/2026-09-09-audit.md`](docs/audit/2026-09-09-audit.md) |
@@ -289,13 +301,16 @@ defects. Between them: fourteen defects, two of which meant
 samvada handed a consumer the wrong descriptor or the wrong
 device, silently, and returned success.
 
-**1.0.1 is a stable release, not an audited-hardened one.**
-Resource exhaustion is partly covered, build/supply-chain partly,
-and the protocol state machine beyond reply forgery only partly.
-What is still uncovered is listed in
-[`docs/development/roadmap.md`](docs/development/roadmap.md) §The
-A lane rather than omitted, and the C shim is retained as a
-fallback for exactly that reason.
+**1.1.1 closed the A lane, all but signed tags.** Resource
+exhaustion, build and supply chain, the protocol state machine and
+the public API contract each closed with a test, a gate or a
+measurement, and the pass found real defects in three of them
+(`docs/audit/2026-10-29-audit.md`). samvada still does **not** claim
+to be audited-hardened: release tags are unsigned until the
+maintainer signs them, and a `TakeDevice` that transfers a real
+descriptor on a seated session has never run (the CG lane). Both are
+listed in [`docs/development/roadmap.md`](docs/development/roadmap.md)
+rather than omitted, and the C shim is retained as a fallback.
 
 The project uses two tiers deliberately. A **hardening review**
 is an internal per-file walk of the current surface plus its

@@ -155,6 +155,18 @@ jobs:
         run: |
           python3 tools/surface_check.py . tools/public_surface.txt
 
+      - name: Verify a consumer cannot reach past the public surface
+        # 1.1.1 (A-6). The bundle is private-by-default (src/visibility.cyr),
+        # so a consumer can name only the manifest's `public fn`s. The step
+        # above reads that from the bundle's text; this one compiles it:
+        # a generated consumer calling every public fn must build, and one
+        # calling every OTHER bundle fn must fail with each named "private
+        # to its file". Mutation-verified: without the marker the second
+        # consumer compiles and this fails; an extra `public` fails the
+        # manifest comparison. Neither program is run.
+        run: |
+          python3 tools/boundary_check.py . tools/public_surface.txt
+
       - name: Build
         run: |
           mkdir -p build
@@ -320,6 +332,44 @@ jobs:
           [ "$syn" -eq 1 ] || { echo "expected exactly 1 SYNTHETIC fixture, found $syn"; exit 1; }
           grep -q 'Exit criterion NOT met' tests/fixtures/dbus/MANIFEST.md || {
             echo "MANIFEST must keep stating the unmet second-host criterion"; exit 1; }
+
+      - name: Verify the native error map is sd-bus's
+        # 1.1.1 (A-4). The native backend must return the errno the C
+        # shim's sd-bus would. Until 1.1.1 its map held eight names and
+        # disagreed with libsystemd on the errors a logind restart or a bus
+        # disconnect produce. tests/fixtures/sdbus_errno_map.tsv is the
+        # ground truth, and this closes the chain mechanically:
+        #   1. the runner's libsystemd prints the fixture back unchanged;
+        #   2. the rows tests/dbus_session.tcyr asserts ARE the fixture's
+        #      rows (the test job then proves the code matches them).
+        run: |
+          mkdir -p build
+          cc -Wall -Wextra -Werror tools/sdbus_errno_probe.c \
+             $(pkg-config --cflags --libs libsystemd) -o build/sdbus_errno_probe
+          echo "libsystemd $(pkg-config --modversion libsystemd)"
+          ./build/sdbus_errno_probe < tests/fixtures/sdbus_errno_map.tsv > build/errno_now.tsv
+          if ! diff tests/fixtures/sdbus_errno_map.tsv build/errno_now.tsv; then
+            echo "FAIL: this libsystemd maps a D-Bus error name differently from the fixture"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import re, sys
+          fx = [l.rstrip("\n").split("\t") for l in open("tests/fixtures/sdbus_errno_map.tsv")
+                if l.strip() and not l.startswith("#")]
+          fx = [(n, int(e)) for n, e in fx]
+          t = open("tests/dbus_session.tcyr").read()
+          # A fixture row is asserted with its own name as the message;
+          # the group's extra edge cases use prose, so they are not rows.
+          rows = [(n, int(e)) for n, e in re.findall(r'assert_eq\(t_err\(p, "([^"]*)"\), (-?[0-9]+),\s*"\1"\);', t)]
+          if not fx or not rows:
+              print("ERROR: parsed nothing — the extractor regex has rotted"); sys.exit(1)
+          if rows != fx:
+              print(f"MISMATCH: test asserts {len(rows)} rows, fixture has {len(fx)}")
+              for a, b in zip(rows, fx):
+                  if a != b: print("  test", a, "fixture", b)
+              sys.exit(1)
+          print(f"  ok {len(fx)} rows: libsystemd == fixture == tests/dbus_session.tcyr")
+          PY
 
       - name: Verify slot offsets agree between C and Cyrius
         # 0.5.1 (audit LOW-15): ADR-0002 and public-api.md both claim the

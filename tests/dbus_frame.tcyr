@@ -330,6 +330,181 @@ fn test_fd_queue() {
     return 0;
 }
 
+# ==== A-1 (1.1.1): what a hostile peer can make the framer do ====
+
+# A valid little-endian SIGNAL of exactly `total` bytes (fields_len 0,
+# so total = 16 + body), written at `p`. The body is zeros.
+fn t_msg(p, total) {
+    var body = total - 16;
+    t_fill(p, total, 0);
+    store8(p + 0, 108); store8(p + 1, 4); store8(p + 2, 1); store8(p + 3, 1);
+    store8(p + 4, body & 0xFF);
+    store8(p + 5, (body >> 8) & 0xFF);
+    store8(p + 6, (body >> 16) & 0xFF);
+    store8(p + 7, (body >> 24) & 0xFF);
+    store8(p + 8, 1);
+    return total;
+}
+
+# A header that only DECLARES `body` bytes; nothing follows it.
+fn t_hdr_declaring(p, body, flds) {
+    t_fill(p, 16, 0);
+    store8(p + 0, 108); store8(p + 1, 4); store8(p + 2, 1); store8(p + 3, 1);
+    store8(p + 4, body & 0xFF);
+    store8(p + 5, (body >> 8) & 0xFF);
+    store8(p + 6, (body >> 16) & 0xFF);
+    store8(p + 7, (body >> 24) & 0xFF);
+    store8(p + 8, 1);
+    store8(p + 12, flds & 0xFF);
+    store8(p + 13, (flds >> 8) & 0xFF);
+    store8(p + 14, (flds >> 16) & 0xFF);
+    store8(p + 15, (flds >> 24) & 0xFF);
+    return 16;
+}
+
+# Feed `count` copies of a `size`-byte message, `chunk` bytes per read
+# (0 = as much as fits, the fastest peer). Returns how many messages the
+# framer yielded; *fed_out gets the bytes it received.
+var _t_one = 0;
+fn t_stream(size, count, chunk, fed_out) {
+    if (_t_one == 0) { _t_one = alloc(8192); }
+    t_msg(_t_one, size);
+    dbus_frame_init();
+    var total = size * count;
+    var fed = 0;
+    var got = 0;
+    var spins = 0;
+    while (got < count) {
+        var r = dbus_frame_next();
+        while (r > 0) {
+            got = got + 1;
+            dbus_frame_advance(r);
+            r = dbus_frame_next();
+        }
+        if (got >= count) { spins = 0; }
+        if (got < count) {
+            dbus_frame_maybe_compact();
+            var room = dbus_frame_space();
+            var n = room;
+            if (chunk > 0) {
+                if (chunk < n) { n = chunk; }
+            }
+            if (n > total - fed) { n = total - fed; }
+            var t = dbus_frame_tail();
+            var i = 0;
+            while (i < n) {
+                store8(t + i, load8(_t_one + ((fed + i) % size)));
+                i = i + 1;
+            }
+            dbus_frame_commit(n);
+            fed = fed + n;
+            spins = spins + 1;
+            if (spins > 1000000) { got = count + 1000; }
+        }
+    }
+    store64(fed_out, fed);
+    return got;
+}
+
+fn test_hostile_compaction_is_linear() {
+    test_group("frame: compaction moves at most what it received, whatever the message size");
+    var fed = alloc(8);
+    # Sizes chosen to straddle the 8192 cap: tiny, just over half (each
+    # read leaves a ~cap/2 partial to slide), cap-15 / cap-8 / cap, and an
+    # odd prime. Each is fed by the fastest peer and by a dribbling one.
+    var sizes = alloc(8 * 7);
+    store64(sizes + 0, 24);
+    store64(sizes + 8, 4104);
+    store64(sizes + 16, 8177);
+    store64(sizes + 24, 8184);
+    store64(sizes + 32, 8192);
+    store64(sizes + 40, 6007);
+    store64(sizes + 48, 5464);
+    var i = 0;
+    var worst = 0;
+    while (i < 7) {
+        var sz = load64(sizes + i * 8);
+        var got = t_stream(sz, 60, 0, fed);
+        assert_eq(got, 60, "every message framed (fast peer)");
+        var ok = 0;
+        if (dbus_frame_moved() <= load64(fed)) { ok = 1; }
+        assert_eq(ok, 1, "THE PIN: bytes moved <= bytes received (fast peer)");
+        if (dbus_frame_moved() > worst) { worst = dbus_frame_moved(); }
+        got = t_stream(sz, 4, 13, fed);
+        assert_eq(got, 4, "every message framed (13-byte reads)");
+        ok = 0;
+        if (dbus_frame_moved() <= load64(fed)) { ok = 1; }
+        assert_eq(ok, 1, "bytes moved <= bytes received (13-byte reads)");
+        i = i + 1;
+    }
+    assert(worst > 0, "and compaction really ran: the bound was exercised, not vacuous");
+    return 0;
+}
+
+fn test_over_cap_flood_costs_no_memory() {
+    test_group("frame: a flood of over-cap messages is drained in constant memory");
+    if (_t_one == 0) { _t_one = alloc(8192); }
+    dbus_frame_init();
+    var hdr = alloc(16);
+    var junk = alloc(8192);
+    t_fill(junk, 8192, 0);
+    var before = alloc_used();
+    var k = 0;
+    var oops = 0;
+    while (k < 200) {
+        # A 16-byte header declaring a 64 KiB body, then the body in
+        # cap-sized reads — 200 of them, ~13 MB the framer never keeps.
+        t_hdr_declaring(hdr, 65536, 0);
+        var t = dbus_frame_tail();
+        var j = 0;
+        while (j < 16) { store8(t + j, load8(hdr + j)); j = j + 1; }
+        dbus_frame_commit(16);
+        if (dbus_frame_next() != dbus_frame_need_more()) { oops = oops + 1; }
+        var left = 65536;
+        while (left > 0) {
+            dbus_frame_maybe_compact();
+            var n = dbus_frame_space();
+            if (n > left) { n = left; }
+            memcpy(dbus_frame_tail(), junk, n);
+            dbus_frame_commit(n);
+            left = left - n;
+            var r = dbus_frame_next();
+            if (r > 0) { oops = oops + 1; }
+        }
+        k = k + 1;
+    }
+    assert_eq(oops, 0, "no junk was ever framed as a message");
+    assert_eq(alloc_used() - before, 0, "THE PIN: 200 drained 64 KiB messages allocated nothing");
+    # And the stream resynchronises: the next real message frames.
+    dbus_frame_maybe_compact();
+    var m = t_msg(_t_one, 40);
+    memcpy(dbus_frame_tail(), _t_one, m);
+    dbus_frame_commit(m);
+    assert_eq(dbus_frame_next(), 40, "the next real message frames after the flood");
+    return 0;
+}
+
+fn test_declared_128mib_is_refused() {
+    test_group("frame: a header declaring >= 128 MiB is refused, as sd-bus refuses it");
+    var hdr = alloc(16);
+    dbus_frame_init();
+    t_hdr_declaring(dbus_frame_tail(), 0xFFFFFFFF, 0xFFFFFFFF);
+    dbus_frame_commit(16);
+    assert_eq(dbus_frame_next(), dbus_frame_toolong(),
+      "THE PIN: body and fields both 0xFFFFFFFF (~8 GiB) is refused — until 1.1.1 it was drained");
+    assert_eq(dbus_frame_next(), dbus_frame_toolong(), "and stays refused: it is not consumed");
+    # The boundary is the spec's: total >= 2^27 refused, 2^27 - 8 drained.
+    dbus_frame_init();
+    t_hdr_declaring(dbus_frame_tail(), 134217728 - 16, 0);
+    dbus_frame_commit(16);
+    assert_eq(dbus_frame_next(), dbus_frame_toolong(), "exactly 128 MiB: refused (sd-bus: sum >= MAX)");
+    dbus_frame_init();
+    t_hdr_declaring(dbus_frame_tail(), 134217728 - 24, 0);
+    dbus_frame_commit(16);
+    assert_eq(dbus_frame_next(), dbus_frame_need_more(), "8 bytes under: an ordinary over-cap drain");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_align8();
@@ -344,6 +519,9 @@ fn main() {
     test_eof_semantics();
     test_over_cap_message_is_drained();
     test_fd_queue();
+    test_hostile_compaction_is_linear();
+    test_over_cap_flood_costs_no_memory();
+    test_declared_128mib_is_refused();
     return assert_summary();
 }
 

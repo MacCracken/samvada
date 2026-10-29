@@ -1,10 +1,12 @@
 # samvada — roadmap
 
-**Where samvada is.** v1.1.0. It speaks dbus natively, in Cyrius,
+**Where samvada is.** v1.1.1. It speaks dbus natively, in Cyrius,
 over a raw unix socket — no libsystemd, no C shim, no
 `pkg-config`, nothing for a consumer to link. The road ADR-0003
 set out at 0.5.1 is finished: N0 through N7 shipped, then a
-seven-dimension security audit closed across 1.0.0 and 1.0.1.
+seven-dimension security audit closed across 1.0.0 and 1.0.1, and
+the A lane it left behind closed at 1.1.1 — all but signing tags,
+which is the maintainer's to do.
 
 **This file is forward-facing.** It says what is *left*. Completed
 milestones live in [`CHANGELOG.md`](../../CHANGELOG.md), which is
@@ -26,6 +28,7 @@ test counts, layout, dep gaps — is in [`state.md`](state.md).
 | A lane — the dimensions 1.0.0 missed | 1.0.1 | ten defects; public surface frozen mechanically |
 | Toolchain patch — cyrius 6.6.2 → 6.6.20 | 1.0.2 | no source-logic change; the 6.6.5 / 6.6.6 pin-move checklists worked through and retired |
 | Toolchain minor — cyrius 6.6.20 → 6.7.18, CI on Ubuntu 26.04 | 1.1.0 | no native aarch64 syscall numbers left (stdlib names; CI-gated); consumer floor cyrius 6.6.5; every action at its latest major; took the 1.1.0 number the shim retirement had held |
+| A lane, closed — A-1, A-2, A-4, A-6 | 1.1.1 | sd-bus error parity; disconnect reported; stray reply fds closed; zero heap per call; 128 MiB cap; private-by-default bundle; reproducible `dist/`; tag signing left to the maintainer |
 
 ---
 
@@ -83,42 +86,58 @@ immovable.
 
 ---
 
-## The A lane — what is still uncovered
+## The A lane — closed at 1.1.1, but for signing
 
-1.0.1 closed A-3 and A-5 and cut into the rest. These remain, and
-none of them blocks a release; they gate the claim that samvada is
-*audited-hardened*, which it does not make.
+1.0.1 closed A-3 and A-5; 1.1.1 closed the rest, each with a test, a
+gate or a measurement (CHANGELOG 1.1.1 has the detail and the
+mutants). One item is left, and it is not code.
 
-**A-1 — resource exhaustion.** The 60 Hz pump and the reply path
-now allocate nothing per call, measured. **Still uncovered**:
-worst-case buffer compaction driven by a hostile peer, the
-over-cap drain driven indefinitely, and the fd queue under
-sustained fd-bearing traffic.
+- [ ] **A-2 — sign release tags.** The consumer fetch path is
+  authenticated only by `cyrius.lock` on every resolve after the
+  first. 1.1.1 gave a first resolve something to check — the release's
+  `SHA256SUMS`, which `release.yml` now guarantees describes the tag's
+  `dist/` — but that is a second object from the same host, not a
+  second authority. A signed annotated tag is, and it needs only the
+  maintainer's key: procedure in `CONTRIBUTING.md` § Releasing. Once
+  tags are signed and the key is published, `release.yml` can refuse an
+  unsigned tag. Related, also a setting rather than code: GitHub's
+  *immutable releases* is off for this repository, so published assets
+  can be replaced.
 
-**A-2 — build and supply chain.** The toolchain tarball is pinned
-by sha256 and all nine action refs by commit SHA, with dependabot
-to age them. **Still open**: `dist/samvada.cyr` reproducibility has
-never been diffed from a clean tree, and the **consumer fetch path
-is authenticated only by `cyrius.lock`** — samvada's tags are
-lightweight and unsigned, so a first resolve or a version bump has
-nothing to verify against. Signing tags is a release-process
-change, not a code change.
+What closed the others:
 
-**A-4 — protocol state machine.** The SASL reader was driven with
-hostile input and holds. **Still uncovered**:
-`PauseDevice`/`ResumeDevice` ordering against ADR-0004,
-mid-session disconnect, and logind restart. The **Hello-ordering
-divergence is documented, not matched** — sd-bus fails the
-connection with `-EIO` if the first message is not the Hello
-reply; samvada discards and keeps reading. Revisit if samvada ever
-speaks to a non-broker peer.
-
-**A-6 — public API contract.** The 8-fn surface is now frozen
-mechanically by `tools/surface_check.py` in CI. **Still open**:
-`dist/samvada.cyr` exports ~200 functions because Cyrius has no
-visibility mechanism, so every internal stays consumer-reachable.
-Documented as unstable rather than pretended away; revisit if
-Cyrius grows visibility.
+- **A-1 — resource exhaustion.** Compaction is linear in bytes received
+  under hostile message sizes (`dbus_frame_moved`, pinned); an over-cap
+  flood drains in constant memory; a header declaring ≥ 128 MiB is
+  refused, as sd-bus refuses it, instead of starting an ~8 GiB drain;
+  1000 fd-bearing signals and 300 forced `MSG_CTRUNC`s leave no
+  descriptor and no heap; every logind call and a live init/release
+  cycle allocate 0 bytes (were 192–336 B per call and 600 B per cycle).
+- **A-2 — build and supply chain.** `dist/` is reproducible: two clean
+  rebuilds at different paths, `TZ` and locale are byte-identical, and
+  CI's freshness gate repeats that on every push. `release.yml` refuses
+  to publish a bundle that differs from the tag's, and publishes the
+  `.deps` sidecar too.
+- **A-4 — protocol state machine.** Error names map exactly as sd-bus
+  maps them (fixture from libsystemd, re-checked in CI). A dead
+  connection is a state, reported as sd-bus reports it. Every consumed
+  message drops its own descriptors. A logind restart is survived —
+  systemd v262 restores the controller, and the mock test drives the
+  wire side. Pause/Resume orderings around TakeDevice keep each
+  descriptor with its message; `PauseDevice("pause")` is drained,
+  unacknowledged, per ADR-0004. **Kept as documented divergences**,
+  each stricter than sd-bus: the Hello ordering (sd-bus fails the
+  connection with `-EIO` if the first message is not the Hello reply;
+  samvada discards and keeps reading), and a corrupt stream (-71 here,
+  -74 there; a bad-version message fails the stream here and is
+  dropped there). Revisit if samvada ever speaks to a non-broker peer.
+- **A-6 — public API contract.** Cyrius grew visibility, which was this
+  item's trigger. The bundle is private-by-default and exactly the
+  eight frozen fns are `public`; `tools/boundary_check.py` compiles a
+  consumer against every one of the 204 internals in CI and requires
+  each to be refused. The boundary is Cyrius-level: an `object;` build
+  still exports private fns as GLOBAL DEFAULT symbols on 6.7.18, against
+  the cyrius guide — worth filing with cyrius.
 
 ### Standing rule for this lane
 
@@ -217,6 +236,13 @@ native backend shipped and reached parity. One rung is still live:
   6.6.5 (`sys_sendto`). The
   seated-host rule was again **not** met, for the same reason as
   1.0.2.
+- **2026-10-29** — `1.1.1`. The A lane worked through to the end. The
+  standing rule held up: A-1, A-2 and A-4 each hid a real defect, and
+  three of those sat next to passing tests that could not see them —
+  the error-map test pinned two wrong values, the fd tests never put a
+  descriptor on a reply that should carry none, and the `MSG_CTRUNC`
+  test ran the leaking branch without measuring the heap. Signing tags
+  is the one item left, because it is the maintainer's key, not code.
 
 ## Moved from cyrius's roadmap (2026-10-08) — still open at the 6.7.18 pin
 

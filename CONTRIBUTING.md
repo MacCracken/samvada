@@ -139,6 +139,35 @@ categories. Common samvada prefixes:
 - `chore(release):` — VERSION + CHANGELOG bump
 - `chore(m1):` / `chore(m2):` etc. — milestone closeout
 
+## Releasing
+
+1. Bump `VERSION`, `samvada_version()` and its test pin, the
+   CHANGELOG header, and run `cyrius distlib`; commit, including
+   `dist/` and `cyrius.lock`.
+2. Tag the release commit with a **bare** version (`1.1.1`, not
+   `v1.1.1`) and push the tag. `release.yml` checks the tag equals
+   `VERSION`, re-runs CI, rebuilds `dist/` and refuses to publish if
+   it differs from the tag's, then publishes the bundle, its `.deps`
+   sidecar, the shim source, a smoke binary and `SHA256SUMS`.
+
+**Signing the tag — recommended, not yet enforced.** samvada's tags
+are lightweight and unsigned, so a consumer's first resolve has
+nothing to verify against but GitHub itself (roadmap A-2,
+`SECURITY.md`). A signed, annotated tag fixes that, and needs no code:
+
+```sh
+git config gpg.format ssh                         # or keep GPG
+git config user.signingkey ~/.ssh/id_ed25519.pub
+git tag -s 1.1.1 -m "samvada 1.1.1"
+git verify-tag 1.1.1                              # needs gpg.ssh.allowedSignersFile
+```
+
+Once tags are signed, publish the public key (or an `allowed_signers`
+file) where consumers can find it independently of the tag, and
+`release.yml` can refuse an unsigned tag. Until then the release job
+does not check signatures, because a check that every release fails
+is not a gate.
+
 ## License
 
 By contributing, you agree that your contributions will be

@@ -1,0 +1,32 @@
+# @internal — the consumer bundle's visibility boundary (1.1.1, A-6)
+# visibility.cyr — makes dist/samvada.cyr private-by-default.
+#
+# Until 1.1.1 every fn in the bundle was consumer-reachable — 204 of
+# them, against a documented public surface of eight — because Cyrius
+# had no visibility mechanism when samvada was written. It has one now:
+# a bare top-level `private` makes the file it sits in private, so
+# that only items marked `public` can be named from another file (the
+# cyrius guide, "Visibility"). A call to anything else is a hard
+# compile error: `'dbus_session_set_timeout_ms' is private to its file`.
+#
+# This module is listed FIRST in cyrius.cyml `[lib] modules` and in
+# nothing else. `cyrius distlib` concatenates the modules into ONE file,
+# so to a consumer this marker covers the whole bundle, and the
+# `public fn` marks on the eight frozen fns (src/samvada.cyr,
+# src/dbus_session.cyr) are the only way in. It leads the bundle, which
+# is valid on every toolchain a consumer may pin (the floor is 6.6.5).
+# Measured on 6.6.5, 6.7.5 and 6.7.18: a marker after top-level
+# DECLARATIONS is fine, but after a top-level statement 6.6.5 and 6.7.5
+# refuse it ("unexpected private") and 6.7.18 refuses every later
+# `public`. tools/surface_check.py keeps it first.
+#
+# It is deliberately NOT included from src/lib.cyr. samvada's own build
+# and tests compile src/ as separate files, where a `private` here would
+# cover only this (empty) file; the tests keep reaching the internals
+# they pin.
+#
+# What it does NOT do: an `object;` build still exports every fn as a
+# GLOBAL DEFAULT symbol (measured on 6.7.18), so C code linked against
+# that object can still declare an internal `extern`. The boundary is
+# Cyrius-level. tools/surface_check.py and ci.yml enforce it.
+private

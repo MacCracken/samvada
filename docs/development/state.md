@@ -8,12 +8,12 @@
 
 ## Version
 
-**1.1.0** — 2026-10-28. A toolchain minor: cyrius `6.6.20` →
-`6.7.18`, stdlib re-vendored, CI moved to Ubuntu 26.04 and every
-action to its latest major. One source change: samvada spells no
-syscall number of its own under an aarch64 conditional any more
-(the stdlib's `sys_sendto` / `sys_recvmsg`, and `clock_gettime` as
-the x86 `228` the compiler routes). Consumers need cyrius ≥ 6.6.5.
+**1.1.1** — 2026-10-29. The A lane closed, all but signing tags
+(roadmap): sd-bus error parity, a dead connection reported as sd-bus
+reports it, stray reply descriptors closed, zero heap per call, a
+128 MiB message cap, a private-by-default bundle, release assets
+checked against the tag. Same toolchain as 1.1.0 (cyrius 6.7.18);
+consumers need cyrius ≥ 6.6.5.
 
 samvada speaks dbus natively in Cyrius over a raw unix socket.
 `samvada_native_init()` gives a consumer a working bus connection
@@ -21,11 +21,12 @@ with **no libsystemd, no C shim, no `pkg-config`, nothing to
 link**. The libsystemd shim is retained as a fallback and as the
 differential reference; its deletion is scheduled for 1.2.0.
 
-Two audits have shipped — the pre-1.0 pass over the native
-marshaller (1.0.0) and the A-lane completion (1.0.1) — fixing
-fourteen defects between them and closing the reply-forgery
-question. **samvada is a stable release, not an audited-hardened
-one**; what remains uncovered is in `SECURITY.md` and the roadmap.
+Three audit passes have shipped — the pre-1.0 pass over the native
+marshaller (1.0.0), the A-lane completion (1.0.1) and its close-out
+(1.1.1, `docs/audit/2026-10-29-audit.md`). **samvada is a stable
+release, not an audited-hardened one**: tags are unsigned, and the
+seated `TakeDevice` path has never run. Both are in `SECURITY.md` and
+the roadmap.
 
 ## Toolchain
 
@@ -77,13 +78,17 @@ one**; what remains uncovered is in `SECURITY.md` and the roadmap.
 
 ## Source
 
-Public surface (`src/samvada.cyr`) — eight fns, frozen, and frozen
-**mechanically** by `tools/surface_check.py` in CI:
+Public surface — eight `public fn`s (`src/samvada.cyr`, plus
+`samvada_native_init` in `src/dbus_session.cyr`), frozen
+**mechanically** by `tools/surface_check.py` in CI. They are the
+**only** fns a consumer can name: the bundle is private-by-default
+(`src/visibility.cyr`, first in `[lib] modules`), and
+`tools/boundary_check.py` proves all 204 others are refused:
 
 - `samvada_native_init()` → `0 | -err`. **The supported entry
   point for the native backend.** Hides the FFI table entirely.
   The table is allocated once and reused across init/release.
-- `samvada_version()` → packed u32 (1.1.0).
+- `samvada_version()` → packed u32 (1.1.1).
 - `samvada_session_take_device(major, minor)` → `fd | -err`.
   Acquires session control on first use (ADR-0004) and hands it
   back if the take fails. Device numbers are range-checked
@@ -92,7 +97,8 @@ Public surface (`src/samvada.cyr`) — eight fns, frozen, and frozen
   Drops session control when the last device is released, so
   logind restores the VT. The accounting is a **count**, not an
   identity set — see `SECURITY.md`.
-- `samvada_pump_signals()` → `events | -err`. Allocates nothing
+- `samvada_pump_signals()` → `events | -err`; `-ECONNRESET` once the
+  connection is gone (1.1.1). Allocates nothing
   per call.
 - `samvada_release()` → `0` (idempotent). **logind revokes devices
   taken via `TakeDevice` when control is released**, so
@@ -122,7 +128,14 @@ consumer bundle:
   Reply matching requires `DESTINATION` to equal the unique name
   learned at `Hello`, refuses replies that predate their request
   (send-time watermark), and bounds every call on a
-  `CLOCK_MONOTONIC` deadline.
+  `CLOCK_MONOTONIC` deadline. Error names map exactly as sd-bus maps
+  them (`tests/fixtures/sdbus_errno_map.tsv`); a dead connection is
+  latched (`_dbs_closed`) and answered as sd-bus answers it; every
+  consumed message closes its own descriptors (`dbus_session_done`);
+  no call allocates.
+- `src/visibility.cyr` — a bare `private`, bundle-only: it makes
+  `dist/samvada.cyr` private-by-default. Not in `src/lib.cyr`, so
+  samvada's own build and tests still reach the internals.
 
 Plumbing:
 
@@ -140,16 +153,16 @@ Plumbing:
 
 ## Tests
 
-**586 asserts.** Every repair in the 1.0.0 and 1.0.1 audits is
+**879 asserts.** Every repair in the 1.0.0 and 1.0.1 audits is
 mutation-tested.
 
 | File | Asserts | Covers |
 |---|---|---|
 | `tests/samvada.tcyr` | 162 | public API, the pure-Cyrius mock backend, FFI layout invariants |
-| `tests/dbus_session.tcyr` | 131 | logind layer, reply provenance, fd ownership, timeouts, devnum bounds, hostile SASL |
-| `tests/dbus_frame.tcyr` | 79 | framing, the receive buffer, the fd queue |
+| `tests/dbus_session.tcyr` | 385 | logind layer, reply provenance, fd ownership, timeouts, devnum bounds, hostile SASL; the sd-bus error table (186 rows); disconnect, logind restart, Pause/Resume orderings; zero heap per call; sustained fd traffic |
+| `tests/dbus_frame.tcyr` | 115 | framing, the receive buffer, the fd queue; linear compaction, over-cap floods, the 128 MiB cap |
 | `tests/dbus_codec.tcyr` | 76 | marshal/unmarshal, overflow poisoning, fail-closed bounds |
-| `tests/dbus_sys.tcyr` | 67 | `SCM_RIGHTS`, cmsg guards, descriptor-leak counting |
+| `tests/dbus_sys.tcyr` | 70 | `SCM_RIGHTS`, cmsg guards, descriptor-leak counting, sustained `MSG_CTRUNC` |
 | `tests/dbus_auth.tcyr` | 65 | SASL handshake |
 | `src/test.cyr` | 6 | `[build].test` entry |
 
@@ -164,8 +177,13 @@ mutation-tested.
 ## Tools
 
 - `tools/surface_check.py` + `tools/public_surface.txt` — freezes
-  the 8-fn public surface; **a CI gate**, run right after the
-  distlib freshness check.
+  the 8-fn public surface and requires the bundle's `private` marker;
+  **a CI gate**, run right after the distlib freshness check.
+- `tools/boundary_check.py` — compiles consumers against the bundle:
+  every `public fn` reachable, every other fn refused. **A CI gate**.
+- `tools/sdbus_errno_probe.c` — asks libsystemd for each error name's
+  errno; produced `tests/fixtures/sdbus_errno_map.tsv`, and CI's
+  c-shim job re-runs it against the runner's libsystemd.
 - `tools/dbus_tap.py` — `AF_UNIX` relay for capturing traffic.
 - `tools/dbus_decode.py` — spec decoder for captured bytes.
 - `tools/differential/` — runs both backends in one process and
@@ -186,16 +204,17 @@ mutation-tested.
 ## Consumers
 
 - **mabda** — pins `[deps.samvada] tag = "1.0.1"` (on cyrius
-  6.7.5). Neither 1.0.2 nor 1.1.0 changes the API, so re-pinning is
+  6.7.5). No later release changes its API, so re-pinning is
   optional; its `[deps] stdlib` already declares every leaf it uses,
   so the smaller sidecar does not reach it. It calls only
   `samvada_session_take_device` / `samvada_session_release_device`,
   under `-D MABDA_LOGIND` (off by default).
-  - **Downstream check, 1.1.0** (compile-only): a scratch copy of
+  - **Downstream check, 1.1.1** (compile-only): a scratch copy of
     mabda on its own 6.7.5 pin builds `programs/smoke.cyr` and
     `programs/native_present_e2e.cyr` under `-D MABDA_LOGIND`
-    against the 1.1.0 bundle with no `undefined function` warning.
-    Neither was run — both reach DRM master.
+    against the 1.1.1 bundle — private-by-default — with no
+    `undefined function` and no `private to its file`. Neither was
+    run — both reach DRM master.
   - How: mabda resolves samvada by **git tag**, and `cyrius build`
     re-resolves deps even with `--no-deps`, so a bundle dropped into
     `mabda/lib/` is overwritten before it compiles. In a scratch

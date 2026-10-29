@@ -100,7 +100,10 @@ cc build/samvada_main.o build/app.o build/main.o \
 - **Append-after-kind invariant** — `samvada_slot_kind` stays at offset 64 forever; new slots append after the existing tail so v0 callers reading a v(N+1) table never misread a fnptr as the kind word
 - **C wrappers stay ≤6 args** so dispatch is `fncall6`-safe across x86_64 SysV + aarch64 (cyrius's 6-arg fncall convention)
 - **Fd-passing is dup-safe** — every fd from `SCM_RIGHTS` gets `dup`'d before the dbus message is unref'd, so the consumer's fd lifetime is independent of dbus message lifetime
-- **Errors are negative sd-bus errnos** at the FFI boundary so the C convention passes through unchanged; consumers branch on `< 0`
+- **Errors are negative sd-bus errnos** at the FFI boundary so the C convention passes through unchanged; consumers branch on `< 0`. The native backend's error-name map **is** sd-bus's table: `tests/fixtures/sdbus_errno_map.tsv` is `tools/sdbus_errno_probe.c`'s output from libsystemd, and CI re-checks it — change the map only by regenerating the fixture, never by hand-picking an errno
+- **The consumer bundle is private-by-default** — `src/visibility.cyr` leads `[lib] modules`, so a consumer can name only `public fn`s. A new public fn needs `public fn` **and** a `tools/public_surface.txt` row (both gates fail otherwise); never put the marker anywhere but first
+- **Every consumed dbus message drops its own descriptors** (`dbus_session_done` / `dbus_session_drop_fds_of`) — never `dbus_frame_advance` past a message without it, or the next `take_device` pops a stranger's fd FIFO
+- **No `alloc()` on a repeating path** — `alloc()` never frees and the consumer runs for days; scratch is allocated once and reused. The heap tests pin zero growth per call; a new call path gets one
 - The C shim lives at the consumer's edge — samvada itself does not link libsystemd
 
 ## Rules (Hard Constraints)
