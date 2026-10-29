@@ -152,17 +152,19 @@ fn dbus_session_map_error(p, n) {
 }
 
 # ---- the clock ----
-# clock_gettime is not in the stdlib, so the arch numbers are pinned
-# here under the same house exception as dbus_sys.cyr's recvmsg:
-# 228 on x86_64, 113 on aarch64 (asm-generic). Verified on the host,
-# not copied from a header — as was struct timespec's shape, which
-# is 16 bytes with tv_sec at +0 and tv_nsec at +8.
-fn dbus_session_clock_nr() {
-    #ifdef CYRIUS_ARCH_AARCH64
-    return 113;
-    #endif
-    return 228;
-}
+# clock_gettime has no stdlib name, so it is spelled the way the
+# stdlib's own lib/chrono.cyr spells it: the x86_64 number, 228, as a
+# literal at the call site, on EVERY arch. On ELF-aarch64 the compiler
+# folds it to the native 113 through its x86-compat row 228→113 — the
+# row chrono's monotonic clock and lib/bench.cyr's timer stand on, so
+# cyrius cannot break it without breaking its own clock.
+#
+# Until 1.1.0 this was a native 113 under `#ifdef CYRIUS_ARCH_AARCH64`.
+# That was correct and fragile: the compat chain matches a NUMBER, and
+# 113 is also x86's setreuid, free as a row source only because no row
+# has claimed it yet (cyrius 6.7.12 DW-1). struct timespec is 16 bytes,
+# tv_sec at +0 and tv_nsec at +8, on both arches — verified on the
+# host, not copied from a header.
 
 # CLOCK_MONOTONIC, deliberately: a deadline must not be extendable
 # (or fired early) by an NTP step or a suspend/resume adjusting the
@@ -177,8 +179,7 @@ fn dbus_session_now_ms() {
     if (_dbs_ts == 0) { return -12; }
     store64(_dbs_ts + 0, 0);
     store64(_dbs_ts + 8, 0);
-    var rc = syscall(dbus_session_clock_nr(),
-      dbus_session_clock_monotonic(), _dbs_ts);
+    var rc = syscall(228, dbus_session_clock_monotonic(), _dbs_ts);
     if (rc < 0) { return rc; }
     var sec  = load64(_dbs_ts + 0);
     var nsec = load64(_dbs_ts + 8);

@@ -26,9 +26,10 @@ jobs:
   build:
     name: Build Release
     needs: [ci]
-    runs-on: ubuntu-latest
+    # Same 26.04 LTS pin as ci.yml — see the note on its build job.
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
@@ -48,10 +49,10 @@ jobs:
         # see ci.yml for the full rationale (0.5.1, audit MED-9). Keep the
         # SHA/SUM here in step with ci.yml's.
         env:
-          CYRIUS_INSTALL_SHA: "6020f5ba5f2986ab5d83de277a589c072133678e"
-          CYRIUS_INSTALL_SUM: "f33ee940c1387205f10f852c823b56983f5f44fda7ba3c2eff9af6917c3a8d51"
+          CYRIUS_INSTALL_SHA: "a1cf8c02667b3813c73126a825b2cfe7906b47ee"
+          CYRIUS_INSTALL_SUM: "28515fca7a89c31b1dfed2b0d605b7fdc9f877954b6d392ffd4d4df87ac8f5f7"
           # sha256 of cyrius-<version>-x86_64-linux.tar.gz itself.
-          CYRIUS_TARBALL_SUM: "38814a816a596d7b113fa53fde3c6fd439ce424fbd9139e6128bb9a1d04d265e"
+          CYRIUS_TARBALL_SUM: "1411e773c565ebcc5d9995e4920dedc9ff9d848babe0a570fd347c81702c47fe"
         run: |
           set -euo pipefail
           CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
@@ -125,7 +126,7 @@ jobs:
           cp deps/samvada_main.c "samvada-${TAG}-shim.c"
           sha256sum samvada-*.tar.gz samvada-*.cyr samvada-*-linux samvada-*-shim.c > SHA256SUMS
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: release-artifacts
           path: |
@@ -138,16 +139,16 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # The ONLY job that needs write: it publishes the release. Every other
     # job runs read-only (0.5.1, audit MED-9).
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: release-artifacts
       - name: Changelog
@@ -157,7 +158,7 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           awk "/^## \\[${TAG}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md > /tmp/body.md
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
         with:
           name: "samvada ${{ github.ref_name }}"
           body_path: /tmp/body.md

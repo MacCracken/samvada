@@ -8,14 +8,18 @@
 
 ## Version
 
-**1.0.2** — 2026-10-28. A toolchain patch: cyrius `6.6.2` →
-`6.6.20`, stdlib re-vendored, no source-logic change.
+**1.1.0** — 2026-10-28. A toolchain minor: cyrius `6.6.20` →
+`6.7.18`, stdlib re-vendored, CI moved to Ubuntu 26.04 and every
+action to its latest major. One source change: samvada spells no
+syscall number of its own under an aarch64 conditional any more
+(the stdlib's `sys_sendto` / `sys_recvmsg`, and `clock_gettime` as
+the x86 `228` the compiler routes). Consumers need cyrius ≥ 6.6.5.
 
 samvada speaks dbus natively in Cyrius over a raw unix socket.
 `samvada_native_init()` gives a consumer a working bus connection
 with **no libsystemd, no C shim, no `pkg-config`, nothing to
 link**. The libsystemd shim is retained as a fallback and as the
-differential reference; its deletion is scheduled for 1.1.0.
+differential reference; its deletion is scheduled for 1.2.0.
 
 Two audits have shipped — the pre-1.0 pass over the native
 marshaller (1.0.0) and the A-lane completion (1.0.1) — fixing
@@ -25,12 +29,21 @@ one**; what remains uncovered is in `SECURITY.md` and the roadmap.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.20` (`cyrius.cyml [package].cyrius` — the
+- **Cyrius pin**: `6.7.18` (`cyrius.cyml [package].cyrius` — the
   single source of truth; no version is hardcoded in CI YAML).
 - CI additionally pins the **toolchain tarball's sha256**
   (`CYRIUS_TARBALL_SUM`) and the installer script's commit +
-  sha256. A version bump without a sum bump fails loudly, which is
+  sha256 — at 1.1.0 the installer is the one at cyrius's `6.7.18`
+  tag. A version bump without a sum bump fails loudly, which is
   intended.
+- **CI runners**: every job in `ci.yml` and `release.yml` runs on
+  `ubuntu-26.04`, named explicitly — `ubuntu-latest` still meant
+  24.04 at 1.1.0, and GitHub listed 26.04 as a **public preview**
+  (`actions/runner-images#14226`). `ubuntu-24.04` is the fallback.
+- **Actions**, all by commit SHA (dependabot ages them):
+  `actions/checkout` v7.0.1, `actions/upload-artifact` v7.0.2,
+  `actions/download-artifact` v8.0.2,
+  `softprops/action-gh-release` v3.0.3.
 - CLI shape notes for this pin:
   - `cyrius vet` requires an explicit source file
     (`cyrius vet src/main.cyr`); the bare form errors.
@@ -40,13 +53,23 @@ one**; what remains uncovered is in `SECURITY.md` and the roadmap.
     the bundle; `cyrius deps` consumes it downstream. From 6.6.18
     the sidecar is **derived by compiling the bundle** on six
     targets, not copied from `[deps] stdlib`, and the bundle
-    carries the matching `include` block. It currently warns that
-    `sys_recvmsg` is undefined on x86_64-windows (roadmap).
+    carries the matching `include` block. It still warns, at 6.7.18,
+    that `sys_recvmsg` is undefined on x86_64-windows (roadmap).
   - `cyrius deps` writes `cyrius.lock` for a stdlib-only project
-    (6.6.9+).
+    (6.6.9+); the lock is tracked. `cyrius deps --locked` checks it
+    against `lib/` without writing (6.7.6+).
   - `cyrius build` refuses unknown flags (6.6.5+), so
-    `--emit-object` errors rather than writing an executable.
+    `--emit-object` errors (`error: cyrius build: unknown option`,
+    exit 1) rather than writing an executable.
   - `CYRIUS_DCE=1` genuinely eliminates as of 6.5.72.
+  - **No native-aarch64 syscall numbers in samvada's code** (1.1.0).
+    ELF-aarch64 builds rewrite x86 numbers through a compat chain
+    that matches a number, so samvada uses the stdlib's `sys_*` /
+    `SYS_*` names, or the x86 number where none exists
+    (`clock_gettime` = 228, as `lib/chrono.cyr` spells it). A CI gate
+    in the security job rejects any aarch64 region in `src/` or
+    `tests/`. The aarch64 proof is behavioural, under
+    `qemu-aarch64 -strace` (CHANGELOG 1.1.0).
   - `object;` builds hide libc-reserved names (`vis=HIDDEN`) as of
     **6.6.2**, which removed the `objcopy -L` step from the
     consumer recipe. Check with `readelf -sW`, not `nm` — `nm`
@@ -60,7 +83,7 @@ Public surface (`src/samvada.cyr`) — eight fns, frozen, and frozen
 - `samvada_native_init()` → `0 | -err`. **The supported entry
   point for the native backend.** Hides the FFI table entirely.
   The table is allocated once and reused across init/release.
-- `samvada_version()` → packed u32 (1.0.2).
+- `samvada_version()` → packed u32 (1.1.0).
 - `samvada_session_take_device(major, minor)` → `fd | -err`.
   Acquires session control on first use (ADR-0004) and hands it
   back if the take fails. Device numbers are range-checked
@@ -83,7 +106,7 @@ consumer bundle:
 - `src/dbus_sys.cyr` — `SCM_RIGHTS` fd receive; the `recvmsg` half
   and the cmsg walk, split so every guard is testable.
 - `src/dbus_socket.cyr` — `sockaddr_un` (both forms), connect,
-  `sendto`+`MSG_NOSIGNAL` write-all, and `SO_RCVTIMEO` armed at
+  the stdlib's `sys_sendto`+`MSG_NOSIGNAL` write-all, and `SO_RCVTIMEO` armed at
   connect (25 s, so it covers the SASL handshake).
 - `src/dbus_frame.cyr` — message framing; owns THE 8192-byte
   receive buffer that `dbus_auth` borrows, plus the fd queue.
@@ -113,11 +136,11 @@ Plumbing:
 - `src/test.cyr` — `cyrius.cyml [build].test` entry.
 - `deps/samvada_main.c` — libsystemd shim. Not linked by `cyrius
   build`; a consumer builds it and calls `samvada_shim_init()`
-  from its own `main()`. Retires at 1.1.0.
+  from its own `main()`. Retires at 1.2.0.
 
 ## Tests
 
-**585 asserts.** Every repair in the 1.0.0 and 1.0.1 audits is
+**586 asserts.** Every repair in the 1.0.0 and 1.0.1 audits is
 mutation-tested.
 
 | File | Asserts | Covers |
@@ -126,7 +149,7 @@ mutation-tested.
 | `tests/dbus_session.tcyr` | 131 | logind layer, reply provenance, fd ownership, timeouts, devnum bounds, hostile SASL |
 | `tests/dbus_frame.tcyr` | 79 | framing, the receive buffer, the fd queue |
 | `tests/dbus_codec.tcyr` | 76 | marshal/unmarshal, overflow poisoning, fail-closed bounds |
-| `tests/dbus_sys.tcyr` | 66 | `SCM_RIGHTS`, cmsg guards, descriptor-leak counting |
+| `tests/dbus_sys.tcyr` | 67 | `SCM_RIGHTS`, cmsg guards, descriptor-leak counting |
 | `tests/dbus_auth.tcyr` | 65 | SASL handshake |
 | `src/test.cyr` | 6 | `[build].test` entry |
 
@@ -163,22 +186,31 @@ mutation-tested.
 ## Consumers
 
 - **mabda** — pins `[deps.samvada] tag = "1.0.1"` (on cyrius
-  6.7.5). 1.0.2 changes no API, so re-pinning is optional; its
-  `[deps] stdlib` already declares every leaf it uses, so the
-  smaller sidecar does not reach it. It calls only
+  6.7.5). Neither 1.0.2 nor 1.1.0 changes the API, so re-pinning is
+  optional; its `[deps] stdlib` already declares every leaf it uses,
+  so the smaller sidecar does not reach it. It calls only
   `samvada_session_take_device` / `samvada_session_release_device`,
   under `-D MABDA_LOGIND` (off by default).
-  - Caveat: mabda resolves samvada by **git tag**, and `cyrius
-    build` re-runs dep resolution even with `--no-deps`, so
-    dropping a locally-built bundle into `mabda/lib/` gets
-    clobbered. A genuine downstream build against an unreleased
-    samvada needs the tag pushed first.
+  - **Downstream check, 1.1.0** (compile-only): a scratch copy of
+    mabda on its own 6.7.5 pin builds `programs/smoke.cyr` and
+    `programs/native_present_e2e.cyr` under `-D MABDA_LOGIND`
+    against the 1.1.0 bundle with no `undefined function` warning.
+    Neither was run — both reach DRM master.
+  - How: mabda resolves samvada by **git tag**, and `cyrius build`
+    re-resolves deps even with `--no-deps`, so a bundle dropped into
+    `mabda/lib/` is overwritten before it compiles. In a scratch
+    copy, replace `git`/`tag` with `path = "<samvada checkout>"`
+    and delete its `cyrius.lock`. Then grep the build log: under
+    `-D MABDA_LOGIND` a missing samvada fn is a **warning**
+    (`undefined function`) and the build still exits 0 — confirmed
+    by building against a bundle with `samvada_session_take_device`
+    renamed away.
 - No second consumer exists. Everything in the roadmap's wishlist
   is gated on one.
 
 ## Next
 
-See [`roadmap.md`](roadmap.md). Next up is **v1.1.0** — retiring
+See [`roadmap.md`](roadmap.md). Next up is **v1.2.0** — retiring
 the C shim — gated on the CG lane: a consumer running the native
 path from a seated session. **A `TakeDevice` that transfers a real
 descriptor has never run, by anyone.**

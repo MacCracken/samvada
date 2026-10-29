@@ -20,17 +20,13 @@ include "src/dbus_sys.cyr"
 # harness dependency and lives here, not in src/, and the exported
 # surface does not grow to satisfy a test.
 #
-# The arch split is load-bearing and is the reason this is not
-# copied verbatim from cyrius-doom: doom hardcodes 46, which is
-# sendmsg on x86_64 but **ftruncate** on aarch64 (verified against
-# asm-generic/unistd.h: __NR3264_ftruncate = 46). A hardcoded 46
-# there does not fail loudly on aarch64 — it truncates a file.
-fn t_sendmsg_nr() {
-    #ifdef CYRIUS_ARCH_AARCH64
-    return 211;
-    #endif
-    return 46;
-}
+# It goes through the stdlib's `sys_sendmsg`, never a number of our
+# own. cyrius-doom hardcodes 46, which is sendmsg on x86_64 but
+# **ftruncate** on aarch64 (asm-generic/unistd.h: __NR3264_ftruncate
+# = 46) — it does not fail loudly there, it truncates a file. Until
+# 1.1.0 this file avoided that with a native 211 under `#ifdef
+# CYRIUS_ARCH_AARCH64`, the shape cyrius 6.7.12+ calls fragile (see
+# src/dbus_sys.cyr). The round trips below are what prove the call.
 
 var _t_iov  = 0;
 var _t_mh   = 0;
@@ -69,7 +65,7 @@ fn t_send_fd(sock, payload_fd) {
     store64(_t_mh + 32, _t_ctrl);
     store64(_t_mh + 40, dbus_sys_cmsg_space_1fd());
 
-    return syscall(t_sendmsg_nr(), sock, _t_mh, 0);
+    return sys_sendmsg(sock, _t_mh, 0);
 }
 
 # Send one byte plus a cmsg of the WRONG type. Used to prove the
@@ -92,7 +88,7 @@ fn t_send_wrong_cmsg(sock) {
     store64(_t_mh + 24, 1);
     store64(_t_mh + 32, _t_ctrl);
     store64(_t_mh + 40, dbus_sys_cmsg_space_1fd());
-    return syscall(t_sendmsg_nr(), sock, _t_mh, 0);
+    return sys_sendmsg(sock, _t_mh, 0);
 }
 
 # ---- layout pins ----
@@ -118,17 +114,23 @@ fn test_dbus_sys_layout() {
 }
 
 # The syscall numbers are the one thing that is NOT arch-uniform,
-# and getting them wrong is silent rather than loud.
+# and getting them wrong is silent rather than loud. samvada spells
+# none of its own (1.1.0): every socket call is the stdlib's.
+#
+# On x86_64 the stdlib's constants ARE the kernel ABI, so they are
+# pinned — a stdlib typo would fail here. On aarch64 they are not
+# pinned at all: the compiler rewrites x86 numbers through a compat
+# chain, so the stdlib may legitimately spell either the native or the
+# x86 number, and asserting one would pin cyrius's choice, not the
+# call. What proves the aarch64 call is the round trips below, and the
+# `-strace` run recorded in CHANGELOG 1.1.0.
 fn test_dbus_sys_syscall_numbers() {
-    test_group("dbus_sys: arch-selected syscall numbers");
-    #ifdef CYRIUS_ARCH_AARCH64
-    assert_eq(dbus_sys_recvmsg_nr(), 212, "aarch64 recvmsg");
-    assert_eq(t_sendmsg_nr(),        211, "aarch64 sendmsg");
-    assert(t_sendmsg_nr() != 46, "aarch64 sendmsg is NOT 46 (that is ftruncate)");
-    return 0;
+    test_group("dbus_sys: the socket calls are the stdlib's");
+    #ifdef CYRIUS_ARCH_X86
+    assert_eq(SYS_RECVMSG, 47, "x86_64 recvmsg");
+    assert_eq(SYS_SENDMSG, 46, "x86_64 sendmsg");
+    assert_eq(SYS_SENDTO,  44, "x86_64 sendto");
     #endif
-    assert_eq(dbus_sys_recvmsg_nr(), 47, "x86_64 recvmsg");
-    assert_eq(t_sendmsg_nr(),        46, "x86_64 sendmsg");
     return 0;
 }
 
@@ -282,7 +284,7 @@ fn t_send_two_fds(sock, fd_a, fd_b) {
     store64(_t_mh + 24, 1);
     store64(_t_mh + 32, _t_ctrl2);
     store64(_t_mh + 40, 32);                       # CMSG_SPACE(2 * int)
-    return syscall(t_sendmsg_nr(), sock, _t_mh, 0);
+    return sys_sendmsg(sock, _t_mh, 0);
 }
 
 fn test_msg_ctrunc_is_refused() {
@@ -368,7 +370,7 @@ fn t_send_three_fds(sock, f1, f2, f3) {
     store64(_t_mh + 24, 1);
     store64(_t_mh + 32, _t_ctrl3);
     store64(_t_mh + 40, 32);                       # CMSG_SPACE(3 * int)
-    return syscall(t_sendmsg_nr(), sock, _t_mh, 0);
+    return sys_sendmsg(sock, _t_mh, 0);
 }
 
 # MSG_CTRUNC must not leak the descriptors that DID fit. The kernel has

@@ -1,6 +1,6 @@
 # samvada — roadmap
 
-**Where samvada is.** v1.0.2. It speaks dbus natively, in Cyrius,
+**Where samvada is.** v1.1.0. It speaks dbus natively, in Cyrius,
 over a raw unix socket — no libsystemd, no C shim, no
 `pkg-config`, nothing for a consumer to link. The road ADR-0003
 set out at 0.5.1 is finished: N0 through N7 shipped, then a
@@ -25,10 +25,11 @@ test counts, layout, dep gaps — is in [`state.md`](state.md).
 | Pre-1.0 audit + reply forgery | 1.0.0 | AUDIT-1..4; forgery closed; provenance check, send-time watermark, wall-clock timeouts |
 | A lane — the dimensions 1.0.0 missed | 1.0.1 | ten defects; public surface frozen mechanically |
 | Toolchain patch — cyrius 6.6.2 → 6.6.20 | 1.0.2 | no source-logic change; the 6.6.5 / 6.6.6 pin-move checklists worked through and retired |
+| Toolchain minor — cyrius 6.6.20 → 6.7.18, CI on Ubuntu 26.04 | 1.1.0 | no native aarch64 syscall numbers left (stdlib names; CI-gated); consumer floor cyrius 6.6.5; every action at its latest major; took the 1.1.0 number the shim retirement had held |
 
 ---
 
-## Next: v1.1.0 — retire the C shim
+## Next: v1.2.0 — retire the C shim
 
 The one deliberately deferred item from N7. `deps/samvada_main.c`
 still ships as a fallback and as `tools/differential/`'s reference
@@ -41,7 +42,7 @@ defect at 0.11.0 — at the moment the native path is least proven
 in the field.
 
 Consumers lose nothing by waiting: `samvada_native_init()` already
-gives a zero-libsystemd build today. What 1.1.0 buys is the
+gives a zero-libsystemd build today. What 1.2.0 buys is the
 tidiness of a native-only tree.
 
 - [ ] `deps/samvada_main.c` deleted; `consumer-link.md` drops the
@@ -58,7 +59,8 @@ tidiness of a native-only tree.
 ## The CG lane (consumer green) — externally gated
 
 Still open. It gated the 1.0.0 tag, expired per its own clause,
-and now gates 1.1.0.
+and now gates 1.2.0 (it gated 1.1.0 until that number went to the
+toolchain minor).
 
 - **CG-1** — mabda's live-bus e2e from a seated session.
 - **CG-2** — a `TakeDevice` that actually returns a descriptor.
@@ -206,8 +208,17 @@ native backend shipped and reached parity. One rung is still live:
   the unseated one — was **not** met: only the unseated native
   handshake was run, because `take_device` takes session control and
   the only session available was the graphical one.
+- **2026-10-28** — `1.1.0`. cyrius `6.6.20` → `6.7.18`, CI on
+  `ubuntu-26.04`, every action at its latest major. Released as a
+  minor, it takes the number the shim retirement held, so that
+  moves to 1.2.0, still behind the CG lane. It also removed
+  samvada's native aarch64 syscall pins, found while reading the
+  6.7.x migration notes, which raises the consumer floor to cyrius
+  6.6.5 (`sys_sendto`). The
+  seated-host rule was again **not** met, for the same reason as
+  1.0.2.
 
-## Moved from cyrius's roadmap (2026-10-08) — still open at the 6.6.20 pin
+## Moved from cyrius's roadmap (2026-10-08) — still open at the 6.7.18 pin
 
 cyrius no longer carries this repo's follow-ups; the items below were moved here from its roadmap. Each
 applies from the cyrius version it names. Everything else that changes between this repo's pin and the
@@ -215,6 +226,13 @@ current cyrius is in cyrius's `CHANGELOG.md` and `docs/development/ecosystem-mig
 
 - [ ] **(cyrius ≥ 6.6.18) `sys_recvmsg` on Windows** — distlib's verify compiles the bundle for
   x86_64-windows and reports `sys_recvmsg` undefined there: the stdlib defines it for Linux and agnos only.
-  First seen through mabda's distlib; **from 1.0.2 (pin 6.6.20) samvada's own `cyrius distlib` prints it**,
+  First seen through mabda's distlib; **from 1.0.2 (pin 6.6.20) samvada's own `cyrius distlib` prints it**, still at 6.7.18,
   as a warning — distlib exits 0 and CI's dist gate does not read warnings. Gate the call off Windows, or
   file an issue with cyrius if a Windows decline stub is wanted.
+
+## Found at the 6.7.18 pin move (1.1.0) — open
+
+- [ ] **aarch64 `MSG_CTRUNC`: 2 `tests/dbus_sys.tcyr` asserts fail under qemu-user**, identically on 6.6.20
+  and 6.7.18 — EPROTO on truncated ancillary data (got 1) and descriptors closed (11 vs 9). Probably
+  qemu-user's ancillary-data emulation; unconfirmed, because aarch64 hardware has never run the suite. Settle
+  on hardware before calling the surplus-fd path aarch64-proven.

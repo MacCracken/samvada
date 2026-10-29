@@ -59,22 +59,20 @@ fn dbus_sys_msg_cmsg_cloexec() { return 1073741824; }
 # method call into a busy-wait.
 fn dbus_sys_msg_dontwait() { return 64; }
 
-# ---- arch-selected syscall numbers ----
+# ---- syscall numbers: the stdlib's, never our own ----
 # sendmsg/recvmsg are NOT in the same numeric slot across arches, and
 # getting this wrong is silent: on aarch64, 46 is `ftruncate`, so a
 # hardcoded x86_64 number does not fail — it truncates a file to a
 # garbage length. (cyrius-doom hardcodes `WL_SYS_SENDMSG = 46` with no
 # aarch64 branch and carries exactly that latent bug.)
 #
-# `sys_recvmsg` from the stdlib already resolves SYS_RECVMSG per-arch,
-# so it is used directly and this fn exists only to PIN the number the
-# tests assert against.
-fn dbus_sys_recvmsg_nr() {
-    #ifdef CYRIUS_ARCH_AARCH64
-    return 212;
-    #endif
-    return 47;
-}
+# So the receive goes through the stdlib's `sys_recvmsg`, which
+# resolves SYS_RECVMSG per arch. Until 1.1.0 this file also kept a
+# native aarch64 212 under `#ifdef CYRIUS_ARCH_AARCH64` for the tests
+# to assert against. It is gone: cyrius 6.7.12+ rewrites x86 numbers
+# on ELF-aarch64 through a compat chain, so which number the stdlib
+# spells is the compiler's business, and only behaviour says the
+# right call ran — tests/dbus_sys.tcyr's SCM_RIGHTS round trip.
 
 # ---- scratch (file-scope; see the non-reentrancy note above) ----
 var _dbus_iov  = 0;   # 16 bytes

@@ -4,6 +4,236 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-10-28
+
+Toolchain minor. Pinned Cyrius bumped `6.6.20` → `6.7.18` (the 6.7
+language minor), the stdlib re-vendored under it, and CI moved to
+Ubuntu 26.04 LTS with every action at its latest major. One source
+change came out of the 6.7.x migration notes: samvada no longer
+spells any syscall number of its own under an aarch64 conditional.
+The public surface, the FFI layout (11 slots / 88 bytes, `kind` at
++64) and the C shim are untouched; 586 asserts pass (585 + 1, see
+below).
+
+### Breaking
+- **A consumer must pin cyrius ≥ 6.6.5 to build the 1.1.0 bundle.**
+  1.0.2's bundle built on 6.6.4; older pins were not tried. The bundle's send path now
+  calls the stdlib's `sys_sendto`, which cyrius added in 6.6.5.
+  Measured with a probe built from the bundle under each toolchain's
+  own stdlib: on 6.6.4, `cycc` exits 1 (`refusing to emit binary with
+  1 reachable undefined function(s)`, naming `sys_sendto`); on 6.6.5 it builds and the native
+  handshake runs; 1.0.2's bundle still builds on 6.6.4.
+  **Migration:** move your `cyrius` pin to 6.6.5 or later. mabda pins
+  6.7.5 and is unaffected (compile-checked, see Notes).
+
+### Changed
+- **No native aarch64 syscall number in samvada's own code.** cyrius
+  6.7.12+ rewrites x86 syscall numbers on ELF-aarch64 through a
+  compat chain that matches a *number*. A native number written under
+  `#ifdef CYRIUS_ARCH_AARCH64` is therefore one future row away from
+  a silent wrong call, and nothing judges a number returned from a
+  fn. The cyrius guide's syscall rule 3 is "never write the
+  aarch64-native number under an `#ifdef CYRIUS_ARCH_AARCH64`".
+  samvada had five such regions; it now has none:
+  - `sendto`: `dbus_socket_write_all` calls the stdlib's `sys_sendto`
+    (new in cyrius 6.6.5). `dbus_socket_sendto_nr` (206 / 44) is
+    removed. The file's "the stdlib has no send side" note had been
+    stale since 6.6.5.
+  - `recvmsg`: the call was already the stdlib's `sys_recvmsg`.
+    `dbus_sys_recvmsg_nr` (212 / 47) existed only for a test to
+    assert against, and is removed.
+  - `clock_gettime`: no stdlib name exists, so it is spelled as the
+    stdlib's own `lib/chrono.cyr` spells it: the x86 number, `228`,
+    as a literal at the call site, which the compiler folds to 113 on
+    aarch64 through the row chrono and `lib/bench.cyr` depend on (the
+    guide's rule 2). `dbus_session_clock_nr` (113 / 228) is removed.
+  - The tests' own `sendmsg` helpers (`t_sendmsg_nr`, `s_sendmsg_nr`,
+    211 / 46) are replaced by `sys_sendmsg`.
+
+  The three removed fns were `dbus_*` internals: bundle-reachable,
+  but outside the frozen 8-fn surface, which `surface_check.py`
+  confirms is unchanged. None has a `1000 + N` private alias: those
+  exist only for native numbers a compat row already claims, and the
+  decoded 6.7.18 chain has none for 1113, 1206 or 1212. Spelling one
+  would have sent an unknown syscall number (ENOSYS).
+- **`tests/dbus_sys.tcyr`'s numbers group** is now "the socket calls
+  are the stdlib's". On x86_64 it pins `SYS_RECVMSG` 47,
+  `SYS_SENDMSG` 46 and `SYS_SENDTO` 44, the kernel ABI, so a stdlib
+  typo fails; `sendto` is the new assert (66 → 67). On aarch64 it no
+  longer asserts numbers at all, since the stdlib may legitimately
+  spell either the native or the routed x86 one. The aarch64 proof
+  is behavioural, and the `-strace` run is in Notes.
+- **New CI gate (security job): no native-aarch64 region.** It fails
+  on `#ifdef CYRIUS_ARCH_AARCH64`, `#ifndef CYRIUS_ARCH_X86` or
+  `#ifplat aarch64` in `src/` or `tests/`, and on any `#else` /
+  `#elif` in a file with an arch conditional. It has its own grep,
+  because `scan()` drops `#`-led lines as comments. Mutation-verified:
+  each of the four region shapes exits 1; the pristine tree and a
+  comment that merely mentions the macro exit 0.
+- **Toolchain pin** `cyrius.cyml [package].cyrius` bumped
+  `6.6.20` → `6.7.18`. In `ci.yml` and `release.yml`,
+  `CYRIUS_TARBALL_SUM` moved to `1411e773…702c47fe`. That sum was
+  computed from the downloaded `cyrius-6.7.18-x86_64-linux.tar.gz`
+  and matched against both the release's `.sha256` and GitHub's
+  asset digest. The tarball's `cycc`, `cyrius`, `cyrfmt`, `cyrlint`
+  and `lib/` are byte-identical to the 6.7.18 the local gates ran on.
+- **Installer pin moved to cyrius's `6.7.18` tag** —
+  `CYRIUS_INSTALL_SHA` `6020f5ba…` → `a1cf8c02…`, `CYRIUS_INSTALL_SUM`
+  → `28515fca…ac8f5f7`, the same bytes as the release's own
+  `install.sh` asset. The 6.6.20 installer refuses a stripped
+  signature at or above the first signed release, which could have
+  failed CI's offline install. It does not: the
+  `CYRIUS_INSTALL_TARBALL` path verifies a local `.sha256` if one is
+  present and never reaches the signature check, so CI's own pinned
+  sum stays the integrity floor. Verified by running the CI step
+  verbatim, with a throwaway `$HOME` (see Notes).
+- **Stdlib re-vendored** — `lib/` wiped and re-resolved with
+  `cyrius deps`. All 26 files are byte-identical to 6.7.18's stdlib,
+  and 22 of them changed. `cyrius.lock` regenerated (26 rows), and
+  `cyrius deps --locked` (6.7.6+) agrees with it.
+- **CI runs on `ubuntu-26.04`** — every job in both workflows,
+  named explicitly. `ubuntu-latest` still resolves to 24.04, so
+  leaving the label alone would not have moved anything. GitHub
+  lists 26.04 as a **public preview** (`actions/runner-images#14226`:
+  possible queueing, software may shift); `ubuntu-24.04` is the
+  fallback label, and `ci.yml` says so. The libsystemd apt step
+  keeps its conditional removal of unused third-party sources; the
+  26.04 image already drops Chrome's.
+- **Actions to their latest releases**, still pinned by commit SHA:
+  `actions/checkout` v4 → **v7.0.1** (`3d3c42e5…`),
+  `actions/upload-artifact` v4 → **v7.0.2** (`cf430e03…`),
+  `actions/download-artifact` v4 → **v8.0.2** (`9000827c…`),
+  `softprops/action-gh-release` v2 → **v3.0.3** (`efb35369…`). Tag →
+  commit resolved through the GitHub API, dereferencing annotated
+  tags. Every major's breaking notes were checked against how the
+  workflows use them; none applies:
+  - checkout v7 blocks fork-PR checkouts under
+    `pull_request_target` / `workflow_run`, which these workflows do
+    not use, and every checkout already sets
+    `persist-credentials: false`.
+  - download-artifact v5 changed the path for single by-*ID*
+    downloads, but release.yml downloads by name.
+  - download-artifact v8 makes a digest mismatch an error, which is
+    stricter and wanted.
+  - upload-artifact v7's unzipped upload is opt-in (`archive:
+    false`), so the default zip is unchanged.
+  - gh-release v3 moves to the Node 24 runtime. Its `name`,
+    `body_path`, `prerelease` and `files` inputs are unchanged.
+- **The C shim's retirement moves to 1.2.0.** The roadmap had
+  reserved 1.1.0 for it, gated on the CG lane, which has not
+  cleared. Renumbered in the roadmap, README, `state.md` and
+  `consumer-link.md`; earlier CHANGELOG entries keep the number they
+  were written with.
+- `samvada_version()` packed triple `(1,0,2)` → `(1,1,0)`; the
+  version-triple pin in `tests/samvada.tcyr` updated lock-step.
+
+### Fixed
+- **`docs/guides/consumer-link.md` quoted 6.6.20's `--emit-object`
+  error.** 6.7.18 prints `error: cyrius build: unknown option
+  '--emit-object'` on stderr and the usage line on stdout, exit 1,
+  nothing written. The quote has been updated, and the guide's
+  requires-block and symbol-visibility claims were re-checked on
+  6.7.18.
+- **`state.md` said a downstream build against an unreleased
+  samvada needs the tag pushed first.** It doesn't: a scratch copy
+  of the consumer with `[deps.samvada] path = …` builds against the
+  working tree. The recipe is now in `state.md`, along with the trap
+  that made it look impossible.
+
+### Notes
+- **Checked against cyrius's migration notes for the whole 6.7.x
+  section** (6.7.0 → 6.7.18), in samvada's own sources. Nothing
+  needs a change. The entries that reach samvada, and why each
+  holds:
+  - The new cyrlint offset and write-length rules (6.7.11 TL-3,
+    6.7.12 TL-21) report 0 warnings. 6.7.18 still prints them as
+    `  warn line N:`, so CI's `^\s*warn ` grep still fails on one.
+    That was checked with a probe file that trips the new rule; a
+    gate that silently stopped matching would have passed too.
+  - Bare value-builtin statements are now refused (6.7.16 FE-3,
+    6.7.17 FA2-1). samvada's 180 `load8/16/32/64` calls are never
+    bare.
+  - Include-once now keys on the whole spelling (6.7.15 IT-5,
+    6.7.17 FA1-4). The consumer recipe's repeated leaves still
+    compile, to a byte-identical object.
+  - `cyrius tests` is gone (6.7.12 TL-7) and bare `cyrius bench`
+    exits 1 (6.7.9). CI uses `cyrius test` and names its `.bcyr`
+    files.
+  - DCE changes (6.7.11, 6.7.14, 6.7.18): the release build's
+    `CYRIUS_DCE=1` build, tests and bench pass.
+  - The `.deps` sidecar derivation is unchanged: 4 leaves.
+  - **aarch64 syscall renumbering (6.7.12 DW-1, 6.7.14 PL-6, 6.7.15
+    PL-9/10) did not change samvada's calls, but samvada had the
+    shape the guide calls fragile.** Its `#ifdef
+    CYRIUS_ARCH_AARCH64` pins returned native numbers: `sendto` 206,
+    `recvmsg` 212, `clock_gettime` 113. 6.7.18's ELF chain, decoded
+    from `src/backend/aarch64/emit.cyr` at the `6.7.18` tag, has no
+    row sourced at any of the three, so they passed through. Fixed
+    in this release rather than left open (Changed, above).
+- **aarch64 under qemu-user: 2 asserts fail in
+  `tests/dbus_sys.tcyr`, identically on 6.6.20 and 6.7.18** (65/67
+  before the syscall change above, 62/64 after it, which dropped the
+  group's three aarch64 number asserts):
+  - `EPROTO reported on truncated ancillary data` (got 1)
+  - `MSG_CTRUNC closed every descriptor` (11 vs 9)
+  
+  This is not a migration regression, and CI does not run aarch64.
+  The likely cause is qemu-user's ancillary-data emulation, but
+  that is unconfirmed: aarch64 hardware is untested. Left open on
+  the roadmap.
+- **Verified, and what was not.**
+  - Every `ci.yml` step passes locally under 6.7.18: lint, fmt,
+    vet, distlib (`dist/` in sync), surface, build, ELF, smoke
+    (`samvada_version = 1.1.0`), the 7 test targets, the bench, the
+    live-bench skip path, the C-shim compile in both modes, the
+    consumer-owned `main()` link, the corpus decode, slot offsets,
+    the security scan and the docs checks.
+  - The CI toolchain-install step, run verbatim with the new pins in
+    a throwaway `$HOME` and with `~/.cyrius/bin` off `PATH`,
+    installs 6.7.18. The host's own toolchain was checked untouched
+    before and after.
+  - **The whole of `ci.yml` also passes in an `ubuntu:26.04`
+    container** (26.04.1 LTS, gcc 15.2, Python 3.14.4), installer
+    included. Both pinned sums verify, apt resolves libsystemd-dev
+    259.9 from the 26.04 archive, and the strict-flag shim compile
+    passes. Each job ran from a fresh copy of the tree. This is the
+    stock Ubuntu image, not GitHub's runner image: `curl`, `git`,
+    `gcc`, `python3`, `xxd`, `file` and `gawk` were installed first
+    to stand in for what the runner ships (`xxd`, `file` and `gawk`
+    are in the 26.04 server image manifest). `release.yml`'s action
+    steps (upload, download, publish) cannot run locally; the 1.1.0
+    tag push is their first run.
+  - **The aarch64 calls, traced.** `dbus_auth`, `dbus_session` and
+    `dbus_sys`, built `--aarch64` and run under `qemu-aarch64
+    -strace`, before and after the syscall change, reach the same
+    calls in the same counts: `sendto` 2 / 20 (with `MSG_NOSIGNAL`),
+    `clock_gettime(CLOCK_MONOTONIC, …)` 54, `sendmsg` 5 / 204,
+    `recvmsg` 20,034 / 204. No misrouted or unknown syscall appears.
+  - **Mutants**, each caught by a behavioural test rather than a
+    number pin:
+    - `sys_sendto` → `sys_write`: the departed-peer test is killed by
+      SIGPIPE.
+    - Clock 228 → a native 113 on x86, which is `setreuid`: "the
+      monotonic clock works" fails, then the suite hangs into the
+      timeout (exit 124).
+    - `sys_recvmsg` → `sys_read`: the fd round-trip asserts fail.
+  - The native handshake ran against the live system bus from a
+    probe built on the 1.1.0 bundle: `samvada_native_init` 0,
+    `samvada_pump_signals` 0, `samvada_release` 0, re-init 0. That
+    was unseated, and `take_device` was **not** exercised (it takes
+    session control). The seated-host path is still the CG lane.
+  - The C-shim two-stage recipe compiles and links on 6.7.18
+    against libsystemd 262, and was not executed. `readelf -sW`
+    shows the eight libc-named symbols still `vis=HIDDEN`.
+  - **Downstream**: mabda, on its own 6.7.5 pin, compiles against
+    the 1.1.0 bundle under `-D MABDA_LOGIND` (compile-only).
+- Benches flat (≤1 ns against a same-day 1.0.2-on-6.6.20
+  re-measure). The smoke binary grows 106,904 → 111,032 B, while
+  under DCE it moves 20,888 → 20,920 B: the growth is stdlib code
+  DCE removes. See `docs/benchmarks.md` Run 8.
+- `cyrius distlib` still warns `sys_recvmsg` is undefined on
+  x86_64-windows; that is left open on the roadmap.
+
 ## [1.0.2] — 2026-10-28
 
 Toolchain patch. Pinned Cyrius bumped `6.6.2` → `6.6.20` and the

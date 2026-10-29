@@ -10,7 +10,7 @@
 ```sh
 cyrius deps                                 # resolve stdlib
 cyrius build src/main.cyr build/samvada     # smoke build
-cyrius test                                 # [build].test + tests/*.tcyr (585 asserts)
+cyrius test                                 # [build].test + tests/*.tcyr (586 asserts)
 ```
 
 ## Layout

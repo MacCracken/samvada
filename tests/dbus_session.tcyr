@@ -209,13 +209,9 @@ fn test_release_control_has_no_signature_field() {
 
 # ---- socketpair plumbing for the reply-path pins ----
 # sendmsg is 46 on x86_64 but **ftruncate** on aarch64; hardcoding it
-# would not fail loudly there, it would truncate a file.
-fn s_sendmsg_nr() {
-    #ifdef CYRIUS_ARCH_AARCH64
-    return 211;
-    #endif
-    return 46;
-}
+# would not fail loudly there, it would truncate a file. So it is the
+# stdlib's `sys_sendmsg` — never a number of our own (1.1.0; see
+# tests/dbus_sys.tcyr).
 
 var _s_iov  = 0;
 var _s_mh   = 0;
@@ -248,7 +244,7 @@ fn s_send_with_fd(sock, buf, len, payload_fd) {
     store64(_s_mh + 24, 1);
     store64(_s_mh + 32, _s_ctrl);
     store64(_s_mh + 40, dbus_sys_cmsg_space_1fd());
-    return syscall(s_sendmsg_nr(), sock, _s_mh, 0);
+    return sys_sendmsg(sock, _s_mh, 0);
 }
 
 fn s_copy(dst, src, n) {

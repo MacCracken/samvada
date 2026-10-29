@@ -213,6 +213,7 @@ Run as the last patch of the current minor (e.g. `0.2.5` before
 - Continuation lines inside a call get **2 spaces per open paren** (4 is also accepted) — `cyrfmt` enforces this from the 6.6.x line on, and a continuation wrapped at the statement indent is drift
 - `println(s)` is single-arg + newline; `print(s, len)` is two-arg explicit-length — there is **no** `print(s)` single-arg form
 - `print_num(n)` (string.cyr) and `fmt_int(n)` (fmt.cyr) print integers — interchangeable
+- **Never write a native aarch64 syscall number** under `#ifdef CYRIUS_ARCH_AARCH64` (or `#ifndef CYRIUS_ARCH_X86`, `#ifplat aarch64`, an arch `#else`) — ELF-aarch64 builds rewrite x86 numbers through a compat chain that matches a *number*, so a native one is a future silent wrong call. Use the stdlib's `sys_*` / `SYS_*`; where none exists, write the x86 number (`clock_gettime` = `228`, as `lib/chrono.cyr` does). `1000 + N` aliases exist only for natives a row already claims. CI's security job rejects any aarch64 region in `src/` / `tests/`
 
 ## CI / Release
 

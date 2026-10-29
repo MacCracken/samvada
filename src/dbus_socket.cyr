@@ -13,23 +13,19 @@
 #    process-global nor inherited across execve (SIG_IGN is both,
 #    and samvada does not own the process's signal policy).
 #
-# 2. THE STDLIB HAS NO SEND-SIDE SOCKET CALL AT ALL. `sys_recvmsg`
-#    and `sys_recvfrom` exist; there is no `sys_sendto`,
-#    `sys_sendmsg` or `sys_send`, and no SYS_SENDTO constant on
-#    either arch. So the number is pinned here, WITH both arches.
-#    Filed upstream — the asymmetry is the defect, not the absence.
-
-# ---- arch-selected syscall numbers ----
-# Hardcoding ONE number with no arch branch is the bug class that
-# bit four sibling repos (they pin SYS_SENDMSG = 46, which is
-# `ftruncate` on aarch64). An #ifdef pin supplying BOTH numbers is
-# the house exception, already used in src/dbus_sys.cyr.
-fn dbus_socket_sendto_nr() {
-    #ifdef CYRIUS_ARCH_AARCH64
-    return 206;
-    #endif
-    return 44;
-}
+# 2. THE SEND GOES THROUGH THE STDLIB'S `sys_sendto`, NOT A NUMBER
+#    OF OUR OWN. Until 1.1.0 this file pinned sendto per arch (206
+#    on aarch64, 44 on x86_64), because the stdlib had no send side;
+#    cyrius 6.6.5 added `sys_sendto` / `SYS_SENDTO`. A native aarch64
+#    number in our own `#ifdef CYRIUS_ARCH_AARCH64` was also the
+#    shape cyrius 6.7.12+ calls fragile: ELF-aarch64 builds rewrite
+#    x86 syscall numbers through a compat chain that matches a
+#    NUMBER, so a future row sourced at 206 would silently change
+#    the call, and nothing judges a number returned from a fn. The
+#    stdlib's spelling is gated in cyrius's own CI against exactly
+#    that; ours was not. The proof that the call is sendto on either
+#    arch is behavioural — tests/dbus_auth.tcyr's departed-peer
+#    group gets -EPIPE and survives, which a write(2) would not.
 
 fn dbus_socket_msg_nosignal() { return 16384; }
 
@@ -177,7 +173,7 @@ fn dbus_socket_write_all(fd, buf, len) {
     if (len < 0)   { return -22; }
     var sent = 0;
     while (sent < len) {
-        var n = syscall(dbus_socket_sendto_nr(), fd, buf + sent, len - sent,
+        var n = sys_sendto(fd, buf + sent, len - sent,
           dbus_socket_msg_nosignal(), 0, 0);
         if (n < 0) {
             if (n == -4) { continue; }        # EINTR

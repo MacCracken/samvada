@@ -1,4 +1,4 @@
-# Linking samvada into a consumer (v1.0.2)
+# Linking samvada into a consumer (v1.1.0)
 
 **Read the native path and stop.** As of 1.0, samvada speaks dbus
 natively in Cyrius — no C, no `libsystemd`, no `pkg-config`, no
@@ -7,7 +7,7 @@ calling one function is the entire integration.
 
 The libsystemd **C shim** (`deps/samvada_main.c`) is still in the
 tree as a fallback and as the differential reference, and it
-retires at 1.1.0. Its two-stage recipe is documented further down
+retires at 1.2.0. Its two-stage recipe is documented further down
 because it is verified and someone may need it — but **new
 consumers should not use it.**
 
@@ -23,17 +23,22 @@ consumers should not use it.**
 > against libsystemd 262 but **not executed** — running it would
 > take session control on the graphical session it was built
 > from.
+>
+> **1.1.0 (cyrius 6.7.18), 2026-10-28:** the same native handshake
+> re-run on the live system bus, unseated, from the 1.1.0 bundle.
+> The C-shim recipe compiled and linked against libsystemd 262, and
+> again was **not executed**.
 
 ## Adding samvada to your `cyrius.cyml`
 
 ```cyml
 [deps.samvada]
 git     = "https://github.com/MacCracken/samvada.git"
-tag     = "1.0.2"
+tag     = "1.1.0"
 modules = ["dist/samvada.cyr"]
 ```
 
-samvada's tags are **unprefixed** — `1.0.2`, not `v1.0.2`. Every
+samvada's tags are **unprefixed** — `1.1.0`, not `v1.1.0`. Every
 tag pushed to the repo is bare.
 
 > **Do not pin below 1.0.1**, and there are two independent
@@ -92,7 +97,7 @@ The Cyrius toolchain. That is the whole list. No C compiler, no
 
 ---
 
-## The C-shim build (fallback — retires at 1.1.0)
+## The C-shim build (fallback — retires at 1.2.0)
 
 Everything below this line is the **libsystemd** path. Skip it
 unless you are deliberately linking the reference backend.
@@ -140,7 +145,7 @@ builds the fn-table and hands it to samvada; you never see it.
 whole, keyed by tag:
 
 ```
-~/.cyrius/deps/samvada/1.0.2/deps/samvada_main.c
+~/.cyrius/deps/samvada/1.1.0/deps/samvada_main.c
 ```
 
 Most consumers vendor a copy into their own `deps/` rather than
@@ -170,13 +175,14 @@ impossible.)
 
 `cyrius build` produces a finished executable, not a relocatable
 object, and it has no `--emit-object` flag. On the pinned
-toolchain (6.6.20) passing one fails up front:
+toolchain (6.7.18) passing one fails up front, on stderr:
 
 ```
-Error: cyrius build: unknown option '--emit-object'
+error: cyrius build: unknown option '--emit-object'
 ```
 
-exit `1`, nothing written. **Through cyrius 6.6.4 it did not even
+exit `1`, nothing written, and the usage line on stdout (6.6.20
+printed `Error:` and no usage line). **Through cyrius 6.6.4 it did not even
 error**: verified on 6.6.1, the command exits `0`, prints
 `OK (80904 bytes)`, and writes a
 `ELF 64-bit LSB executable, statically linked` to the `.o` path
@@ -209,7 +215,7 @@ compile-verified `include` block — `alloc`, `syscalls`, `string`,
 other leaves in that loop are there for **your** code (`fmt`,
 `io`, …), not samvada's. `cycc` includes each file once, so the
 repeats are harmless, and the order is no longer load-bearing
-(both verified on 6.6.20; through 1.0.1 the bundle had no
+(both verified on 6.6.20 and again on 6.7.18; through 1.0.1 the bundle had no
 includes and had to come last). `cycc` is the bare compiler: it
 does **not** apply the manifest's `[deps].stdlib` auto-include
 that `cyrius build` gives you, so the unit has to name every leaf
@@ -251,6 +257,11 @@ toolchain:
 (`nm` shows `T` in both cases — the binding is unchanged; it is
 the *visibility* that was fixed. Checking with `nm` alone will
 mislead you.)
+
+Re-checked on 6.7.18 for 1.1.0: all eight are still
+`bind=GLOBAL vis=HIDDEN` in the object, and the linked binary's
+dynamic symbol table exports none of them. That binary was linked,
+not run.
 
 **If you are pinned below 6.6.2**, add:
 
@@ -527,7 +538,7 @@ Two more things worth stating plainly:
    success value leaking through — and now returns `0` as the
    contract always said. Both are non-negative, so a consumer
    branching on `rc < 0` needs no edit.
-7. **Re-pin to `1.0.2`.**
+7. **Re-pin to `1.1.0`.**
 
 Behaviour you get for free, with no code change:
 `TakeControl` / `ReleaseControl` around the session (which is
@@ -563,7 +574,38 @@ you:
    truncated to 32 bits. If you were passing a value above
    `UINT32_MAX` you were opening a *different device*.
 5. Nothing to do about the C shim: it still builds and still
-   works. It retires at 1.1.0.
+   works. It retires at 1.2.0.
+
+## Upgrading from 1.0.2 to 1.1.0
+
+samvada moved its own cyrius pin `6.6.20` → `6.7.18` and its CI to
+Ubuntu 26.04. The public surface is unchanged, and `dist/samvada.deps`
+is unchanged (`alloc`, `syscalls`, `string`, `fnptr`). One thing can
+reach your build:
+
+1. **Your cyrius pin must be 6.6.5 or later.** The bundle now sends
+   through the stdlib's `sys_sendto` rather than a syscall number of
+   its own, and `sys_sendto` first shipped in cyrius 6.6.5. The
+   bundle compiles under **your** manifest's pin, not samvada's.
+   Verified with a probe built from the bundle under each
+   toolchain's own stdlib. On 6.6.4 it fails:
+
+   ```
+   warning: undefined function 'sys_sendto'
+   error: refusing to emit binary with 1 reachable undefined function(s) (pass --allow-undef to downgrade)
+   ```
+
+   (`cycc` exit 1). On 6.6.5 it builds and the native handshake
+   runs; mabda's 6.7.5 pin compiles it. 1.0.2's bundle built on
+   6.6.4.
+2. **Re-pin to `1.1.0`.**
+3. Moving your own pin to 6.7.x is a separate decision with its
+   own notes — cyrius's `docs/development/ecosystem-migration.md`
+   — and samvada 1.1.0 does not require it.
+4. If you reached into the bundle's `dbus_*` internals (outside the
+   frozen 8-fn surface), `dbus_socket_sendto_nr`,
+   `dbus_sys_recvmsg_nr` and `dbus_session_clock_nr` are gone; use
+   the stdlib's `SYS_SENDTO` / `SYS_RECVMSG`, or `228`.
 
 ## Upgrading from 1.0.1 to 1.0.2
 

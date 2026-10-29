@@ -1,6 +1,6 @@
 # samvada
 
-**Status: v1.0.2.** samvada speaks dbus natively, in Cyrius, over
+**Status: v1.1.0.** samvada speaks dbus natively, in Cyrius, over
 a raw unix socket. **No libsystemd, no C shim, no `pkg-config`,
 nothing for a consumer to link.**
 
@@ -56,7 +56,7 @@ samvada_session_take_device(major, minor)    -> fd | -err
 samvada_session_release_device(major, minor) -> 0 | -err
 samvada_pump_signals()                       -> events_drained | -err
 samvada_release()                            -> 0   (idempotent)
-samvada_version()                            -> packed u32 — (1 << 16) | (0 << 8) | 2
+samvada_version()                            -> packed u32 — (1 << 16) | (1 << 8) | 0
 
 samvada_init(table)                          -> 0 | -err   ← C-shim entry
 samvada_main(table)                          -> 0 | -err   ← C-shim entry
@@ -106,7 +106,7 @@ of them.
 ```sh
 cyrius deps                                  # resolve stdlib
 cyrius build src/main.cyr build/samvada      # smoke build
-cyrius test                                  # 585 asserts
+cyrius test                                  # 586 asserts
 ```
 
 ### Linking into a consumer
@@ -117,7 +117,7 @@ whole integration — no C, no `pkg-config`, no `objcopy`.
 ```toml
 [deps.samvada]
 git     = "https://github.com/MacCracken/samvada.git"
-tag     = "1.0.2"
+tag     = "1.1.0"
 modules = ["dist/samvada.cyr"]
 ```
 
@@ -128,7 +128,7 @@ modules = ["dist/samvada.cyr"]
 
 The **libsystemd C shim** (`deps/samvada_main.c`) is retained as a
 fallback and as `tools/differential/`'s reference backend, and is
-scheduled for deletion at 1.1.0. It needs a two-stage build and a
+scheduled for deletion at 1.2.0. It needs a two-stage build and a
 consumer-owned `main()`; that recipe lives in
 [`docs/guides/consumer-link.md`](docs/guides/consumer-link.md) and
 nowhere else. **New consumers should not use it.**
@@ -149,9 +149,9 @@ samvada/
 │   ├── dbus_marshal.cyr   — encoder
 │   ├── dbus_unmarshal.cyr — decoder (bounds fail CLOSED)
 │   └── dbus_session.cyr   — the logind calls, reply matching
-├── deps/samvada_main.c    — libsystemd shim (fallback; retires at 1.1.0)
+├── deps/samvada_main.c    — libsystemd shim (fallback; retires at 1.2.0)
 ├── dist/                  — tracked bundle consumers resolve via [deps.samvada]
-├── tests/                 — 585 asserts + fixtures/dbus/ (real captured wire bytes)
+├── tests/                 — 586 asserts + fixtures/dbus/ (real captured wire bytes)
 ├── tools/
 │   ├── surface_check.py   — freezes the public surface (CI gate)
 │   ├── dbus_tap.py        — AF_UNIX relay for capturing traffic
@@ -159,7 +159,7 @@ samvada/
 │   └── differential/      — runs both backends in one process, compares error codes
 ├── docs/                  — adr/ architecture/ guides/ development/ audit/ proposals/
 ├── cyrius.cyml            — package manifest; the toolchain pin lives here
-└── VERSION                — 1.0.2
+└── VERSION                — 1.1.0
 ```
 
 The fn-table obeys ADR-0002's **append-after-kind** invariant:
@@ -183,7 +183,7 @@ Report vulnerabilities per [`SECURITY.md`](SECURITY.md).
 ## Roadmap
 
 [`docs/development/roadmap.md`](docs/development/roadmap.md) —
-what is left. Next up is **v1.1.0**, retiring the C shim, gated on
+what is left. Next up is **v1.2.0**, retiring the C shim, gated on
 a consumer running the native path from a seated session.
 
 ## License

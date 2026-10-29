@@ -1,4 +1,4 @@
-# Public API surface (v1.0.2)
+# Public API surface (v1.1.0)
 
 This page is the canonical map of samvada's public contract: what
 each fn returns, what it requires, and which test pins it.
@@ -819,12 +819,12 @@ page cannot enumerate.
 
 Each public symbol's pins in `tests/samvada.tcyr` — **162
 asserts**, all green with no bus, no logind and no device. The
-suite as a whole is **585 asserts** across seven files; see
+suite as a whole is **586 asserts** across seven files; see
 [`state.md`](../development/state.md) for the per-file split:
 
 | Fn | Test group | Asserts |
 |---|---|---|
-| `samvada_version` | `v1.0.2 packed triple` | 4 (packed + 3 lanes) |
+| `samvada_version` | `v1.1.0 packed triple` | 4 (packed + 3 lanes) |
 | `samvada_init` (null) | `init rejects null table` | 1 |
 | `samvada_init` (NULL kind) | `init rejects NULL-kind table` | 2 (alloc + reject) |
 | `samvada_init` (unknown kind) | `init rejects an unknown backend kind` | 2 (`kind=99` rejected, `PURE_CYRIUS` accepted) |
