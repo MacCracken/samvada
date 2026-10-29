@@ -1,4 +1,4 @@
-# Linking samvada into a consumer (v1.0.1)
+# Linking samvada into a consumer (v1.0.2)
 
 **Read the native path and stop.** As of 1.0, samvada speaks dbus
 natively in Cyrius — no C, no `libsystemd`, no `pkg-config`, no
@@ -15,17 +15,25 @@ consumers should not use it.**
 > running `systemd-logind`.** The native path was re-verified on
 > cyrius 6.6.2 for 1.0.1; the C-shim commands were verified
 > against cyrius 6.6.1 and libsystemd 261 on 2026-09-09.
+>
+> **1.0.2 (cyrius 6.6.20), 2026-10-28:** the native handshake
+> (`samvada_native_init` → `samvada_pump_signals` →
+> `samvada_release` → re-init) was re-run against the live system
+> bus, unseated. The C-shim recipe was re-compiled and re-linked
+> against libsystemd 262 but **not executed** — running it would
+> take session control on the graphical session it was built
+> from.
 
 ## Adding samvada to your `cyrius.cyml`
 
 ```cyml
 [deps.samvada]
 git     = "https://github.com/MacCracken/samvada.git"
-tag     = "1.0.1"
+tag     = "1.0.2"
 modules = ["dist/samvada.cyr"]
 ```
 
-samvada's tags are **unprefixed** — `1.0.1`, not `v1.0.1`. Every
+samvada's tags are **unprefixed** — `1.0.2`, not `v1.0.2`. Every
 tag pushed to the repo is bare.
 
 > **Do not pin below 1.0.1**, and there are two independent
@@ -132,7 +140,7 @@ builds the fn-table and hands it to samvada; you never see it.
 whole, keyed by tag:
 
 ```
-~/.cyrius/deps/samvada/1.0.1/deps/samvada_main.c
+~/.cyrius/deps/samvada/1.0.2/deps/samvada_main.c
 ```
 
 Most consumers vendor a copy into their own `deps/` rather than
@@ -161,17 +169,19 @@ impossible.)
 ### 2. Compile your Cyrius code to an object
 
 `cyrius build` produces a finished executable, not a relocatable
-object. Its whole usage line in 6.6.1 is
+object, and it has no `--emit-object` flag. On the pinned
+toolchain (6.6.20) passing one fails up front:
 
 ```
-build [--aarch64|--win|--agnos] [--no-deps] [--strict] [--features <list>] <src> <out>
+Error: cyrius build: unknown option '--emit-object'
 ```
 
-— there is no `--emit-object`, and passing one anyway does not
-even error: verified on 6.6.1, the command exits `0`, prints
+exit `1`, nothing written. **Through cyrius 6.6.4 it did not even
+error**: verified on 6.6.1, the command exits `0`, prints
 `OK (80904 bytes)`, and writes a
 `ELF 64-bit LSB executable, statically linked` to the `.o` path
-you named. `cc` then fails at the link. The pre-0.5.1 recipe
+you named, and `cc` then fails at the link. cyrius 6.6.5 made
+unknown flags an error. Either way the pre-0.5.1 recipe
 `cyrius build src/main.cyr build/myapp.o --emit-object` never
 produced an object file.
 
@@ -191,12 +201,19 @@ This is the one sanctioned direct-`cycc` invocation — the same
 pattern mabda uses for its wgpu shim (`Makefile`, `build/%.o`).
 Everywhere else, use `cyrius build`.
 
-Everything before `samvada` in that loop is exactly the contents
-of `dist/samvada.deps`, and the order is load-bearing —
-`lib/samvada.cyr` goes last, after the leaves it folds over.
-`cycc` is the bare compiler: it does **not** apply the manifest's
-`[deps].stdlib` auto-include that `cyrius build` gives you, so
-the unit has to name every leaf itself. Includes must be
+Since 1.0.2 the bundle names its own requirements: cyrius 6.6.18+
+`distlib` derives `dist/samvada.deps` by compiling the bundle on
+six targets, and writes the result into `dist/samvada.cyr` as a
+compile-verified `include` block — `alloc`, `syscalls`, `string`,
+`fnptr`. So `include "lib/samvada.cyr"` alone compiles, and the
+other leaves in that loop are there for **your** code (`fmt`,
+`io`, …), not samvada's. `cycc` includes each file once, so the
+repeats are harmless, and the order is no longer load-bearing
+(both verified on 6.6.20; through 1.0.1 the bundle had no
+includes and had to come last). `cycc` is the bare compiler: it
+does **not** apply the manifest's `[deps].stdlib` auto-include
+that `cyrius build` gives you, so the unit has to name every leaf
+your own code uses. Includes must be
 **relative** (resolved against the directory you run `cycc`
 from); `cycc` rejects absolute include paths unless
 `CYRIUS_ALLOW_ABSOLUTE_INCLUDES=1`.
@@ -510,7 +527,7 @@ Two more things worth stating plainly:
    success value leaking through — and now returns `0` as the
    contract always said. Both are non-negative, so a consumer
    branching on `rc < 0` needs no edit.
-7. **Re-pin to `1.0.1`.**
+7. **Re-pin to `1.0.2`.**
 
 Behaviour you get for free, with no code change:
 `TakeControl` / `ReleaseControl` around the session (which is
@@ -548,6 +565,29 @@ you:
 5. Nothing to do about the C shim: it still builds and still
    works. It retires at 1.1.0.
 
+## Upgrading from 1.0.1 to 1.0.2
+
+A toolchain patch: samvada moved its cyrius pin `6.6.2` →
+`6.6.20`. No source, signature or behaviour change; the public
+surface is identical. One thing can reach your build:
+
+1. **`dist/samvada.deps` lists 4 leaves, not 10.** cyrius 6.6.18
+   stopped copying a producer's `[deps] stdlib` into its sidecar;
+   it is now derived by compiling the bundle, and samvada itself
+   needs only `alloc`, `syscalls`, `string` and `fnptr`. If your
+   code called `fmt`, `io`, `vec`, `str`, `assert` or `tagged`
+   without declaring them, it compiled only because samvada's
+   sidecar happened to drag them in. The build now fails and
+   names the fn and its leaf — verified on 6.6.20:
+
+   ```
+   hint: 'fmt_int' is defined by stdlib leaf 'fmt' — add it to [deps] stdlib in cyrius.cyml
+   ```
+
+   Add it, `cyrius deps`, rebuild.
+   mabda already declares every leaf it uses.
+2. **Re-pin to `1.0.2`.**
+
 ## What changed in 0.5.1
 
 The 2026-09-09 audit found this guide documented a build that
@@ -555,9 +595,10 @@ The 2026-09-09 audit found this guide documented a build that
 
 - The shim defined `main()` and so did you → `multiple definition
   of 'main'` (CRIT-2).
-- `cyrius build … --emit-object` — no such flag, and passing it
-  is silently ignored rather than rejected, so the "object" it
-  writes is a linked executable.
+- `cyrius build … --emit-object` — no such flag, and through
+  cyrius 6.6.4 passing it was silently ignored rather than
+  rejected, so the "object" it wrote was a linked executable.
+  From 6.6.5 it fails with `unknown option '--emit-object'`.
 - The `objcopy` localization step was missing entirely, and on
   cyrius ≤ 6.6.1 the link succeeds without it and the program
   then hangs (or fails with `-107`, depending on the build).

@@ -59,13 +59,13 @@ stdlib); see `tests/samvada.bcyr` for the four call sites.
 
 ## Run history
 
-| | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Run 6 |
-|---|---|---|---|---|---|---|
-| **Date (UTC)** | `2026-05-01T21:47:19Z` | `2026-05-01T21:58:21Z` | `2026-06-02T22:52:43Z` | `2026-09-09T15:42:03Z` | `2026-09-09T17:58:00Z` | `2026-09-09T19:40:00Z` |
-| **Commit** | `4c7ada9` | (`0.2.2` release commit) | (`0.3.0` release commit) | (`0.5.0` release commit) | (`0.5.1` release commit) | (`0.5.2` release commit) |
-| **samvada** | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | `0.5.1` | `0.5.2` |
-| **Toolchain** | `cyrius 5.7.48` | `cyrius 5.7.48` | `cyrius 6.0.40` | `cyrius 6.6.1` | `cyrius 6.6.1` | `cyrius 6.6.2` |
-| **Host** | `Linux 7.0.2-arch1-1 x86_64`, AMD Ryzen 7 5800H (16T) | same | `Linux 7.0.10-arch1-1 x86_64`, same CPU | `Linux 7.2.3-arch1-3 x86_64`, same CPU | same as Run 4 | same as Run 4 |
+| | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Run 6 | Run 7 |
+|---|---|---|---|---|---|---|---|
+| **Date (UTC)** | `2026-05-01T21:47:19Z` | `2026-05-01T21:58:21Z` | `2026-06-02T22:52:43Z` | `2026-09-09T15:42:03Z` | `2026-09-09T17:58:00Z` | `2026-09-09T19:40:00Z` | `2026-10-29T00:54:07Z` |
+| **Commit** | `4c7ada9` | (`0.2.2` release commit) | (`0.3.0` release commit) | (`0.5.0` release commit) | (`0.5.1` release commit) | (`0.5.2` release commit) | (`1.0.2` release commit) |
+| **samvada** | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | `0.5.1` | `0.5.2` | `1.0.2` |
+| **Toolchain** | `cyrius 5.7.48` | `cyrius 5.7.48` | `cyrius 6.0.40` | `cyrius 6.6.1` | `cyrius 6.6.1` | `cyrius 6.6.2` | `cyrius 6.6.20` |
+| **Host** | `Linux 7.0.2-arch1-1 x86_64`, AMD Ryzen 7 5800H (16T) | same | `Linux 7.0.10-arch1-1 x86_64`, same CPU | `Linux 7.2.3-arch1-3 x86_64`, same CPU | same as Run 4 | same as Run 4 | `Linux 7.2.11-arch1-1 x86_64`, same CPU |
 
 > **Gap, stated rather than papered over.** `0.4.0` and `0.4.1`
 > shipped without appending a row, so there is no Run between
@@ -74,15 +74,23 @@ stdlib); see `tests/samvada.bcyr` for the four call sites.
 > toolchain move. The missing numbers were never captured and
 > are **not** backfilled — this file is an audit trail, not a
 > reconstruction.
+>
+> **Second gap.** `0.6.0` through `1.0.1` — the whole native-dbus
+> line — shipped without a column either, so Run 7 follows Run 6
+> directly. Its Δ column is therefore **not** measured against
+> Run 6: the 1.0.1 tree was re-built under its own pin (6.6.2) and
+> re-benched on the same host minutes before Run 7, and the Δ is
+> against that. Those 1.0.1 numbers are a comparator, not a
+> backfilled column.
 
 ### Results
 
-| Benchmark | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | `0.5.1` | `0.5.2` | Δ (0.3.0→0.5.0) | Δ (0.5.0→0.5.1) | Δ (0.5.1→0.5.2) |
-|---|---|---|---|---|---|---|---|---|---|
-| `ffi_alloc` | 56 ns | 59 ns | 63 ns | 28 ns | 32 ns | 30 ns | **−55.6%** | **+14.3%** (expected — see note) | −2 ns (noise) |
-| `ffi_get_slot` | 9 ns | 11 ns | 11 ns | 9 ns | 9 ns | 8 ns | −18.2% | 0% | −1 ns (noise) |
-| `init_reject_null` | 6 ns | 7 ns | 7 ns | 6 ns | 6 ns | 5 ns | −14.3% | 0% | −1 ns (noise) |
-| `release_idempotent` | 6 ns | 6 ns | 7 ns | 6 ns | 6 ns | 7 ns | −14.3% | 0% | +1 ns (noise) |
+| Benchmark | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | `0.5.1` | `0.5.2` | `1.0.2` | Δ (0.3.0→0.5.0) | Δ (0.5.0→0.5.1) | Δ (0.5.1→0.5.2) | Δ (1.0.1→1.0.2, same day) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `ffi_alloc` | 56 ns | 59 ns | 63 ns | 28 ns | 32 ns | 30 ns | 31 ns | **−55.6%** | **+14.3%** (expected — see note) | −2 ns (noise) | −1 ns (noise) |
+| `ffi_get_slot` | 9 ns | 11 ns | 11 ns | 9 ns | 9 ns | 8 ns | 9 ns | −18.2% | 0% | −1 ns (noise) | 0 ns |
+| `init_reject_null` | 6 ns | 7 ns | 7 ns | 6 ns | 6 ns | 5 ns | 5 ns | −14.3% | 0% | −1 ns (noise) | −1 ns (noise) |
+| `release_idempotent` | 6 ns | 6 ns | 7 ns | 6 ns | 6 ns | 7 ns | 6 ns | −14.3% | 0% | +1 ns (noise) | −1 ns (noise) |
 
 Notes:
 
@@ -157,6 +165,29 @@ Notes:
   new slots and 76 new test asserts. The C shim is not linked into
   this binary and the tests are a separate target, so neither
   moves it.
+- Run 7 (`1.0.2`) is a **toolchain patch** — cyrius `6.6.2` →
+  `6.6.20`, no source-logic change. Same-day comparator, three
+  runs each: 1.0.1 on 6.6.2 read `ffi_alloc` 32/32/32,
+  `ffi_get_slot` 8/9/9, `init_reject_null` 5/6/6,
+  `release_idempotent` 7/7/8 ns; 1.0.2 on 6.6.20 read 31/31/31,
+  9/8/9, 5/5/5 and 6/6/7 ns. Every delta is ≤1 ns — flat. 6.6.20's
+  bench harness subtracts a measured timer floor and reports the
+  mean when it cannot resolve the minimum, so its `min`/`max` are
+  not comparable with earlier runs; the table uses means
+  throughout.
+  **Binary size grows, and it is the stdlib, not samvada.** On the
+  same 1.0.1 sources, 6.6.2 builds **80,920 B** (DCE **15,384 B**)
+  and 6.6.20 builds **106,904 B** (DCE **20,888 B**) — +32% and
+  +36%. samvada's own source is unchanged; the re-vendored `lib/`
+  grew from 626 to 917 fns, and the DCE note goes from 370
+  unreachable fns (65,598 B) to 436 (87,308 B). What survives DCE
+  grows by ~4.3 KB (15,322 → 19,596 B of reachable code); whether
+  that is reachable stdlib or 6.6.20's codegen of the same
+  source was not separated. Not chased further: no benched path
+  moved, and this is a smoke binary no consumer ships.
+  The live-bus rows below were **not** re-run: the handshake row
+  includes `TakeControl`, which takes session control on the host
+  session.
 
 ## Live-bus rows — the v1.0 gate, FILLED (0.11.0 / 1.0.0)
 

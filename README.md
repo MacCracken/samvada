@@ -1,6 +1,6 @@
 # samvada
 
-**Status: v1.0.1.** samvada speaks dbus natively, in Cyrius, over
+**Status: v1.0.2.** samvada speaks dbus natively, in Cyrius, over
 a raw unix socket. **No libsystemd, no C shim, no `pkg-config`,
 nothing for a consumer to link.**
 
@@ -56,7 +56,7 @@ samvada_session_take_device(major, minor)    -> fd | -err
 samvada_session_release_device(major, minor) -> 0 | -err
 samvada_pump_signals()                       -> events_drained | -err
 samvada_release()                            -> 0   (idempotent)
-samvada_version()                            -> packed u32 — (1 << 16) | (0 << 8) | 1
+samvada_version()                            -> packed u32 — (1 << 16) | (0 << 8) | 2
 
 samvada_init(table)                          -> 0 | -err   ← C-shim entry
 samvada_main(table)                          -> 0 | -err   ← C-shim entry
@@ -117,7 +117,7 @@ whole integration — no C, no `pkg-config`, no `objcopy`.
 ```toml
 [deps.samvada]
 git     = "https://github.com/MacCracken/samvada.git"
-tag     = "1.0.1"
+tag     = "1.0.2"
 modules = ["dist/samvada.cyr"]
 ```
 
@@ -159,7 +159,7 @@ samvada/
 │   └── differential/      — runs both backends in one process, compares error codes
 ├── docs/                  — adr/ architecture/ guides/ development/ audit/ proposals/
 ├── cyrius.cyml            — package manifest; the toolchain pin lives here
-└── VERSION                — 1.0.1
+└── VERSION                — 1.0.2
 ```
 
 The fn-table obeys ADR-0002's **append-after-kind** invariant:

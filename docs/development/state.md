@@ -8,7 +8,8 @@
 
 ## Version
 
-**1.0.1** — 2026-09-10.
+**1.0.2** — 2026-10-28. A toolchain patch: cyrius `6.6.2` →
+`6.6.20`, stdlib re-vendored, no source-logic change.
 
 samvada speaks dbus natively in Cyrius over a raw unix socket.
 `samvada_native_init()` gives a consumer a working bus connection
@@ -19,12 +20,12 @@ differential reference; its deletion is scheduled for 1.1.0.
 Two audits have shipped — the pre-1.0 pass over the native
 marshaller (1.0.0) and the A-lane completion (1.0.1) — fixing
 fourteen defects between them and closing the reply-forgery
-question. **1.0.1 is a stable release, not an audited-hardened
+question. **samvada is a stable release, not an audited-hardened
 one**; what remains uncovered is in `SECURITY.md` and the roadmap.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.2` (`cyrius.cyml [package].cyrius` — the
+- **Cyrius pin**: `6.6.20` (`cyrius.cyml [package].cyrius` — the
   single source of truth; no version is hardcoded in CI YAML).
 - CI additionally pins the **toolchain tarball's sha256**
   (`CYRIUS_TARBALL_SUM`) and the installer script's commit +
@@ -36,7 +37,15 @@ one**; what remains uncovered is in `SECURITY.md` and the roadmap.
   - `cyrfmt` enforces a canonical continuation indent — 2 spaces
     per open paren (4 also accepted).
   - `cyrius distlib` emits a `dist/<name>.deps` sidecar alongside
-    the bundle; `cyrius deps` consumes it downstream.
+    the bundle; `cyrius deps` consumes it downstream. From 6.6.18
+    the sidecar is **derived by compiling the bundle** on six
+    targets, not copied from `[deps] stdlib`, and the bundle
+    carries the matching `include` block. It currently warns that
+    `sys_recvmsg` is undefined on x86_64-windows (roadmap).
+  - `cyrius deps` writes `cyrius.lock` for a stdlib-only project
+    (6.6.9+).
+  - `cyrius build` refuses unknown flags (6.6.5+), so
+    `--emit-object` errors rather than writing an executable.
   - `CYRIUS_DCE=1` genuinely eliminates as of 6.5.72.
   - `object;` builds hide libc-reserved names (`vis=HIDDEN`) as of
     **6.6.2**, which removed the `objcopy -L` step from the
@@ -51,7 +60,7 @@ Public surface (`src/samvada.cyr`) — eight fns, frozen, and frozen
 - `samvada_native_init()` → `0 | -err`. **The supported entry
   point for the native backend.** Hides the FFI table entirely.
   The table is allocated once and reused across init/release.
-- `samvada_version()` → packed u32 (1.0.1).
+- `samvada_version()` → packed u32 (1.0.2).
 - `samvada_session_take_device(major, minor)` → `fd | -err`.
   Acquires session control on first use (ADR-0004) and hands it
   back if the take fails. Device numbers are range-checked
@@ -142,21 +151,23 @@ mutation-tested.
 
 ## Dependencies
 
-- stdlib (10 leaves): string, fmt, alloc, io, vec, str, syscalls,
-  assert, tagged, fnptr.
-- `dist/samvada.deps` — the distlib-emitted sidecar listing the
-  same ten leaves. Tracked, so a `[deps.samvada]` consumer fetching
-  the release tag gets it alongside `dist/samvada.cyr`.
+- stdlib (10 leaves declared): string, fmt, alloc, io, vec, str,
+  syscalls, assert, tagged, fnptr — what the tests and smoke binary
+  build against.
+- `dist/samvada.deps` — the distlib-emitted sidecar: the **4**
+  leaves the bundle itself needs (alloc, syscalls, string, fnptr),
+  compile-verified. Tracked, so a `[deps.samvada]` consumer
+  fetching the release tag gets it alongside `dist/samvada.cyr`.
 - **No non-stdlib dependencies.** samvada links nothing.
 
 ## Consumers
 
-- **mabda** — still pins `[deps.samvada] tag = "0.4.1"`, i.e. the
-  C-shim era, and **needs re-pinning to 1.0.1**. It calls only
+- **mabda** — pins `[deps.samvada] tag = "1.0.1"` (on cyrius
+  6.7.5). 1.0.2 changes no API, so re-pinning is optional; its
+  `[deps] stdlib` already declares every leaf it uses, so the
+  smaller sidecar does not reach it. It calls only
   `samvada_session_take_device` / `samvada_session_release_device`,
-  both unchanged in shape, so the bump is expected to be a no-op
-  for its code — but it should move to `samvada_native_init()` to
-  drop libsystemd.
+  under `-D MABDA_LOGIND` (off by default).
   - Caveat: mabda resolves samvada by **git tag**, and `cyrius
     build` re-runs dep resolution even with `--no-deps`, so
     dropping a locally-built bundle into `mabda/lib/` gets

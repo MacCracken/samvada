@@ -1,4 +1,4 @@
-# Public API surface (v1.0.1)
+# Public API surface (v1.0.2)
 
 This page is the canonical map of samvada's public contract: what
 each fn returns, what it requires, and which test pins it.
@@ -824,7 +824,7 @@ suite as a whole is **585 asserts** across seven files; see
 
 | Fn | Test group | Asserts |
 |---|---|---|
-| `samvada_version` | `v1.0.1 packed triple` | 4 (packed + 3 lanes) |
+| `samvada_version` | `v1.0.2 packed triple` | 4 (packed + 3 lanes) |
 | `samvada_init` (null) | `init rejects null table` | 1 |
 | `samvada_init` (NULL kind) | `init rejects NULL-kind table` | 2 (alloc + reject) |
 | `samvada_init` (unknown kind) | `init rejects an unknown backend kind` | 2 (`kind=99` rejected, `PURE_CYRIUS` accepted) |

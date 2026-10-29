@@ -1,6 +1,6 @@
 # samvada — roadmap
 
-**Where samvada is.** v1.0.1. It speaks dbus natively, in Cyrius,
+**Where samvada is.** v1.0.2. It speaks dbus natively, in Cyrius,
 over a raw unix socket — no libsystemd, no C shim, no
 `pkg-config`, nothing for a consumer to link. The road ADR-0003
 set out at 0.5.1 is finished: N0 through N7 shipped, then a
@@ -24,29 +24,7 @@ test counts, layout, dep gaps — is in [`state.md`](state.md).
 | N0–N7 — native Cyrius dbus | 0.6.0 → 1.0.0 | signal contract, `SCM_RIGHTS`, byte corpus, transport/auth/framing, codec, session layer, cutover, audit |
 | Pre-1.0 audit + reply forgery | 1.0.0 | AUDIT-1..4; forgery closed; provenance check, send-time watermark, wall-clock timeouts |
 | A lane — the dimensions 1.0.0 missed | 1.0.1 | ten defects; public surface frozen mechanically |
-
----
-
-## Moving the cyrius pin to 6.6.5
-
-Nothing breaks at this bump. cyrius 6.6.5 is not tagged
-yet, and nothing below can land against the pin until it
-is. The pin is 6.6.2 today, and this section lists only
-what 6.6.5 itself changes.
-
-- [ ] `docs/guides/consumer-link.md:170-173` and
-      `:558-560` say `cyrius build … --emit-object` is
-      silently ignored and writes a linked executable to
-      the `.o` path. From 6.6.5 it fails with
-      `unknown option '--emit-object'`. Update both
-      passages. See the cyrius CHANGELOG [6.6.5] entry
-      "The whole CLI took flags as file names, dropped
-      flags written after the operand, and dropped extra
-      operands".
-- [ ] At the bump, re-run `cyrius deps` — the aarch64
-      syscall peer moved SYS_UNLINKAT 35 → 263, so an
-      un-re-vendored peer's sys_unlink would run
-      nanosleep.
+| Toolchain patch — cyrius 6.6.2 → 6.6.20 | 1.0.2 | no source-logic change; the 6.6.5 / 6.6.6 pin-move checklists worked through and retired |
 
 ---
 
@@ -221,46 +199,22 @@ native backend shipped and reached parity. One rung is still live:
   **a green gate measures the branch it executes.** An unseated
   host answers `TakeDevice` with `AccessDenied`, and an error reply
   carries no fd — so the fd branch never once ran.
+- **2026-10-28** — `1.0.2`. cyrius `6.6.2` → `6.6.20`. The 6.6.5
+  and 6.6.6 pin-move checklists were worked through and dropped from
+  this file; the 6.6.18 `sys_recvmsg` item stays open. The roadmap's
+  own rule for a toolchain bump — run the seated-host path as well as
+  the unseated one — was **not** met: only the unseated native
+  handshake was run, because `take_device` takes session control and
+  the only session available was the graphical one.
 
-## Moving the cyrius pin to 6.6.6
-
-**Current pin: `cyrius = "6.6.2"` (cyrius.cyml:8). Bump it; nothing else.**
-
-Checked item by item against the 6.6.6 change list, in samvada's own sources
-(`src/`, `programs/`, `tests/` — vendored `lib/` excluded): no `O_APPEND` /
-`O_TRUNC` anywhere, so the Windows append/truncate data-corruption fix is a
-non-event — and samvada is a **dbus** client for the AGNOS suite (logind /
-system bus), which has no Windows story by construction. Zero `struct`
-declarations, so the new different-struct-copy compile error and the by-value
->8 B deep-copy change cannot apply. No `async` fns, no `operator` fns, no
-`ret2`/`rethi` pair returns, no SIMD-typed returns, no top-level `{ }` blocks,
-no `: cstring` parameters, no locally defined `vec_*` — and `assert` and `vec`
-are both already in `[deps] stdlib`, so assert.cyr's new transitive
-`include "lib/vec.cyr"` cannot collide. `lib/regression.cyr` is not vendored,
-so the new exec deadline (`CYRIUS_CHECK_TIMEOUT`) is irrelevant.
-
-**Global redeclaration:** `var r = main();` appears at `src/main.cyr:42` and
-`src/test.cyr:10`. Those are two alternative *entry points*, never co-linked, so
-neither 6.6.6's new "last definition wins from program start" behaviour nor its
-new `redeclared with a different type or size` compile error can fire.
-
-**Measured:** `cyrius build` under 6.6.2 and under 6.6.6 both exit 0 and emit
-**zero** warnings or errors.
-
-**Verify after bumping:** `cyrius deps` to re-vendor (6.6.6's `lib/io.cyr` is
-rewritten and now self-sufficient — it includes `fmt`/`string` itself), then
-`cyrius build`, `cyrius test`, `cyrius lint`, `cyrius vet`,
-`cyrius fmt --check`, `cyrius bench` and `cyrius distlib`. Given this repo's own
-lesson that *a green gate measures the branch it executes*, run the seated-host
-path as well as the unseated one — a toolchain bump is exactly when a
-never-executed branch would surface.
-
-## Moved from cyrius's roadmap (2026-10-08) — for the next cyrius pin move
+## Moved from cyrius's roadmap (2026-10-08) — still open at the 6.6.20 pin
 
 cyrius no longer carries this repo's follow-ups; the items below were moved here from its roadmap. Each
-applies from the cyrius version it names. Everything else that changes between this repo's pin and cyrius
-6.7.6 is in cyrius's `CHANGELOG.md` and `docs/development/ecosystem-migration.md`.
+applies from the cyrius version it names. Everything else that changes between this repo's pin and the
+current cyrius is in cyrius's `CHANGELOG.md` and `docs/development/ecosystem-migration.md`.
 
-- **(cyrius ≥ 6.6.18) `sys_recvmsg` on Windows** — mabda's distlib verify compiles samvada's calls for
-  x86_64-windows and reports `sys_recvmsg` undefined there: the stdlib defines it for Linux and agnos only. Gate
-  the call off Windows, or file an issue with cyrius if a Windows decline stub is wanted.
+- [ ] **(cyrius ≥ 6.6.18) `sys_recvmsg` on Windows** — distlib's verify compiles the bundle for
+  x86_64-windows and reports `sys_recvmsg` undefined there: the stdlib defines it for Linux and agnos only.
+  First seen through mabda's distlib; **from 1.0.2 (pin 6.6.20) samvada's own `cyrius distlib` prints it**,
+  as a warning — distlib exits 0 and CI's dist gate does not read warnings. Gate the call off Windows, or
+  file an issue with cyrius if a Windows decline stub is wanted.

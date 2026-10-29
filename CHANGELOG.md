@@ -4,6 +4,89 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.2] — 2026-10-28
+
+Toolchain patch. Pinned Cyrius bumped `6.6.2` → `6.6.20` and the
+stdlib re-vendored under it. No source-logic change: all 585
+asserts pass unchanged, and the public surface, the FFI layout
+(11 slots / 88 bytes, `kind` at +64) and the C shim are
+untouched.
+
+### Changed
+- **Toolchain pin** `cyrius.cyml [package].cyrius` bumped
+  `6.6.2` → `6.6.20`. CI and release both read this pin.
+  `CYRIUS_TARBALL_SUM` in `ci.yml` and `release.yml` moved with
+  it, to `38814a81…d04d265e` — computed from the downloaded
+  `cyrius-6.6.20-x86_64-linux.tar.gz` and matched against the
+  release's own `.sha256`. The installer-script pin is unchanged.
+- **Stdlib re-vendored** — `lib/` wiped and re-resolved with
+  `cyrius deps`; all 26 files are byte-identical to 6.6.20's
+  stdlib. This picks up 6.6.5's aarch64 peer fix
+  (`SYS_UNLINKAT` 35 → 263, so an un-re-vendored `sys_unlink`
+  ran `nanosleep`), which the roadmap had listed as a bump-time
+  step.
+- **`cyrius.lock`** — `cyrius deps` writes one for a stdlib-only
+  project from 6.6.9: 26 sha256 rows over `lib/`.
+- **`dist/samvada.deps` shrinks from 10 leaves to 4** — `alloc`,
+  `syscalls`, `string`, `fnptr`. 6.6.18's `distlib` derives the
+  sidecar by compiling the bundle on six targets rather than
+  copying `[deps] stdlib`, so the six leaves samvada declares but
+  the bundle never calls no longer reach consumers.
+  `dist/samvada.cyr` gains the matching compile-verified
+  `include` block, so `include "lib/samvada.cyr"` alone compiles
+  (2,646 → 2,652 lines). **A consumer that called `fmt`, `io`,
+  `vec`, `str`, `assert` or `tagged` without declaring them now
+  fails to build** with a hint naming the leaf. mabda declares
+  every leaf it uses, so it is unaffected.
+- `samvada_version()` packed triple `(1,0,1)` → `(1,0,2)`; the
+  version-triple pin in `tests/samvada.tcyr` updated lock-step.
+
+### Fixed
+- **`docs/guides/consumer-link.md` described 6.6.2-era CLI
+  behaviour.** It said `cyrius build … --emit-object` is silently
+  ignored and writes an executable to the `.o` path; from 6.6.5
+  it fails with `unknown option '--emit-object'`. Both passages
+  updated (roadmap items). It also said the `cycc` recipe's
+  include loop "is exactly the contents of `dist/samvada.deps`"
+  and that the bundle must come last — neither is true of the
+  6.6.20 bundle. Rewritten. Verified on 6.6.20: the documented
+  loop, the bundle first, and the bundle alone each compile to a
+  relocatable and link with the shim.
+  Added *Upgrading from 1.0.1 to 1.0.2*.
+
+### Notes
+- **Checked against cyrius's migration notes for 6.6.3 → 6.6.20**,
+  in samvada's own sources (`src/`, `tests/`; vendored `lib/`
+  excluded). 6.6.20 binds every call to a redefined fn's *last*
+  definition: the only duplicate fn is `main`, defined once per
+  entry point, and no test includes another entry point. 6.6.20
+  refuses `sizeof` / `mulh64` / `fncall0`..`fncall8` as names:
+  samvada calls `fncallN` and defines none. 6.6.17's bare
+  `cyrius test` still runs `[build].test` and discovers
+  `tests/*.tcyr` (7 targets). 6.6.16's `MSG_NOSIGNAL` is what
+  samvada's own writer already sends with. No `struct`, `f64` or
+  `Result` code, so 6.6.13 and 6.6.16's by-value copy do not
+  apply.
+- **`cyrius distlib` now warns `sys_recvmsg` is undefined on
+  x86_64-windows.** This is the roadmap's 6.6.18 item, now
+  reproduced in samvada's own distlib rather than only through
+  mabda's. It is a warning: distlib exits 0, and CI's dist gate
+  checks freshness, not warnings. Left open on the roadmap.
+- **Verified, and what was not.** The full CI gate set is green
+  under 6.6.20. Beyond the gates, a probe built from the new
+  bundle ran the native handshake against the live system bus:
+  `samvada_native_init` 0, `samvada_pump_signals` 0,
+  `samvada_release` 0, re-init 0. Unseated, and `take_device`
+  was **not** exercised — it takes session control, and the
+  only session on hand was the graphical one. So the seated-host
+  path the roadmap asks for at a toolchain bump is still unrun;
+  it is the CG lane. The C-shim two-stage link was rebuilt
+  against libsystemd 262 but not executed, for the same reason.
+- Benches flat (≤1 ns against a same-day 1.0.1-on-6.6.2
+  re-measure); the smoke binary grows 80,920 → 106,904 B
+  (DCE 15,384 → 20,888 B) on unchanged samvada source. See
+  `docs/benchmarks.md` Run 7.
+
 ## [1.0.1] — 2026-09-09
 
 **The A lane, closed.** 1.0.0 shipped with four of seven audit
