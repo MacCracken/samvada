@@ -35,8 +35,9 @@ fn dbus_sys_msghdr_size()   { return 56; }
 fn dbus_sys_cmsghdr_size()  { return 16; }
 fn dbus_sys_cmsg_data_off() { return 16; }
 
-# CMSG_LEN(4) = cmsghdr(16) + 4 = 20  — the value that goes in cmsg_len
-# CMSG_SPACE(4) = 16 + align8(4) = 24 — the buffer size to reserve
+# CMSG_LEN(4) = cmsghdr(16) + 4 = 20, CMSG_SPACE(4) = 16 + align8(4) = 24:
+# the one-descriptor layout. The receive reserves room for 253 (below);
+# these two are the ABI the tests' senders are built on, and pinned.
 fn dbus_sys_cmsg_len_1fd()   { return 20; }
 fn dbus_sys_cmsg_space_1fd() { return 24; }
 
@@ -45,6 +46,10 @@ fn dbus_sys_af_unix()     { return 1; }
 fn dbus_sys_sock_stream() { return 1; }
 fn dbus_sys_sol_socket()  { return 1; }
 fn dbus_sys_scm_rights()  { return 1; }
+# SCM_PIDFD (Linux 6.5): with SO_PASSPIDFD set on the socket, every
+# receive carries a pidfd for the sender. samvada never sets it; if
+# anything ever does, the descriptor is still ours to close (1.1.2).
+fn dbus_sys_scm_pidfd()   { return 4; }
 fn dbus_sys_msg_ctrunc()  { return 8; }
 # MSG_CMSG_CLOEXEC — the received fd arrives with FD_CLOEXEC already
 # set, so it cannot leak across an execve. This is the receive-side
@@ -74,15 +79,31 @@ fn dbus_sys_msg_dontwait() { return 64; }
 # spells is the compiler's business, and only behaviour says the
 # right call ran — tests/dbus_sys.tcyr's SCM_RIGHTS round trip.
 
+# ---- how many descriptors one receive can deliver (1.1.2) ----
+# SCM_MAX_FD (include/net/scm.h): the most descriptors one sendmsg can
+# carry. A unix stream receive stops after the first segment that
+# carried descriptors (net/unix/af_unix.c, unix_stream_read_generic:
+# `if (scm.fp) break;`), so 253 is also the most one recvmsg can
+# deliver, and a control buffer of CMSG_SPACE(253 fds) never truncates
+# an SCM_RIGHTS payload.
+#
+# Until 1.1.2 the buffer held ONE descriptor (24 bytes). A message with
+# three or more truncated, and the truncation branch threw the message's
+# BYTES away and answered -EPROTO, which the session layer correctly
+# reads as a disconnect — so any bus peer that could send samvada a
+# signal with three descriptors on it closed samvada's connection.
+fn dbus_sys_fd_max()    { return 253; }
+fn dbus_sys_ctrl_size() { return 1032; }      # 16 + align8(253 * 4)
+
 # ---- scratch (file-scope; see the non-reentrancy note above) ----
 var _dbus_iov  = 0;   # 16 bytes
 var _dbus_mh   = 0;   # 56 bytes
-var _dbus_ctrl = 0;   # 24 bytes (CMSG_SPACE(1 fd))
-# The MSG_CTRUNC branch's out-parameter. It was an alloc(8) on every
-# truncated receive until 1.1.1 — and truncation is peer-driven: a peer
-# that attaches two descriptors to every message grew the never-freeing
-# heap by 8 bytes per message, without bound (A-1).
-var _dbus_trunc = 0;  # 8 bytes
+var _dbus_ctrl = 0;   # dbus_sys_ctrl_size() bytes
+# The last receive's descriptors, in arrival order: every one is OURS
+# (the kernel installed it) and the caller must queue or close each.
+var _dbus_rx      = 0;   # dbus_sys_fd_max() * 8 bytes
+var _dbus_rxn     = 0;
+var _dbus_rxtrunc = 0;   # the kernel dropped ancillary data (MSG_CTRUNC)
 var _dbus_sys_ready = 0;
 
 fn _dbus_sys_init() {
@@ -91,10 +112,10 @@ fn _dbus_sys_init() {
     if (_dbus_iov == 0) { return -12; }
     _dbus_mh = alloc(dbus_sys_msghdr_size());
     if (_dbus_mh == 0) { return -12; }
-    _dbus_ctrl = alloc(dbus_sys_cmsg_space_1fd());
+    _dbus_ctrl = alloc(dbus_sys_ctrl_size());
     if (_dbus_ctrl == 0) { return -12; }
-    _dbus_trunc = alloc(8);
-    if (_dbus_trunc == 0) { return -12; }
+    _dbus_rx = alloc(dbus_sys_fd_max() * 8);
+    if (_dbus_rx == 0) { return -12; }
     _dbus_sys_ready = 1;
     return 0;
 }
@@ -105,151 +126,145 @@ fn _dbus_zero(p, n) {
     return 0;
 }
 
-# Extract a single SCM_RIGHTS descriptor from a control buffer.
+fn dbus_sys_rx_count()     { return _dbus_rxn; }
+fn dbus_sys_rx_truncated() { return _dbus_rxtrunc; }
+
+fn dbus_sys_rx_fd(i) {
+    if (i < 0) { return (0 - 1); }
+    if (i >= _dbus_rxn) { return (0 - 1); }
+    return load64(_dbus_rx + i * 8);
+}
+
+fn _dbus_rx_add(fd) {
+    if (_dbus_rxn >= dbus_sys_fd_max()) {
+        sys_close(fd);                        # cannot be held: never leak it
+        return 0;
+    }
+    store64(_dbus_rx + _dbus_rxn * 8, fd);
+    _dbus_rxn = _dbus_rxn + 1;
+    return 0;
+}
+
+# Collect every SCM_RIGHTS descriptor from a control buffer into the rx
+# array, in order, and return how many there are.
 #
-# Split out from dbus_sys_recv_fd deliberately: the syscall half
-# cannot be driven through its own error paths from a test (the
-# kernel validates ancillary data before we ever see it, so a
-# forged cmsg never arrives), while the PARSING half is a pure
-# byte transform and every guard in it is reachable with a
-# hand-built buffer. This is the same "most of it needs no dbus"
-# principle the marshaller milestones rest on — applied here so the
-# guards are proven rather than merely present.
+# Split out from dbus_sys_recv deliberately: the syscall half cannot be
+# driven through its own error paths from a test (the kernel validates
+# ancillary data before we ever see it, so a forged cmsg never arrives),
+# while the PARSING half is a pure byte transform and every guard in it
+# is reachable with a hand-built buffer.
+#
+# It walks every cmsg (CMSG_NXTHDR), not just the first: with SO_PASSCRED
+# or SO_PASSSEC set on the socket, SCM_CREDENTIALS or SCM_SECURITY comes
+# FIRST and the descriptors second; with SO_PASSPIDFD an SCM_PIDFD
+# carries a descriptor of its own, which is closed here. A header that claims less than
+# itself, or more than the kernel filled, ends the walk — nothing after
+# it can be located.
 #
 #   ctrl     — the control buffer recvmsg filled
 #   ctrllen  — msghdr.msg_controllen AFTER the call
-#   fd_out   — receives the fd, or is left untouched if none
 #
-#   returns >= 0  an fd was extracted and stored; the value is the
-#                  number of EXTRA descriptors that arrived in the
-#                  same cmsg and were closed here (normally 0)
-#           -2     no usable SCM_RIGHTS cmsg present
-fn dbus_sys_parse_scm_rights(ctrl, ctrllen, fd_out) {
-    if (ctrl == 0)   { return -2; }
-    if (fd_out == 0) { return -2; }
-    # Subsumed by the `clen > ctrllen` check below (mutation-tested:
-    # removing this alone does not fail the suite), but kept as a
-    # cheap early-out that does not depend on the header being
-    # readable at all.
-    if (ctrllen < dbus_sys_cmsg_len_1fd()) { return -2; }
-
-    var clen = load64(ctrl + 0);
-    if (clen < dbus_sys_cmsg_len_1fd()) { return -2; }
-    # A cmsg_len larger than the buffer the kernel says it filled
-    # would read past the end.
-    if (clen > ctrllen) { return -2; }
-    var level = load64(ctrl + 8) & 0xFFFFFFFF;
-    if (level != dbus_sys_sol_socket()) { return -2; }
-    var ctype = load64(ctrl + 12) & 0xFFFFFFFF;
-    if (ctype != dbus_sys_scm_rights()) { return -2; }
-
-    # The payload is an int32 fd. Read the low 32 bits and sign-extend
-    # the same way the C-shim path does, so a kernel-impossible
-    # negative cannot read as a huge positive fd.
-    var got = load32(ctrl + dbus_sys_cmsg_data_off());
-    var neg = got & 0x80000000;
-    if (neg != 0) { got = got - 0x100000000; }
-    store64(fd_out, got);
-
-    # A cmsg can carry MORE than one descriptor, and the kernel has
-    # already installed every one of them in our table — returning
-    # only the first leaks the rest for the process lifetime.
-    #
-    # This is not hypothetical padding-paranoia: CMSG_SPACE(1 fd) and
-    # CMSG_SPACE(2 fds) are BOTH 24 bytes (16 + align8(4) == 16 +
-    # align8(8)), so a two-fd message fits a one-fd buffer exactly and
-    # arrives WITHOUT MSG_CTRUNC. samvada only ever expects one fd
-    # (TakeDevice's reply), so close the surplus rather than hand back
-    # a descriptor the caller never asked for.
-    var extra = 0;
-    var off = dbus_sys_cmsg_data_off() + 4;
-    while (off + 4 <= clen) {
-        # load32, NOT load64: an fd is a 4-byte field, and the last one
-        # ends exactly at `clen`. `load64(ctrl + off)` there reads four
-        # bytes PAST the buffer — for a legal 2-fd cmsg, clen is 24, off
-        # reaches 20, and load64 would touch bytes 24..27 of a 24-byte
-        # allocation. The mask hid it, the bump allocator made it
-        # harmless, and neither makes it correct.
-        var x = load32(ctrl + off);
-        var xneg = x & 0x80000000;
-        if (xneg != 0) { x = x - 0x100000000; }
-        if (x >= 0) { sys_close(x); }
-        extra = extra + 1;
-        off = off + 4;
-    }
-    return extra;
-}
-
-# Receive up to `buflen` bytes into `buf`, and a single SCM_RIGHTS fd
-# if one accompanies the message.
-#
-#   returns  >= 0  bytes received; the fd (or -1 if none came) is
-#                  stored at `fd_out` as a full 64-bit word
-#            <  0  negative errno from recvmsg, or:
-#                  -71 (-EPROTO)  ancillary data was TRUNCATED, so a
-#                                 descriptor may have been dropped by
-#                                 the kernel and silently lost
-#
-# The caller owns the fd and must close it.
-fn dbus_sys_recv_fd(fd, buf, buflen, fd_out) {
-    return dbus_sys_recv_fd_flags(fd, buf, buflen, fd_out, 0);
-}
-
-# As above, plus caller-supplied flags (MSG_DONTWAIT for the pump
-# path). Split out rather than adding a parameter to
-# dbus_sys_recv_fd, whose signature is pinned by tests.
-fn dbus_sys_recv_fd_flags(fd, buf, buflen, fd_out, extra) {
-    if (buf == 0)      { return -22; }
-    if (buflen <= 0)   { return -22; }
-    if (fd_out == 0)   { return -22; }
+#   returns  >= 0  descriptors collected (dbus_sys_rx_fd(0..n-1))
+#            -22   null buffer
+fn dbus_sys_parse_rights(ctrl, ctrllen) {
     var rc = _dbus_sys_init();
     if (rc < 0) { return rc; }
-    store64(fd_out, (0 - 1));
+    _dbus_rxn = 0;
+    if (ctrl == 0) { return -22; }
+    var hdr = dbus_sys_cmsghdr_size();
+    var at = 0;
+    var more = 1;
+    while (more == 1) {
+        more = 0;
+        var room = ctrllen - at;
+        if (room >= hdr) {
+            var clen = load64(ctrl + at);
+            var ok = 1;
+            if (clen < hdr)  { ok = 0; }
+            if (clen > room) { ok = 0; }
+            if (ok == 1) {
+                var level = load32(ctrl + at + 8);
+                var ctype = load32(ctrl + at + 12);
+                var rights = 0;
+                if (level == dbus_sys_sol_socket()) {
+                    if (ctype == dbus_sys_scm_rights()) { rights = 1; }
+                    if (ctype == dbus_sys_scm_pidfd()) { rights = 2; }
+                }
+                if (rights != 0) {
+                    # Each fd is an int32: read the low 32 bits and
+                    # sign-extend, so a kernel-impossible negative cannot
+                    # read as a huge positive fd. load32, NOT load64: the
+                    # last fd ends exactly at clen. A pidfd is closed at
+                    # once — no message owns it.
+                    var off = at + dbus_sys_cmsg_data_off();
+                    while (off + 4 <= at + clen) {
+                        var x = load32(ctrl + off);
+                        var neg = x & 0x80000000;
+                        if (neg != 0) { x = x - 0x100000000; }
+                        if (x >= 0) {
+                            if (rights == 1) { _dbus_rx_add(x); }
+                            if (rights == 2) { sys_close(x); }
+                        }
+                        off = off + 4;
+                    }
+                }
+                at = at + ((clen + 7) & (0 - 8));
+                more = 1;
+            }
+        }
+    }
+    return _dbus_rxn;
+}
+
+# Receive up to `buflen` bytes into `buf`, with every descriptor that
+# accompanies them.
+#
+#   returns  >= 0  bytes received; the descriptors are dbus_sys_rx_fd(0
+#                  .. dbus_sys_rx_count() - 1), and the caller owns them
+#            <  0  negative errno from recvmsg (no descriptors)
+#
+# MSG_CTRUNC no longer discards the bytes (1.1.2). The bytes are real
+# and already consumed from the socket: dropping them desynchronised the
+# stream. The descriptors that fit are delivered like any others, and
+# dbus_sys_rx_truncated() says the set is INCOMPLETE, so the caller can
+# refuse to treat it as a message's descriptors. With CMSG_SPACE(253)
+# reserved it is reachable only when another cmsg shares the buffer.
+#
+# MSG_CMSG_CLOEXEC rides on every call: a received descriptor never
+# leaks across an execve, even between this call and the caller's.
+fn dbus_sys_recv(fd, buf, buflen, flags) {
+    if (buf == 0)      { return -22; }
+    if (buflen <= 0)   { return -22; }
+    var rc = _dbus_sys_init();
+    if (rc < 0) { return rc; }
+    _dbus_rxn = 0;
+    _dbus_rxtrunc = 0;
 
     store64(_dbus_iov + 0, buf);
     store64(_dbus_iov + 8, buflen);
-
-    # Zero the control buffer every call. Belt-and-braces: the
-    # ctrllen/cmsg_len/level/type guards below all run BEFORE
-    # CMSG_DATA is read, so a stale fd cannot actually surface
-    # through them — mutation-tested, removing this zeroing alone
-    # does not fail the suite. Kept because it costs two
-    # instructions and makes the buffer's state independent of the
-    # guard ordering the native marshaller will be extending.
-    _dbus_zero(_dbus_ctrl, dbus_sys_cmsg_space_1fd());
+    # Only the first cmsghdr is cleared: the walk reads no further than
+    # the msg_controllen the kernel reports, and every byte inside it the
+    # kernel wrote. Clearing all 1032 bytes cost ~150 ns on every receive,
+    # an idle 60 Hz pump included (measured, 1.1.2).
+    _dbus_zero(_dbus_ctrl, dbus_sys_cmsghdr_size());
     _dbus_zero(_dbus_mh, dbus_sys_msghdr_size());
     store64(_dbus_mh + 16, _dbus_iov);
     store64(_dbus_mh + 24, 1);
     store64(_dbus_mh + 32, _dbus_ctrl);
-    store64(_dbus_mh + 40, dbus_sys_cmsg_space_1fd());
+    store64(_dbus_mh + 40, dbus_sys_ctrl_size());
 
-    var n = sys_recvmsg(fd, _dbus_mh, dbus_sys_msg_cmsg_cloexec() | extra);
+    var n = sys_recvmsg(fd, _dbus_mh, dbus_sys_msg_cmsg_cloexec() | flags);
     if (n < 0) { return n; }
 
+    # The kernel reports how much of the buffer it filled; never walk
+    # past what we reserved, whatever it says.
     var ctrllen = load64(_dbus_mh + 40);
+    if (ctrllen > dbus_sys_ctrl_size()) { ctrllen = dbus_sys_ctrl_size(); }
+    if (ctrllen < 0) { ctrllen = 0; }
+    dbus_sys_parse_rights(_dbus_ctrl, ctrllen);
 
-    # MSG_CTRUNC means the kernel had more ancillary data than our buffer
-    # held and dropped the excess. Refuse the message — but CLOSE WHAT
-    # ARRIVED FIRST.
-    #
-    # The descriptors that fit are already installed in our table by the
-    # time recvmsg returns, and they are ours whether we wanted them or
-    # not. Measured against this exact 24-byte control buffer: sending 3
-    # fds sets MSG_CTRUNC *and* installs 2 descriptors. Returning -71
-    # without closing them leaked one fd pair per truncated message,
-    # unbounded, inside a compositor. (0.8.0; the 0.7.0 version returned
-    # before parsing and leaked both.)
-    var flags = load32(_dbus_mh + 48);
-    var trunc = flags & dbus_sys_msg_ctrunc();
-    if (trunc != 0) {
-        var scratch = _dbus_trunc;
-        store64(scratch, (0 - 1));
-        dbus_sys_parse_scm_rights(_dbus_ctrl, ctrllen, scratch);
-        var first = load64(scratch);
-        if (first >= 0) { sys_close(first); }
-        return -71;
-    }
-
-    dbus_sys_parse_scm_rights(_dbus_ctrl, ctrllen, fd_out);
+    var mflags = load32(_dbus_mh + 48);
+    var trunc = mflags & dbus_sys_msg_ctrunc();
+    if (trunc != 0) { _dbus_rxtrunc = 1; }
     return n;
 }

@@ -1,4 +1,4 @@
-# Public API surface (v1.1.1)
+# Public API surface (v1.1.2)
 
 This page is the canonical map of samvada's public contract: what
 each fn returns, what it requires, and which test pins it.
@@ -18,11 +18,11 @@ A-6 audit walked a fn-table-returning public export past every
 gate that existed.
 
 > **What the bundle actually contains, and what a consumer can
-> reach.** `dist/samvada.cyr` defines 212 functions — the native dbus
+> reach.** `dist/samvada.cyr` defines 242 functions — the native dbus
 > implementation (`dbus_*`) and the FFI plumbing are in there too —
 > but since 1.1.1 it is **private-by-default** (`src/visibility.cyr`),
 > so a consumer can name only the eight `public fn`s below; naming any
-> of the other 204 is a compile error, `'…' is private to its file`.
+> of the other 234 is a compile error, `'…' is private to its file`.
 > `tools/boundary_check.py` proves that in CI for every one of them.
 > The boundary is Cyrius-level: an `object;` build still exports every
 > fn as a global symbol, so C code linked against it can reach them.
@@ -103,7 +103,7 @@ safety is a v1.0+ design conversation, not a v0.x property.
 |---|---|---|---|
 | [`samvada_version`](#samvada_version) | (none) | packed u32 | — |
 | [`samvada_init`](#samvada_init) | `table` | `0 \| -err` | -22 / -16 / -12 / -38 / -107 / sd-bus negatives |
-| [`samvada_session_take_device`](#samvada_session_take_device) | `major`, `minor` | `fd \| -err` | -22 / -38 / -107 / -9 / sd-bus negatives |
+| [`samvada_session_take_device`](#samvada_session_take_device) | `major`, `minor` | `fd \| -err` | -22 / -38 / -107 / -9 / -24 / sd-bus negatives |
 | [`samvada_session_release_device`](#samvada_session_release_device) | `major`, `minor` | `0 \| -err` | -22 / -38 / -107 / sd-bus negatives |
 | [`samvada_pump_signals`](#samvada_pump_signals) | (none) | `events \| -err` | -22 / -38 / -107 / sd-bus negatives |
 | [`samvada_release`](#samvada_release) | (none) | `0` | (none — idempotent) |
@@ -228,9 +228,10 @@ rather than allowed to proceed into a guaranteed failure.
   undocumented before 0.5.1 and is the reason the shim's table
   moved off the C stack.
 - **Post on success**: `_samvada_table` / `_samvada_bus` /
-  `_samvada_sess` are set, the connection holds session control,
-  and subsequent `samvada_session_take_device` calls can
-  dispatch.
+  `_samvada_sess` are set and subsequent
+  `samvada_session_take_device` calls can dispatch. Session control
+  is **not** held: it is taken by the first successful take
+  (ADR-0004, since 0.6.0).
 - **Post on err**: returns negative, in one of three shapes.
   (a) *Rejected before any state was written* — `-22` on a null
   table or an unrecognised kind, `-16` on double-init: module
@@ -260,13 +261,13 @@ rather than allowed to proceed into a guaranteed failure.
 
 | rc | Meaning | When |
 |---|---|---|
-| `0` | success | bus opened, session resolved, session control taken |
+| `0` | success | bus opened, session resolved; the `take_control` slot validated, no control taken (ADR-0004) |
 | `-22` (`-EINVAL`) | bad table | `table == 0`, OR the kind word at `+64` is not `1` / `2` (includes `0`, the NULL backend, and any unknown value) |
 | `-16` (`-EBUSY`) | already initialized | called again without an intervening `samvada_release` (`_samvada_table != 0`); guards the double-init bus+scratch leak fixed in 0.2.2 (HIGH-1) |
 | `-12` (`-ENOMEM`) | alloc failure | scratch buffers couldn't be allocated |
 | `-38` (`-ENOSYS`) | slot unwired | the `open_system_bus`, `get_session_path` **or `take_control`** slot is null. The `take_control` case (new in 0.5.1) means the backend table predates 0.5.1 — rebuild the shim against the current `deps/samvada_main.c` |
 | `-107` (`-ENOTCONN`) | bus open returned NULL | C wrapper succeeded but didn't write a bus handle |
-| any other `< 0` | sd-bus errno pass-through | from `GetSessionByPID`: `-113` (`ServiceUnknown` — logind is not on the bus), `-6` (`NoSessionForPID` — this process is in no session), `-13` (perm denied); from connecting, `-2` (no system-bus socket). **Both backends agree on every named error** since 1.1.1: the native mapper is sd-bus's own table (`tests/fixtures/sdbus_errno_map.tsv`, from libsystemd), including `System.Error.<ERRNO>`; before 1.1.1 it returned `-2` for `ServiceUnknown` and `-5` for most other names. The native transport can add `-110` (`-ETIMEDOUT`, the 25 s deadline or an expired receive timeout), `-104` (`-ECONNRESET`, the connection dropped during the call), `-107` (`-ENOTCONN`, a call after it dropped), `-71` (`-EPROTO`, a malformed reply or corrupt stream) and `-105` (`-ENOBUFS`, a message declaring ≥ 128 MiB). From `TakeControl`: `-13` (`AccessDenied` — the caller's euid is not the session's user, or logind refuses control of this session at all, which is the seatless case) |
+| any other `< 0` | sd-bus errno pass-through | from `GetSessionByPID`: `-113` (`ServiceUnknown` — logind is not on the bus), `-6` (`NoSessionForPID` — this process is in no session), `-13` (perm denied); from connecting, `-2` (no system-bus socket). **Both backends agree on every named error** since 1.1.1: the native mapper is sd-bus's own table (`tests/fixtures/sdbus_errno_map.tsv`, from libsystemd), including `System.Error.<ERRNO>`; before 1.1.1 it returned `-2` for `ServiceUnknown` and `-5` for most other names. The native transport can add `-110` (`-ETIMEDOUT`, the 25 s deadline or an expired receive timeout), `-104` (`-ECONNRESET`, the connection dropped during the call), `-107` (`-ENOTCONN`, a call after it dropped), `-71` (`-EPROTO`, a malformed reply or corrupt stream) and `-105` (`-ENOBUFS`, a message declaring ≥ 128 MiB). From the handshake (native, 1.1.2): `-13` only when the bus refuses authentication, `-110` / `-104` / `-71` / the errno otherwise — see the error catalog. (`TakeControl`'s `-13` comes from `samvada_session_take_device`, which takes control, not from init.) |
 
 **`-16` from `samvada_init` is ambiguous.** samvada returns it
 for its own double-init guard, *and* logind answers a
@@ -305,13 +306,45 @@ with `vtnr >= 1` sets `KDSKBMODE=K_OFF` and `KDSETMODE=KD_GRAPHICS`:
 |---|---|
 | `samvada_init` | **none** — validates the slot is wired, takes nothing |
 | `samvada_session_take_device` (first, succeeds) | acquires control |
-| `samvada_session_take_device` (fails) | acquires, then hands it straight back |
+| `samvada_session_take_device` (fails, nothing else held) | acquires, then hands it straight back — logind releases anything it granted with it |
+| `samvada_session_take_device` (fails, other devices held) | control kept; that one device is released at logind, best effort, unless the bus itself failed (1.1.2) |
+| `samvada_session_take_device` (times out, `-110`) | the **first** take hands control straight back, as any failed first take does — the console must not stay muted (1.1.2); with other devices held, nothing more is sent to a logind that is not answering, and control is recorded as *may be held* |
 | `samvada_session_take_device` (subsequent) | no-op — held once, not per device |
-| `samvada_session_release_device` (last device) | drops control; logind restores the VT |
-| `samvada_release` | drops control if still held |
+| `samvada_session_take_device` (a device already held) | `-22` with no round trip (logind's `DeviceIsTaken`); nothing changes (1.1.2) |
+| `samvada_session_take_device` (bad `major`/`minor`) | `-22` **before** control is taken (1.1.2) |
+| `samvada_session_release_device` (last device) | drops control; logind restores the VT. The device leaves samvada's table **whatever logind answers** (1.1.2) |
+| `samvada_release` | drops control if held; if logind did not answer the last control call, leaves it to the connection's close (1.1.2) |
 
 So a consumer that initializes samvada and never takes a device
 never touches the user's VT. 0.5.1 took control at init and did.
+
+**Devices are held by number (1.1.2).** samvada keeps the
+`(major, minor)` of every device it handed out, and "the last device"
+means its table is empty — not that a counter reached zero. Through
+1.1.1 it was a count, and a release of a device it never handed out
+(say, one a failed take left granted at logind) could bring the count
+to zero and drop control, which revokes every device — the live one
+included. A `ReleaseControl` that fails is retried at the next
+last-device release or at `samvada_release` (one answered
+`NotInControl` is not: control is not ours), and `TakeControl` is
+re-sent whenever nothing is held: logind answers it as success for
+the connection that already holds control.
+
+**What this table cannot see.** It is samvada's copy of logind's
+state, and nothing re-syncs it: `PauseDevice` / `ResumeDevice` are not
+delivered (ADR-0004), and logind drops devices on its own — on
+hot-unplug, or when another controller forces a takeover. So a release
+forgets the device whatever logind answers (a device logind already
+dropped answers `DeviceNotTaken`, `-22`, and through the 1.1.2 repairs
+it stayed in the table for ever, pinning control); and a take of a
+device logind still holds after a take that timed out gets
+`DeviceIsTaken` once, which the failure path then releases, so the
+next take succeeds. Worst-case latency, with logind not answering
+(one budget is 25 s): `take_device` two when it is the first take
+(`TakeDevice`, then the `ReleaseControl` that un-mutes the console),
+one otherwise; `release_device` two (the release, then
+`ReleaseControl`); `samvada_release` one (`ReleaseControl`), or none
+if the last control call already went unanswered.
 
 ### `samvada_session_take_device`
 
@@ -324,9 +357,9 @@ a duplicated unix_fd (the consumer owns it; close it on
 teardown). The fd's lifetime is independent of the dbus message
 that delivered it (see `dbus-marshalling.md` §SCM_RIGHTS).
 
-- **Pre**: `samvada_init` returned `0` — which since 0.5.1
-  guarantees this connection holds session control, without
-  which logind answers `NotInControl` unconditionally.
+- **Pre**: `samvada_init` returned `0`. Session control is taken
+  here, on the first take (ADR-0004) — logind answers
+  `NotInControl` without it.
   `major` / `minor` are the caller's intended device node —
   typically `(226, N)` for `/dev/dri/cardN`. Both are
   **range-checked in whichever backend is active**, and both use
@@ -362,7 +395,7 @@ that delivered it (see `dbus-marshalling.md` §SCM_RIGHTS).
   the **native** backend receives the descriptor with
   `MSG_CMSG_CLOEXEC` on the `recvmsg` itself, so it is never
   briefly cloexec-less. The **C shim** re-opens it with
-  `fcntl(fd, F_DUPFD_CLOEXEC, 0)`, not `dup()`. `dup()` clears
+  `fcntl(fd, F_DUPFD_CLOEXEC, 3)` (never onto 0..2, since 1.1.2), not `dup()`. `dup()` clears
   `FD_CLOEXEC` on the new descriptor, so before 0.5.1 the
   DRM-master fd survived any `execve` the consumer performed and
   leaked master rights into an unrelated child (MED-3). A
@@ -372,11 +405,28 @@ that delivered it (see `dbus-marshalling.md` §SCM_RIGHTS).
 | rc | Meaning | When |
 |---|---|---|
 | `>= 0` | fd | `TakeDevice` succeeded and the descriptor arrived — natively via `SCM_RIGHTS` with `MSG_CMSG_CLOEXEC`, or via the shim's `F_DUPFD_CLOEXEC` |
-| `-22` (`-EINVAL`) | not initialized, **or** bad devnum, **or** `NotInControl` | four unrelated causes squash to this one value — see the [error catalog](#error-code-catalog) |
+| `-22` (`-EINVAL`) | not initialized, **or** bad devnum, **or** `NotInControl`, **or** a device already held | five unrelated causes squash to this one value — see the [error catalog](#error-code-catalog) |
 | `-38` (`-ENOSYS`) | slot unwired | `take_device` slot is null |
 | `-107` (`-ENOTCONN`) | bus not open | `samvada_init` early-failed; `_samvada_bus == 0` |
-| `-9` (`-EBADF`) | reply carried `fd < 0` | the `TakeDevice` reply read back a negative descriptor — a peer-bus contract violation. **Not** a duplication failure |
-| any other `< 0` | sd-bus errno pass-through, or a failed duplication | typically `-13` (no DRM master / access denied), `-19` / `-2` (device not found — logind's `System.Error.ENODEV` / `ENOENT`), `-22` (`DeviceIsTaken`); `-104` / `-107` once the connection has dropped (native, 1.1.1); or `-errno` from `fcntl(F_DUPFD_CLOEXEC)`, which is `-24` (`-EMFILE`, per-process descriptor limit) or `-23` (`-ENFILE`, system-wide file-table exhaustion) |
+| `-9` (`-EBADF`) | the reply carried no usable descriptor | a peer-bus contract violation: the `TakeDevice` reply read back `fd < 0` (shim), or (native, 1.1.2) it was not `(hb)`, its `UNIX_FDS` disagreed with the descriptors that arrived, its `h` index pointed past them (or past the first 8, which are all samvada keeps), the set was truncated, `inactive` was not 0 or 1, or **the descriptor is not the device asked for** — not a character device whose rdev is `(major, minor)`, by `statx`. Nothing is handed out. **Not** a duplication failure. See the parity note below |
+| `-24` (`-EMFILE`) | 256 devices already held | samvada's held table is full (1.1.2); refused before any call. Also the shim's `F_DUPFD_CLOEXEC` failing on `RLIMIT_NOFILE` |
+| any other `< 0` | sd-bus errno pass-through, or a failed duplication | typically `-13` (no DRM master / access denied), `-19` / `-2` (device not found — logind's `System.Error.ENODEV` / `ENOENT`), `-22` (`DeviceIsTaken`, or a device samvada already holds — answered without a round trip since 1.1.2); `-104` / `-107` once the connection has dropped (native, 1.1.1); or `-errno` from `fcntl(F_DUPFD_CLOEXEC)`, which is `-23` (`-ENFILE`, system-wide file-table exhaustion) |
+
+**Parity with libsystemd on a malformed `TakeDevice` reply** — measured
+against libsystemd 262 by the 1.1.2 re-verification, where the native
+backend answers `-9` for all of these:
+
+| Malformed reply | libsystemd (`sd_bus_message_read("hb")`) |
+|---|---|
+| signature `ub` | `-6` (`-ENXIO`) |
+| `h` index past the descriptors | `-74` (`-EBADMSG`) |
+| `UNIX_FDS` disagreeing with what arrived | the message is dropped as invalid; the call times out, `-110` |
+| `inactive` = 2 | success, `inactive` read as 1 |
+| signature `hbu` (trailing values) | success |
+
+The native backend is stricter, deliberately: a `TakeDevice` reply that
+breaks its contract hands out nothing. All of these come only from
+logind itself (the broker routes a `METHOD_RETURN` only from the callee).
 
 logind's reply is `(h fd, b inactive)` — the boolean is
 **inactive**, not active. It is written to `_samvada_outs + 8`
@@ -409,10 +459,13 @@ activation. The slots at +48 / +56 stay reserved and unwired.
   `0xFFFFFFFF` and `0xFFFFFFF7`; `test_dispatch_wiring` — that
   it dispatches through slot 16 and nothing else; slot offset 16
   itself pinned by `test_ffi_slot_offsets`. The C wrapper's own
-  body (`sb_take_device`) has **no** unit test — the
-  `devnum_ok`, `-EBADF` and `F_DUPFD_CLOEXEC` branches are
-  compile-checked by CI but not executed by any gate. Live-bus
-  exercise remains HW-gated through mabda's logind dispatcher.
+  body (`sb_take_device`) is executed in CI since 1.1.2 by
+  `tools/shim_slot_check.c`, against a fake libsystemd: the
+  success path (a close-on-exec duplicate, never onto 0..2), the
+  `F_DUPFD_CLOEXEC` failure, the arguments it sends and its errno
+  pass-through. `devnum_ok` and the read-back `fd < 0` branch still
+  have no running test. Live-bus exercise remains HW-gated through
+  mabda's logind dispatcher.
 
 ### `samvada_session_release_device`
 
@@ -435,9 +488,15 @@ Where it genuinely earns its place is releasing *one* device
 while keeping the session and its other devices alive.
 
 - **Pre**: `samvada_init` returned `0` and a previous
-  `take_device` for `(major, minor)` succeeded. (Logind
-  tolerates `ReleaseDevice` for a device that was never taken
-  — returns success — so the v0.x impl does not pre-check.)
+  `take_device` for `(major, minor)` succeeded. For a device this
+  session does not hold, logind answers `DeviceNotTaken`, which is
+  `-22` (`method_release_device`, logind-session-dbus.c). Earlier
+  revisions of this page said logind returned success there; it
+  never did. samvada still sends the call rather than pre-checking
+  its own table: a device a failed take left granted at logind is not
+  in that table, and releasing it is what puts logind's view back.
+  Releasing a device samvada does not hold never drops control
+  while it holds others (1.1.2).
   `major` / `minor` are range-checked at the C boundary exactly
   as in `take_device`.
 - **Post**: master delegation is gone. The fd from
@@ -490,10 +549,19 @@ rather than becoming a parameter. A residual queue is simply
 drained on the next tick; a consumer that sees `256` returned
 should expect more work pending and may pump again immediately.
 
+The native backend drains the same way (1.1.2): one receive at a
+time, each bounded to one message, until the socket is empty — at
+most 256 messages and 1024 receives per call, so an over-cap message
+being drained can return `0` with work still pending. A receive
+error other than "nothing to read" is returned rather than reported
+as a quiet bus (1.1.2; it was swallowed).
+
 - **Pre**: `samvada_init` returned `0`.
 - **Post**: up to 256 pending messages have been dispatched by
   `sd_bus_process`. A return of `256` means the queue may not be
-  empty; anything less means it was.
+  empty; with the C shim anything less means it was. Natively, a
+  drain the 1024-receive cap cut off can return less — even `0` —
+  with work pending; the next pump continues it.
 - **Post — what does NOT happen.** No `PauseDevice` /
   `ResumeDevice` callback runs, because **signal delivery is not
   wired in v0.x.** Earlier revisions of this page claimed
@@ -517,7 +585,7 @@ should expect more work pending and may pump again immediately.
   delivers `PauseDevice` / `ResumeDevice` *exclusively* to the
   active session controller, and the controller is the bus
   connection that called `TakeControl` — which is samvada's,
-  established during `samvada_init`. A consumer that opens its
+  established by the first successful `samvada_session_take_device`. A consumer that opens its
   own `sd_bus` and installs its own match is not the controller
   and receives nothing. samvada exposes neither the bus handle
   nor a registration API, so those signals are currently
@@ -764,13 +832,13 @@ are `-errno` semantics inherited from sd-bus — magnitudes match
 | 6 | `ENXIO` | sd-bus | no logind session for the caller's pid (`NoSessionForPID`), or `NameHasNoOwner`. Earlier revisions of this page listed 113 here; libsystemd 262 says 6 |
 | 9 | `EBADF` | C shim | the `TakeDevice` reply read back successfully but carried `fd < 0` — a peer-bus contract violation. `sb_take_device` returns this explicitly rather than reading a stale `errno` from a syscall it never made. **It is not a duplication failure** — see 23 / 24 below |
 | 12 | `ENOMEM` | samvada | scratch buffer alloc failed |
-| 13 | `EACCES` | sd-bus | logind denied. Two distinct callers now: `TakeControl` during `samvada_init` (logind refuses control of this session — the seatless case), and `TakeDevice` (no DRM master available) |
+| 13 | `EACCES` | sd-bus **or** native | logind denied: `TakeControl` on the first `take_device` (logind refuses control of this session — the seatless case), or `TakeDevice` (no DRM master available). Natively, from `samvada_init`, the bus refusing authentication (`REJECTED` / `ERROR`, or an `OK` without a 32-hex GUID). Until 1.1.2 the SASL loop also answered `-13` for a server that closed, a receive error, `EINTR`, or a reply split over more than 32 reads; those now carry `-104`, the errno, a retry and the deadline's `-110` |
 | 16 | `EBUSY` | samvada **or** logind — ambiguous | `samvada_init` called again before `samvada_release`; **or** `TakeControl(false)` against a session another controller already holds (`System.Error.EBUSY`) |
 | 22 | `EINVAL` | **four sources — ambiguous** | see below |
-| 23 | `ENFILE` | C shim | `fcntl(fd, F_DUPFD_CLOEXEC, 0)` failed: system-wide file-table exhaustion |
-| 24 | `EMFILE` | C shim | `fcntl(fd, F_DUPFD_CLOEXEC, 0)` failed: this process hit `RLIMIT_NOFILE` |
+| 23 | `ENFILE` | C shim | `fcntl(fd, F_DUPFD_CLOEXEC, 3)` failed: system-wide file-table exhaustion |
+| 24 | `EMFILE` | C shim, both backends | `fcntl(fd, F_DUPFD_CLOEXEC, 3)` failed: this process hit `RLIMIT_NOFILE`; or (1.1.2, public layer) 256 devices are already held |
 | 38 | `ENOSYS` | samvada | requested slot is null (backend doesn't implement that fn). Since 0.5.1 this also means a **pre-0.5.1 backend table** when it comes from `samvada_init` and the null slot is `take_control` |
-| 71 | `EPROTO` | native | a malformed reply or corrupt stream (sd-bus would say 74 `EBADMSG` for a bad endian byte — a documented divergence) |
+| 71 | `EPROTO` | native | a malformed reply or corrupt stream (sd-bus would say 74 `EBADMSG` for a bad endian byte — a documented divergence); from `samvada_init` (1.1.2), a SASL exchange that filled the buffer without ending, a Hello reply that names no `:` unique name, or a `GetSessionByPID` reply that is not an `o` holding a valid object path |
 | 104 | `ECONNRESET` | sd-bus **and** native | the connection dropped: from the call that saw it, and from every pump after (native since 1.1.1) |
 | 105 | `ENOBUFS` | C shim **or** native | session path didn't fit in the 512-byte scratch; or (native) a message declaring ≥ 128 MiB |
 | 107 | `ENOTCONN` | samvada | bus open returned `NULL` without an explicit error; or (native, 1.1.1) a call after the connection dropped |
@@ -778,9 +846,18 @@ are `-errno` semantics inherited from sd-bus — magnitudes match
 | 113 | `EHOSTUNREACH` | sd-bus | `ServiceUnknown`: logind is not on the bus and could not be activated |
 | any other | (sd-bus) | sd-bus | pass-through; consumer logs and aborts |
 
+**Big-endian messages** (native): the framer accepts them and the
+unmarshaller reads little-endian only, so a big-endian message is
+discarded — its descriptors with it, since 1.1.2 — and a big-endian
+*reply* to a pending call is never matched: the call times out, `-110`,
+where sd-bus would byte-swap and accept it. It cannot be misread as a
+match (a byte-swapped `fields_len` always exceeds the message). logind
+and the broker emit native little-endian on every target samvada
+supports.
+
 ### `-22` is ambiguous
 
-There are **four** independent ways to get `-22` back from a
+There are **five** independent ways to get `-22` back from a
 device call, and samvada does not distinguish them:
 
 1. **samvada not initialized** (Cyrius side, `src/samvada.cyr`)
@@ -800,11 +877,16 @@ device call, and samvada does not distinguish them:
    is not valid.", which sd-bus maps to `-EINVAL`.
 4. **`org.freedesktop.login1.NotInControl`** — libsystemd's error
    map translates it to `-EINVAL` as well (verified live; see
-   `dbus-marshalling.md` §Session control). Since 0.5.1
-   `samvada_init` takes control, so this should not appear on a
-   healthy session — but control can be lost afterwards (a root
-   process forcing control away, or the session ending), and
+   `dbus-marshalling.md` §Session control). samvada takes control
+   before a device call (on the first take, ADR-0004), so this
+   should not appear on a healthy session — but control can be lost
+   afterwards (a root process forcing control away, or the session
+   ending), and
    samvada does not re-check.
+5. **A device samvada already holds** (1.1.2, `src/samvada.cyr`) —
+   refused before any call, as logind's `DeviceIsTaken` would answer
+   it; and on release, logind's `DeviceNotTaken` for a device this
+   session does not hold.
 
 Case 4 is the nastiest, because it is indistinguishable from
 case 1 — "you never took control" and "you passed me a bad
@@ -823,19 +905,21 @@ page cannot enumerate.
 
 ## Test coverage map
 
-Each public symbol's pins in `tests/samvada.tcyr` — **162
+Each public symbol's pins in `tests/samvada.tcyr` — **238
 asserts**, all green with no bus, no logind and no device. The
-suite as a whole is **879 asserts** across seven files; see
+suite as a whole is **1152 asserts** across six suites; see
 [`state.md`](../development/state.md) for the per-file split:
 
 | Fn | Test group | Asserts |
 |---|---|---|
-| `samvada_version` | `v1.1.1 packed triple` | 4 (packed + 3 lanes) |
+| `samvada_version` | `v1.1.2 packed triple` | 4 (packed + 3 lanes) |
 | `samvada_init` (null) | `init rejects null table` | 1 |
 | `samvada_init` (NULL kind) | `init rejects NULL-kind table` | 2 (alloc + reject) |
 | `samvada_init` (unknown kind) | `init rejects an unknown backend kind` | 2 (`kind=99` rejected, `PURE_CYRIUS` accepted) |
 | `samvada_init` (double-init) | `init rejects double-init without release` | 6 (re-init `-EBUSY` + release clears the guard) |
-| `samvada_init` (TakeControl) | `init takes session control (CRIT-1 regression)` | 6 (dispatched once, before any device call) |
+| `samvada_init` (no control) | `init does NOT take session control (ADR-0004)` | 6 (no TakeControl at init; taken lazily on the first take) |
+| `samvada_session_take_device` (control lifecycle) | `take_device acquires control on first use`, `a timed-out first take still gives control back; with others held it sends nothing`, `a timed-out TakeControl leaves control owed`, `a failed ReleaseControl is retried, not forgotten`, `ReleaseControl answered NotInControl is not asked again` (1.1.2) | — |
+| `samvada_session_take_device` / `release_device` (held table) | `take_device refuses a device it already holds…`, `releasing a device samvada never handed out does not revoke the live one`, `a release logind refuses still forgets the device…`, `release_device range-checks…` (1.1.2) | — |
 | `samvada_init` (old table) | `init rejects a pre-0.5.1 table (no take_control slot)` | 3 (`-ENOSYS` + API left disarmed) |
 | `samvada_init` (self-clean) | `init self-cleans on late failure (no armed API, no leak)` | 11 (session-path *and* TakeControl failure paths) |
 | `samvada_session_take_device` | `take_device: dispatch, args, fd, errors` | 6 |
@@ -877,10 +961,13 @@ remains gated:
   `-DSAMVADA_STANDALONE_MAIN`, under
   `-Wall -Wextra -Werror -Wshadow -Wconversion -Wsign-conversion
   -Wcast-qual -Wformat=2`) and their slot `#define`s are
-  cross-checked against `src/samvada_ffi.cyr`, but **no gate
-  executes them**. `devnum_ok`, the `-EBADF` branch, the
-  `F_DUPFD_CLOEXEC` fallback and the 256-event pump cap have no
-  running test.
+  cross-checked against `src/samvada_ffi.cyr`; since 1.1.2
+  `tools/shim_slot_check.c` (CI) executes every wrapper against a
+  fake libsystemd that records what each sends — member,
+  destination, interface, path, arguments — including
+  `sb_take_device`'s `F_DUPFD_CLOEXEC` failure, its errno
+  pass-through and the 256-event pump cap. `devnum_ok` and the
+  read-back `fd < 0` branch still have no running test.
 - **Live-bus end-to-end.** Still HW-gated and unverified.
   `tests/samvada_live.bcyr` (the live-bus bench scaffold, 0.4.0)
   drives handshake / take_device / pump through a real table but

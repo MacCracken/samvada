@@ -3,7 +3,14 @@
 Runs the identical call sequence through both backends **in one
 process, sequentially**, and compares every return value.
 
-    ./tools/differential/run.sh
+    SAMVADA_DIFF_TAKES_CONTROL=1 ./tools/differential/run.sh
+
+**It takes logind session control.** Both halves call `TakeDevice`,
+which takes control of the caller's session first, and on a seated VT
+session that turns the keyboard off and blanks the console until
+control is released. Run it from a seatless session (ssh, a container),
+never from the graphical session you are typing in; without the opt-in
+variable it refuses to start (1.1.2).
 
 Sequential A/B is forced, not chosen: samvada's module-scope state
 and the `-EBUSY` re-init guard make two live backends in one process
@@ -38,5 +45,9 @@ difference that turned out to be legitimate.
     release                   0          0   MATCH
 
 `-13` is `AccessDenied` — a seatless session cannot own a DRM
-device. On a seated session both backends should return a real fd,
-which is the CG-lane check neither has been able to run.
+device. On a seated session both backends should succeed. A successful
+take is recorded as `0`, not as the descriptor, and the descriptor is
+closed: the two backends hand out different numbers for the same
+success (1.1.2; until then the raw numbers were compared, so a take
+that succeeded on both sides would have read as a breach). That seated
+run is the CG-lane check neither backend has had.

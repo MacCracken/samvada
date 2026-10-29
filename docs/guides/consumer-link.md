@@ -1,4 +1,4 @@
-# Linking samvada into a consumer (v1.1.1)
+# Linking samvada into a consumer (v1.1.2)
 
 **Read the native path and stop.** As of 1.0, samvada speaks dbus
 natively in Cyrius — no C, no `libsystemd`, no `pkg-config`, no
@@ -28,17 +28,26 @@ consumers should not use it.**
 > re-run on the live system bus, unseated, from the 1.1.0 bundle.
 > The C-shim recipe compiled and linked against libsystemd 262, and
 > again was **not executed**.
+>
+> **1.1.2 (cyrius 6.7.18), 2026-10-29:** the native handshake — now
+> with the 1.1.2 checks (the `OK` GUID, Hello's `:` unique name,
+> `GetSessionByPID`'s object path, bounded reads, polled waits) — re-run
+> on the live system bus, unseated, from the 1.1.2 bundle: init, two
+> pumps, release and re-init all 0. 1.1.1 was not re-run. The C-shim
+> recipe was compile-checked and its wrappers executed against a fake
+> libsystemd (`tools/shim_slot_check.c`), and again **not executed**
+> against the bus.
 
 ## Adding samvada to your `cyrius.cyml`
 
 ```cyml
 [deps.samvada]
 git     = "https://github.com/MacCracken/samvada.git"
-tag     = "1.1.1"
+tag     = "1.1.2"
 modules = ["dist/samvada.cyr"]
 ```
 
-samvada's tags are **unprefixed** — `1.1.1`, not `v1.1.1`. Every
+samvada's tags are **unprefixed** — `1.1.2`, not `v1.1.2`. Every
 tag pushed to the repo is bare.
 
 > **Do not pin below 1.0.1**, and there are two independent
@@ -56,6 +65,13 @@ tag pushed to the repo is bare.
 > (AUDIT-4) — and it popped a shared fd queue FIFO, so once
 > descriptors did arrive it could hand back the one from an
 > unrelated `ResumeDevice` signal. Both are fixed in 1.0.1.
+>
+> **Below 1.1.2**, any local user could still choose the descriptor
+> `take_device` returned: a signal samvada could not parse (any
+> big-endian message, or one with an unknown header field type) left
+> its descriptor queued for the next take (P1-1,
+> [the 1.1.2 audit](../audit/2026-10-29-p1-audit.md)). Pin 1.1.2 or
+> later.
 
 > **Commit your `cyrius.lock`.** The bundle is fetched from a git
 > tag and samvada's tags are lightweight and unsigned, so the
@@ -73,9 +89,9 @@ so check the bytes `cyrius deps` fetched against the release's
 they differ, and `samvada-<tag>.deps` covers the sidecar too:
 
 ```sh
-curl -sSfLO https://github.com/MacCracken/samvada/releases/download/1.1.1/SHA256SUMS
-grep -E ' samvada-1\.1\.1\.(cyr|deps)$' SHA256SUMS
-sha256sum lib/samvada.cyr ~/.cyrius/deps/samvada/1.1.1/dist/samvada.deps
+curl -sSfLO https://github.com/MacCracken/samvada/releases/download/1.1.2/SHA256SUMS
+grep -E ' samvada-1\.1\.2\.(cyr|deps)$' SHA256SUMS
+sha256sum lib/samvada.cyr ~/.cyrius/deps/samvada/1.1.2/dist/samvada.deps
 ```
 
 The sums must match row for row. Verified against a real release:
@@ -172,7 +188,7 @@ builds the fn-table and hands it to samvada; you never see it.
 whole, keyed by tag:
 
 ```
-~/.cyrius/deps/samvada/1.1.1/deps/samvada_main.c
+~/.cyrius/deps/samvada/1.1.2/deps/samvada_main.c
 ```
 
 Most consumers vendor a copy into their own `deps/` rather than
@@ -565,7 +581,7 @@ Two more things worth stating plainly:
    success value leaking through — and now returns `0` as the
    contract always said. Both are non-negative, so a consumer
    branching on `rc < 0` needs no edit.
-7. **Re-pin to `1.1.1`.**
+7. **Re-pin to `1.1.2`.**
 
 Behaviour you get for free, with no code change:
 `TakeControl` / `ReleaseControl` around the session (which is
@@ -602,6 +618,34 @@ you:
    `UINT32_MAX` you were opening a *different device*.
 5. Nothing to do about the C shim: it still builds and still
    works. It retires at 1.2.0.
+
+## Upgrading from 1.1.1 to 1.1.2
+
+The public surface is unchanged and `dist/samvada.deps` is unchanged
+(`alloc`, `syscalls`, `string`, `fnptr`). Two things can reach your
+build:
+
+1. **Your cyrius pin must be 6.6.13 or later.** The bundle now calls
+   the stdlib's `fd_wait_ready` (first in cyrius 6.6.13) and
+   `sys_statx` (6.6.12). The bundle compiles under **your** manifest's
+   pin, not samvada's. Verified by compiling a consumer of the bundle
+   with each toolchain's own `cycc` and stdlib. On 6.6.12 it fails:
+
+   ```
+   warning: undefined function 'fd_wait_ready'
+   error: refusing to emit binary with 1 reachable undefined function(s) (pass --allow-undef to downgrade)
+   ```
+
+   On 6.6.13, 6.7.5 (mabda's pin) and 6.7.18 it builds.
+2. **Re-pin to `1.1.2`** — and do: every native release from 0.11.0
+   through 1.1.1 lets any local user choose the descriptor
+   `samvada_session_take_device` returns (`SECURITY.md`).
+
+What a consumer may notice at run time (CHANGELOG 1.1.2 § Breaking):
+`samvada_init` reports why the SASL exchange failed (`-104`, `-110`,
+`-71`, the errno) where it said `-13`; `samvada_pump_signals` returns
+receive errors where it said 0; and the C shim opens a private
+connection rather than the thread's default bus.
 
 ## Upgrading from 1.0.2 to 1.1.0
 

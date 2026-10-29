@@ -59,13 +59,13 @@ stdlib); see `tests/samvada.bcyr` for the four call sites.
 
 ## Run history
 
-| | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Run 6 | Run 7 | Run 8 | Run 9 |
-|---|---|---|---|---|---|---|---|---|---|
-| **Date (UTC)** | `2026-05-01T21:47:19Z` | `2026-05-01T21:58:21Z` | `2026-06-02T22:52:43Z` | `2026-09-09T15:42:03Z` | `2026-09-09T17:58:00Z` | `2026-09-09T19:40:00Z` | `2026-10-29T00:54:07Z` | `2026-10-29T06:02:55Z` | `2026-10-29T07:42:00Z` |
-| **Commit** | `4c7ada9` | (`0.2.2` release commit) | (`0.3.0` release commit) | (`0.5.0` release commit) | (`0.5.1` release commit) | (`0.5.2` release commit) | (`1.0.2` release commit) | (`1.1.0` release commit) | (`1.1.1` release commit) |
-| **samvada** | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | `0.5.1` | `0.5.2` | `1.0.2` | `1.1.0` | `1.1.1` |
-| **Toolchain** | `cyrius 5.7.48` | `cyrius 5.7.48` | `cyrius 6.0.40` | `cyrius 6.6.1` | `cyrius 6.6.1` | `cyrius 6.6.2` | `cyrius 6.6.20` | `cyrius 6.7.18` | `cyrius 6.7.18` |
-| **Host** | `Linux 7.0.2-arch1-1 x86_64`, AMD Ryzen 7 5800H (16T) | same | `Linux 7.0.10-arch1-1 x86_64`, same CPU | `Linux 7.2.3-arch1-3 x86_64`, same CPU | same as Run 4 | same as Run 4 | `Linux 7.2.11-arch1-1 x86_64`, same CPU | same as Run 7 | same as Run 7 |
+| | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Run 6 | Run 7 | Run 8 | Run 9 | Run 10 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **Date (UTC)** | `2026-05-01T21:47:19Z` | `2026-05-01T21:58:21Z` | `2026-06-02T22:52:43Z` | `2026-09-09T15:42:03Z` | `2026-09-09T17:58:00Z` | `2026-09-09T19:40:00Z` | `2026-10-29T00:54:07Z` | `2026-10-29T06:02:55Z` | `2026-10-29T07:42:00Z` | `2026-10-29T17:55:14Z` |
+| **Commit** | `4c7ada9` | (`0.2.2` release commit) | (`0.3.0` release commit) | (`0.5.0` release commit) | (`0.5.1` release commit) | (`0.5.2` release commit) | (`1.0.2` release commit) | (`1.1.0` release commit) | (`1.1.1` release commit) | (`1.1.2` release commit) |
+| **samvada** | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | `0.5.1` | `0.5.2` | `1.0.2` | `1.1.0` | `1.1.1` | `1.1.2` |
+| **Toolchain** | `cyrius 5.7.48` | `cyrius 5.7.48` | `cyrius 6.0.40` | `cyrius 6.6.1` | `cyrius 6.6.1` | `cyrius 6.6.2` | `cyrius 6.6.20` | `cyrius 6.7.18` | `cyrius 6.7.18` | `cyrius 6.7.18` |
+| **Host** | `Linux 7.0.2-arch1-1 x86_64`, AMD Ryzen 7 5800H (16T) | same | `Linux 7.0.10-arch1-1 x86_64`, same CPU | `Linux 7.2.3-arch1-3 x86_64`, same CPU | same as Run 4 | same as Run 4 | `Linux 7.2.11-arch1-1 x86_64`, same CPU | same as Run 7 | same as Run 7 | same as Run 7 |
 
 > **Gap, stated rather than papered over.** `0.4.0` and `0.4.1`
 > shipped without appending a row, so there is no Run between
@@ -85,12 +85,12 @@ stdlib); see `tests/samvada.bcyr` for the four call sites.
 
 ### Results
 
-| Benchmark | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | `0.5.1` | `0.5.2` | `1.0.2` | `1.1.0` | `1.1.1` | Δ (0.3.0→0.5.0) | Δ (0.5.0→0.5.1) | Δ (0.5.1→0.5.2) | Δ (1.0.1→1.0.2, same day) | Δ (1.0.2→1.1.0, same day) | Δ (1.1.0→1.1.1, same day) |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `ffi_alloc` | 56 ns | 59 ns | 63 ns | 28 ns | 32 ns | 30 ns | 31 ns | 29 ns | 31 ns | **−55.6%** | **+14.3%** (expected — see note) | −2 ns (noise) | −1 ns (noise) | −1 ns (noise) | −1 ns (noise) |
-| `ffi_get_slot` | 9 ns | 11 ns | 11 ns | 9 ns | 9 ns | 8 ns | 9 ns | 8 ns | 9 ns | −18.2% | 0% | −1 ns (noise) | 0 ns | 0 ns | 0 ns |
-| `init_reject_null` | 6 ns | 7 ns | 7 ns | 6 ns | 6 ns | 5 ns | 5 ns | 5 ns | 5 ns | −14.3% | 0% | −1 ns (noise) | −1 ns (noise) | 0 ns | 0 ns |
-| `release_idempotent` | 6 ns | 6 ns | 7 ns | 6 ns | 6 ns | 7 ns | 6 ns | 6 ns | 7 ns | −14.3% | 0% | +1 ns (noise) | −1 ns (noise) | 0 ns | +1 ns (noise) |
+| Benchmark | `0.2.1` | `0.2.2` | `0.3.0` | `0.5.0` | `0.5.1` | `0.5.2` | `1.0.2` | `1.1.0` | `1.1.1` | `1.1.2` | Δ (0.3.0→0.5.0) | Δ (0.5.0→0.5.1) | Δ (0.5.1→0.5.2) | Δ (1.0.1→1.0.2, same day) | Δ (1.0.2→1.1.0, same day) | Δ (1.1.0→1.1.1, same day) | Δ (1.1.1→1.1.2, same day) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `ffi_alloc` | 56 ns | 59 ns | 63 ns | 28 ns | 32 ns | 30 ns | 31 ns | 29 ns | 31 ns | 29 ns | **−55.6%** | **+14.3%** (expected — see note) | −2 ns (noise) | −1 ns (noise) | −1 ns (noise) | −1 ns (noise) | 0 ns |
+| `ffi_get_slot` | 9 ns | 11 ns | 11 ns | 9 ns | 9 ns | 8 ns | 9 ns | 8 ns | 9 ns | 8 ns | −18.2% | 0% | −1 ns (noise) | 0 ns | 0 ns | 0 ns | 0 ns |
+| `init_reject_null` | 6 ns | 7 ns | 7 ns | 6 ns | 6 ns | 5 ns | 5 ns | 5 ns | 5 ns | 5 ns | −14.3% | 0% | −1 ns (noise) | −1 ns (noise) | 0 ns | 0 ns | 0 ns |
+| `release_idempotent` | 6 ns | 6 ns | 7 ns | 6 ns | 6 ns | 7 ns | 6 ns | 6 ns | 7 ns | 6 ns | −14.3% | 0% | +1 ns (noise) | −1 ns (noise) | 0 ns | +1 ns (noise) | 0 ns |
 
 Notes:
 
@@ -218,6 +218,39 @@ Notes:
   init/release cycle against the system bus allocated **600 B** on
   1.1.0 and **0 B** on 1.1.1; each logind call 192–336 B before, 0 after
   (tests/dbus_session.tcyr pins it). The live-bus rows were not re-run.
+- Run 10 (`1.1.2`) is the **P(-1) pass**: same toolchain. Same-day
+  comparator, three rounds alternating with the 1.1.1 tree (exported
+  from its commit): 1.1.1 read `ffi_alloc` 29/30/28, `ffi_get_slot`
+  8/8/8, `init_reject_null` 5/5/5, `release_idempotent` 7/6/6 ns; 1.1.2
+  read 29/29/29, 8/8/8, 5/5/4 and 6/5/6 ns. Medians; flat — no benched
+  path changed. The smoke binary: default **115,136 B** (was 111,032),
+  DCE **20,928 B** (was 20,920); the default build grows with code DCE
+  removes (the smoke binary never reaches the session layer).
+  **The receive path did change**, and the four CPU baselines do not
+  touch it, so it was measured separately with `tools/rxbench.cyr`, a
+  microbench over a socketpair (the same internal API in both trees;
+  three rounds alternating, median and range):
+
+  | | 1.1.1 | 1.1.2 |
+  |---|---|---|
+  | idle `pump_signals` (one `recvmsg`, `EAGAIN`) | 652 ns (649–656) | 649 ns (638–653) |
+  | draining small signals, per message | 486 ns (479–501) | 2133 ns (2113–2138) |
+  | a call whose reply is already waiting | 6.5 µs (6.46–6.64) | 14.2 µs (13.94–14.43) |
+
+  Run it with `cyrius build tools/rxbench.cyr build/rxbench &&
+  ./build/rxbench` from the repo root; build the same file against
+  another tree's `src/` to compare.
+
+  The cost is bounded reads: every read stops at the end of one
+  message (1.1.2's H1 fix), so a message takes two `recvmsg` calls —
+  the header, then the rest, as sd-bus reads — and a call adds a
+  `poll` per wait for its deadline. 1.1.1 read up to 8 KiB at a time.
+  The idle pump is flat only because a first cut, which cleared all
+  1032 bytes of the new control buffer on every receive, cost ~150 ns
+  (807 ns) and was trimmed before release. Against a logind round trip
+  of well over 100 µs, and the handful of signals logind sends per VT
+  switch, the trade is the point of the release. The live-bus rows
+  were not re-run: the handshake row includes `TakeControl`.
 
 ## Live-bus rows — the v1.0 gate, FILLED (0.11.0 / 1.0.0)
 

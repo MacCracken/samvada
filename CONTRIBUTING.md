@@ -6,7 +6,7 @@ Cyrius dbus client for the AGNOS suite.
 ## Prerequisites
 
 - [Cyrius](https://github.com/MacCracken/cyrius) — version
-  pinned in `cyrius.cyml [package].cyrius` (currently 6.0.40).
+  pinned in `cyrius.cyml [package].cyrius` (currently 6.7.18).
   Ships `cc5`, the `cyrius` CLI, and the stdlib samvada depends on.
 - `gcc` / `clang` (for the libsystemd C shim only —
   `deps/samvada_main.c` is built by consumers, not by samvada
@@ -33,9 +33,17 @@ Cyrius dbus client for the AGNOS suite.
    cyrius build src/main.cyr build/samvada
    cyrius test
    python3 tools/surface_check.py . tools/public_surface.txt
+   python3 tools/boundary_check.py . tools/public_surface.txt
+   python3 tools/security_scan.py --self-test && python3 tools/security_scan.py .
    ```
 
-   The last one freezes the eight-fn public API. **If you add,
+   The scan (1.1.2) refuses process creation, system paths and large
+   static buffers by allow-list, and anything it cannot read. A new
+   `syscall(` number or `SYS_*` name needs a row in its allow-list
+   (`tools/security_scan.py`), and a new stdlib module a row in
+   `tools/stdlib_allowed.txt`; `#define`, `enum` and `#derive` are
+   refused in the bundle. The surface check freezes the eight-fn public
+   API. **If you add,
    remove or re-sign a public fn, CI fails until you edit
    `tools/public_surface.txt` and document the change in
    `docs/architecture/public-api.md`.** That is deliberate — until
@@ -51,12 +59,12 @@ src/lib.cyr            Include chain — single source of truth for [lib].
 src/samvada.cyr        Public API surface (stable across v0.x).
 src/samvada_ffi.cyr    FFI fn-table layout (slot offsets + helpers).
 src/test.cyr           Top-level test entry referenced by [build].test.
-tests/samvada.tcyr     Public API + FFI layout (162 asserts).
-tests/dbus_session.tcyr  logind layer, reply provenance, fd ownership (131).
-tests/dbus_frame.tcyr    Framing, receive buffer, fd queue (79).
-tests/dbus_codec.tcyr    Marshal / unmarshal (76).
-tests/dbus_sys.tcyr      SCM_RIGHTS, cmsg guards (66).
-tests/dbus_auth.tcyr     SASL handshake (65).
+tests/samvada.tcyr     Public API, FFI layout, held devices (238 asserts).
+tests/dbus_session.tcyr  logind layer, reply provenance, descriptors (512).
+tests/dbus_frame.tcyr    Framing, receive buffer, bounded reads (135).
+tests/dbus_codec.tcyr    Marshal / unmarshal, field validation (105).
+tests/dbus_sys.tcyr      SCM_RIGHTS, cmsg walk (91).
+tests/dbus_auth.tcyr     SASL handshake, the send path (71).
 tests/fixtures/dbus/     Real captured wire bytes.
 tests/samvada.bcyr     Benchmark harness.
 tests/samvada.fcyr     Fuzz harness.
@@ -75,7 +83,7 @@ cyrius fmt --check src/*.cyr tests/*.tcyr      # no drift
 cyrius vet src/main.cyr                        # static checks
 cyrius distlib                                 # dist/samvada.cyr stays fresh
 cyrius build src/main.cyr build/samvada        # smoke build
-cyrius test                                    # 32 asserts as of v0.2.1
+cyrius test                                    # every suite; counts in docs/development/state.md
 cyrius bench tests/samvada.bcyr                # 4 CPU baselines
 # C shim compile-check (consumer-side build):
 cc -Wall -Wextra -Werror -c deps/samvada_main.c \
@@ -113,7 +121,9 @@ When a new logind / dbus call needs to flow through samvada:
 4. Add a slot-offset CPU assert to `tests/samvada.tcyr` so
    reordering is caught at test time.
 5. Add a public Cyrius wrapper in `src/samvada.cyr` (dispatch
-   via `samvada_ffi_get_slot` + `fncallN`).
+   via `samvada_ffi_get_slot` + `fncallN`) as a `public fn`, add
+   its row to `tools/public_surface.txt`, and document it in
+   `docs/architecture/public-api.md` — both gates fail otherwise.
 
 ## Code Style
 

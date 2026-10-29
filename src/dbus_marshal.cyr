@@ -165,6 +165,12 @@ fn dbus_marshal_field_u32(code, val) {
 # A signature-valued field (code 8). `g` is length-prefixed by ONE
 # byte and needs no alignment — the trap is treating it like `s`.
 fn dbus_marshal_field_sig(code, sig, len) {
+    # A signature is at most 255 bytes, and its length is ONE byte. A
+    # longer one was written as len & 0xFF followed by all `len` bytes —
+    # a message whose length byte disagrees with its contents. It
+    # poisons the message now, like any other write that cannot fit
+    # (1.1.2).
+    if (len > 255) { _dbm_bad = 1; return -22; }
     _dbm_pad_to(8);
     _dbm_u8(code);
     _dbm_u8(1);

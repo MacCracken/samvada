@@ -58,6 +58,36 @@ fn dbus_frame_msg_max() { return 134217728; }
 # growable queue leaks per push. On overflow the arriving fd is
 # CLOSED, not dropped — an unbounded fd leak inside a compositor is
 # worse than a refused message.
+#
+# THE QUEUE HOLDS ONE MESSAGE'S DESCRIPTORS (1.1.2). Every read is
+# bounded to the message at the head of the buffer (dbus_frame_want), so
+# whatever descriptors a read delivers arrived with THAT message's bytes,
+# and advancing past the message closes every one it did not hand out.
+# This is sd-bus's own rule — bus_socket_read_message reads no further
+# than the current message, and the descriptors that arrive meanwhile
+# are that message's — and it needs nothing from the message itself.
+#
+# Until 1.1.2 a message's descriptors were counted from its own UNIX_FDS
+# field, and a message whose field array samvada could not walk (any
+# big-endian message; an unknown field type ahead of UNIX_FDS) counted
+# as carrying none. Any bus peer could send samvada such a signal with a
+# descriptor of its choosing attached; the descriptor stayed at the head
+# of the queue, and the next TakeDevice handed it to the compositor as
+# the device. Attribution by position cannot be argued with by the
+# message it attributes.
+#
+# What it does assume, as sd-bus does: a sender attaches a message's
+# descriptors to the write that carries the message's FIRST byte.
+# dbus-broker and dbus-daemon both do. A sender that glued one message's
+# tail and the next message onto a write carrying the next one's
+# descriptors would have them attributed to the first — which closes
+# them, so the genuine reply gets -EBADF; it never hands out a stranger's
+# descriptor (P(-1) re-verification, demonstrated both ways).
+#
+# Only the first 8 of a message's descriptors are kept; the rest are
+# closed on arrival but still counted (fd_total). A reply whose `h`
+# index is 8 or more is therefore refused, where sd-bus would honour it
+# — logind's TakeDevice reply carries exactly one.
 fn dbus_frame_fdq_cap() { return 8; }
 
 # ---- status codes ----
@@ -67,7 +97,6 @@ fn dbus_frame_fdq_cap() { return 8; }
 # malformed header" would be indistinguishable from "recvmsg
 # failed", which is exactly the ambiguity the 0.5.1 audit found
 # around -22.
-fn dbus_frame_ok()        { return 0; }
 fn dbus_frame_need_more() { return -1000; }
 fn dbus_frame_eof()       { return -1001; }   # orderly close, nothing pending
 fn dbus_frame_truncated() { return -1002; }   # EOF mid-message
@@ -139,7 +168,6 @@ fn dbus_frame_total(p, avail) {
 }
 
 fn dbus_frame_msg_type(p)   { return load8(p + 1); }
-fn dbus_frame_msg_flags(p)  { return load8(p + 2); }
 fn dbus_frame_msg_serial(p) {
     var e = load8(p + 0);
     if (e == dbus_frame_endian_be()) {
@@ -154,8 +182,15 @@ var _dbf_off   = 0;   # cursor: first unconsumed byte
 var _dbf_have  = 0;   # cursor: one past the last valid byte
 var _dbf_skip  = 0;   # bytes still to discard for an over-cap message
 var _dbf_eof   = 0;   # peer closed
-var _dbf_fdq   = 0;   # pending-fd ring
+var _dbf_fdq   = 0;   # the head message's descriptors, in arrival order
 var _dbf_fdn   = 0;   # fds queued
+var _dbf_fdtot = 0;   # fds that arrived with the head message, queued or not
+var _dbf_fdbad = 0;   # 1: the head message's descriptor set is incomplete
+# Stream position of _dbf_buf[0]: bytes the buffer has slid past since
+# init. With it, a byte's position survives compaction, so "did this
+# message arrive before the request went out" is a comparison of two
+# positions rather than a count that has to be kept in step (1.1.2).
+var _dbf_abs0  = 0;
 var _dbf_ready = 0;
 # Bytes compaction has moved since init. Kept only so A-1's bound is a
 # test, not an argument: each message is moved at most once — compaction
@@ -164,10 +199,14 @@ var _dbf_ready = 0;
 # exceed the bytes received, however a peer sizes its messages.
 var _dbf_moved = 0;
 
+# Re-init CLOSES whatever is still queued (1.1.2). It used to zero the
+# count, which forgot the descriptors without closing them — a leak per
+# reconnect whenever the old connection died holding one.
 fn dbus_frame_init() {
     if (_dbf_ready != 0) {
-        _dbf_off = 0; _dbf_have = 0; _dbf_skip = 0; _dbf_eof = 0; _dbf_fdn = 0;
-        _dbf_moved = 0;
+        dbus_frame_close_fds();
+        _dbf_off = 0; _dbf_have = 0; _dbf_skip = 0; _dbf_eof = 0;
+        _dbf_moved = 0; _dbf_abs0 = 0;
         return 0;
     }
     _dbf_buf = alloc(dbus_frame_cap());
@@ -175,7 +214,8 @@ fn dbus_frame_init() {
     _dbf_fdq = alloc(dbus_frame_fdq_cap() * 8);
     if (_dbf_fdq == 0) { return -12; }
     _dbf_off = 0; _dbf_have = 0; _dbf_skip = 0; _dbf_eof = 0; _dbf_fdn = 0;
-    _dbf_moved = 0;
+    _dbf_fdtot = 0; _dbf_fdbad = 0;
+    _dbf_moved = 0; _dbf_abs0 = 0;
     _dbf_ready = 1;
     return 0;
 }
@@ -204,8 +244,15 @@ fn dbus_frame_consume(n) {
 fn dbus_frame_set_eof() { _dbf_eof = 1; return 0; }
 fn dbus_frame_moved()   { return _dbf_moved; }
 
-# Slide unconsumed bytes to the front. Run only when a header can no
-# longer be appended, so compaction is rare rather than per-read.
+# Stream positions, in bytes since init: of the first unconsumed byte
+# (the head message's first byte, once dbus_frame_next has yielded it),
+# and one past the last byte received.
+fn dbus_frame_pos()      { return _dbf_abs0 + _dbf_off; }
+fn dbus_frame_received() { return _dbf_abs0 + _dbf_have; }
+
+# Slide unconsumed bytes to the front. Run only when the next read does
+# not fit (dbus_frame_prepare), so compaction is rare rather than
+# per-read.
 #
 # memcpy with dst < src and a forward loop is what makes this safe;
 # lib/string.cyr's memcpy is a forward byte loop today and there is
@@ -216,20 +263,22 @@ fn dbus_frame_compact() {
     var live = _dbf_have - _dbf_off;
     if (live > 0) { memcpy(_dbf_buf, _dbf_buf + _dbf_off, live); }
     _dbf_moved = _dbf_moved + live;
+    _dbf_abs0 = _dbf_abs0 + _dbf_off;
     _dbf_off = 0;
     _dbf_have = live;
     return 0;
 }
 
-fn dbus_frame_maybe_compact() {
-    var room = dbus_frame_cap() - _dbf_have;
-    if (room < dbus_frame_hdr_size()) { return dbus_frame_compact(); }
-    return 0;
-}
-
-# ---- pending fds ----
+# ---- the head message's descriptors ----
+# A descriptor that arrives while an over-cap message is being drained
+# is that message's, and closed on arrival: nobody can claim it.
 fn dbus_frame_push_fd(fd) {
     if (fd < 0) { return 0; }
+    if (_dbf_skip > 0) {
+        sys_close(fd);
+        return 0;
+    }
+    _dbf_fdtot = _dbf_fdtot + 1;
     if (_dbf_fdn >= dbus_frame_fdq_cap()) {
         sys_close(fd);
         return dbus_frame_overflow();
@@ -239,23 +288,45 @@ fn dbus_frame_push_fd(fd) {
     return 0;
 }
 
-fn dbus_frame_fd_count() { return _dbf_fdn; }
+# The kernel truncated the ancillary data of a read (MSG_CTRUNC): some
+# of the head message's descriptors were dropped before we saw them, so
+# its count can never be trusted.
+fn dbus_frame_fds_incomplete() {
+    if (_dbf_skip > 0) { return 0; }
+    _dbf_fdbad = 1;
+    return 0;
+}
 
-fn dbus_frame_take_fd() {
-    if (_dbf_fdn <= 0) { return (0 - 1); }
-    var fd = load64(_dbf_fdq + 0);
-    var i = 1;
-    while (i < _dbf_fdn) {
-        store64(_dbf_fdq + (i - 1) * 8, load64(_dbf_fdq + i * 8));
-        i = i + 1;
+fn dbus_frame_fd_count() { return _dbf_fdn; }
+fn dbus_frame_fd_total() { return _dbf_fdtot; }
+fn dbus_frame_fd_bad()   { return _dbf_fdbad; }
+
+# Hand the head message's descriptor number `i` to the caller, who then
+# owns it: it leaves the queue, so advancing past the message no longer
+# closes it. -1 if there is no such descriptor (it never arrived, or was
+# closed on queue overflow). Claiming does not change fd_total, which
+# counts what ARRIVED.
+fn dbus_frame_claim_fd(i) {
+    if (i < 0) { return (0 - 1); }
+    if (i >= _dbf_fdn) { return (0 - 1); }
+    var fd = load64(_dbf_fdq + i * 8);
+    var j = i + 1;
+    while (j < _dbf_fdn) {
+        store64(_dbf_fdq + (j - 1) * 8, load64(_dbf_fdq + j * 8));
+        j = j + 1;
     }
     _dbf_fdn = _dbf_fdn - 1;
     return fd;
 }
 
-# Close every queued descriptor. Must run on any terminal fault, on
-# the over-cap drain, and at connection close — a queued fd nobody
-# takes is a leak for the process lifetime.
+# The first queued descriptor, claimed (FIFO). Tests read a reply's
+# descriptor through this after dbus_session_call.
+fn dbus_frame_take_fd() { return dbus_frame_claim_fd(0); }
+
+# Close every queued descriptor and forget the head message's count.
+# Runs whenever a message is consumed (dbus_frame_advance), on the
+# over-cap drain, at re-init and at connection close — a queued fd
+# nobody claims is a leak for the process lifetime.
 fn dbus_frame_close_fds() {
     var i = 0;
     while (i < _dbf_fdn) {
@@ -264,7 +335,47 @@ fn dbus_frame_close_fds() {
         i = i + 1;
     }
     _dbf_fdn = 0;
+    _dbf_fdtot = 0;
+    _dbf_fdbad = 0;
     return 0;
+}
+
+# ---- bounding a read to the head message (1.1.2) ----
+# How many bytes the next read may take without reading past the end of
+# the message at the head of the buffer: the rest of its 16-byte header,
+# or the rest of the message once the header says how long it is, or the
+# rest of an over-cap message being drained. 0 when a read is not what
+# is needed — a whole message is already buffered, or the stream is lost
+# (dbus_frame_next says which).
+#
+# Bounding the read is what makes the descriptor queue one message's:
+# see dbus_frame_fdq_cap. It costs a second receive per message, which
+# at logind's traffic is nothing.
+fn dbus_frame_want() {
+    var avail = _dbf_have - _dbf_off;
+    if (_dbf_skip > 0) {
+        var rest = _dbf_skip - avail;
+        if (rest < 0) { rest = 0; }
+        return rest;
+    }
+    if (avail < dbus_frame_hdr_size()) { return dbus_frame_hdr_size() - avail; }
+    var total = dbus_frame_total(_dbf_buf + _dbf_off, avail);
+    if (total < 0) { return 0; }
+    if (total > dbus_frame_cap()) { return 0; }   # dbus_frame_next drains it
+    if (total <= avail) { return 0; }
+    return total - avail;
+}
+
+# Make room for a read of `want` bytes and return how many it may take
+# (fewer only while draining an over-cap message). Compaction here moves
+# at most the head message's partial bytes, once: it stays at offset 0
+# until consumed, and reads never run past it.
+fn dbus_frame_prepare(want) {
+    if (want <= 0) { return 0; }
+    if (dbus_frame_space() < want) { dbus_frame_compact(); }
+    var space = dbus_frame_space();
+    if (want > space) { return space; }
+    return want;
 }
 
 # ---- the framer ----
@@ -290,6 +401,7 @@ fn dbus_frame_next() {
             if (_dbf_eof != 0) { return dbus_frame_truncated(); }
             return dbus_frame_need_more();
         }
+        dbus_frame_close_fds();               # the drained message's, if any
     }
 
     var avail = _dbf_have - _dbf_off;
@@ -328,9 +440,13 @@ fn dbus_frame_next() {
     return total;
 }
 
+# Consume the head message. Its descriptors go with it: every one the
+# caller did not claim is closed here, so no message — however it was
+# parsed, or not — can leave a descriptor for the next one (1.1.2).
 fn dbus_frame_advance(n) {
     if (n <= 0) { return 0; }
     _dbf_off = _dbf_off + n;
     if (_dbf_off > _dbf_have) { _dbf_off = _dbf_have; }
+    dbus_frame_close_fds();
     return 0;
 }

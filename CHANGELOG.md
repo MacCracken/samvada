@@ -4,6 +4,246 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.2] — 2026-10-29
+
+**A deep P(-1) pass, and one HIGH.** Four independent reviews of the
+1.1.1 tree — the wire path, the session layer, the CI gates and a CVE
+review — found that **any local user could choose the descriptor
+`TakeDevice` returned**, three ways for a bus peer to fail a call or
+close the bus, gates that could be walked past, and a public layer whose
+bookkeeping could revoke a live device. Every repair is pinned by the
+finding's own proof of concept and mutation-tested, and the repaired
+tree was re-verified twice — five fresh reviewers and two refuting
+skeptics, then a final three-lens pass and a skeptic over the merged tree
+(`docs/audit/2026-10-29-p1-audit.md` § Re-verification, § Final pass). Same toolchain (cyrius 6.7.18);
+the FFI layout (11 slots / 88 bytes, `kind` at +64) and the eight public
+signatures unchanged. 1152 asserts (was 873 — 1.1.1's headline 879 counted
+the six suite files as asserts). On aarch64, verified under
+`qemu-aarch64` but for the five asserts that need `MSG_CTRUNC`, which
+qemu-user does not deliver (roadmap).
+
+### Breaking
+- **A consumer must pin cyrius ≥ 6.6.13 to build the 1.1.2 bundle** (was
+  6.6.5). It now calls the stdlib's `fd_wait_ready` (first in 6.6.13) and
+  `sys_statx` (6.6.12); on 6.6.12 `cycc` refuses it with
+  `undefined function 'fd_wait_ready'`. Verified by compiling a consumer
+  of the bundle with each toolchain's own `cycc` and stdlib: 6.6.12
+  fails, 6.6.13, 6.7.5 (mabda's pin) and 6.7.18 build. **Migration:**
+  move your pin to 6.6.13 or later (`docs/guides/consumer-link.md`
+  § Upgrading from 1.1.1 to 1.1.2).
+- **`samvada_init` (native) says why the SASL exchange failed.** Through
+  1.1.1 the SASL loop answered `-13` for a server that closed, a receive
+  error, `EINTR`, a reply split over more than 32 reads, and `REJECTED`
+  alike (an expired receive was already `-110`); now a server that
+  closed is `-104`, a receive error its errno, `EINTR` a retry, a slow
+  server waits to the deadline (`-110`), a buffer that filled `-71`, and
+  `-13` means only that the bus refused authentication. A Hello reply that names no `:` unique name, and a
+  `GetSessionByPID` reply that is not an `o` holding a valid object path,
+  are `-71`. **Migration:** a consumer that branched on `-13` for "could
+  not connect" should branch on `< 0`.
+- **`samvada_pump_signals()` (native) returns receive errors.** It
+  returned 0 for any receive error but a disconnect, so a pump on a
+  descriptor gone bad reported a quiet bus for ever. **Migration:** treat
+  any negative pump as an error, as the docs always said.
+- **The C shim opens its own connection** (`sd_bus_open_system`, closed
+  with `sd_bus_flush_close_unref`), not the thread's shared default bus.
+  Code in the consumer that used `sd_bus_default_system` no longer shares
+  samvada's connection — or its session control. **Migration:** none, unless
+  something relied on that sharing.
+
+### Security
+- **A descriptor on a message samvada could not parse stayed queued
+  for the next `TakeDevice`** (P1-1, HIGH). Descriptors were attributed
+  to messages by each message's own `UNIX_FDS` field, and a message whose
+  header samvada could not walk — any big-endian message, or one with an
+  unknown field type ahead of `UNIX_FDS` — counted as carrying none. Any
+  local user can send samvada such a directed signal with a descriptor
+  attached; the next `take_device` returned that descriptor, with
+  success, and logind's went to the next take, for another device. The
+  bug class of CVE-2022-42012; the C shim was never affected. Now every
+  read stops at the end of the message at the head of the buffer — sd-bus's
+  own rule — so a message's descriptors are exactly those that arrived
+  with its bytes, and consuming a message closes every one it did not
+  hand out. Nothing about the message is consulted. `take_device` takes
+  the reply's `h` index (it was ignored) and requires a `(hb)` body, a
+  `UNIX_FDS` equal to what arrived, and an untruncated set.
+- **A signal carrying three descriptors closed samvada's bus** (P1-2).
+  The control buffer held one; the truncation branch dropped the bytes
+  and answered `-EPROTO`, a disconnect. It holds `SCM_MAX_FD` (253) now,
+  delivers every descriptor, and a truncation keeps the bytes.
+- **64 one-descriptor signals ahead of a reply failed the call** (P1-3).
+  The call's 64-read budget is gone: its deadline is its only bound, and
+  every wait is a poll for the time that is left — which also ends a
+  call at its deadline, not up to one `SO_RCVTIMEO` (25 s) past it.
+- **An over-cap message straddling a send made the genuine reply
+  "stale"** (P1-4). The send-time watermark is a stream position now.
+- **One signal to the consumer failed its call** (P1-5): `SO_RCVTIMEO`
+  stops the kernel restarting an interrupted receive. EINTR is retried
+  on the call path and in the handshake, under the deadline.
+- **The public-surface and boundary gates missed a `public fn` written
+  after other code on the same line** (P1-6). Both read code through
+  `tools/cyr_scan.py` now — comments and strings blanked, declarations
+  matched anywhere, every `fn` and `public` token accounted for — and
+  CI plants a same-line export and requires the gate to fail.
+- **The spawn scan could be walked past** (P1-14): `SYS_execve` /
+  `__NR_execve`, `execvpe`, `posix_spawnp`, `clone`, hex syscall numbers,
+  `&sys_execve`, and any code on a line starting `#` or `*`. It is
+  `tools/security_scan.py`, with each bypass a positive control.
+- **`tools/dbus_tap.py`'s socket was reachable under the default
+  umask** (P1-17), and its upstream connection authenticates as its user.
+  It is 0600 under umask 077, captures included.
+
+### Fixed
+- **A take that failed after logind granted it could later revoke a
+  live device** (P1-8). The public layer counted held devices; a release
+  of a device it never counted could bring the count to 0 and drop
+  control, which revokes every device. It holds devices by number now,
+  refuses a second take of a held device (`-22`, logind's
+  `DeviceIsTaken`), and puts logind's view back in step after a failed
+  take — for both backends, including the shim's `F_DUPFD_CLOEXEC`
+  failure.
+- **Control was taken before device numbers were range-checked** (P1-7);
+  `TakeControl` mutes a seated VT. They are checked first.
+- **A failed `ReleaseControl` was forgotten** (P1-9), leaving the console
+  muted; it is retried, and `TakeControl` re-sent whenever nothing is
+  held (logind answers it idempotently).
+- **A request was still sent on a stream that can no longer be framed**
+  (P1-11). It is refused, with the fault's errno.
+- **Re-initialising leaked queued descriptors**; **the pump swallowed
+  receive errors** and now returns them, and drains until the socket is
+  empty (256 events / 1024 reads per call); **a bus socket on fd 0** read
+  as "no bus" and leaked — it is moved above stdio (P1-12).
+- **The C shim shared the thread's default bus**, so other code using
+  it shared samvada's session control, and its close did not close it.
+  It opens a private connection and flush-closes it (P1-12).
+- **Parsers** (P1-13): a header field of any basic type is stepped over
+  (only `s`/`o`/`u`/`g` were); a defined field with the wrong type is
+  malformed, as in sd-bus; the limit is checked before `fields_len` is
+  read; `AGREE_UNIX_FD` without a prior `OK` is an error; a signature over
+  255 bytes poisons the message; a malformed `inactive` no longer reaches
+  `active_out` as `-1201`.
+- **No gate checked what the shim stores at each slot** (P1-15).
+  `tools/shim_slot_check.c` links the shim against a fake libsystemd and
+  calls every slot; its swapped-table control must fail. **The corpus
+  gate** now checks each fixture's sha256 against `MANIFEST.md`.
+- **Tests that could not fail** (P1-16) assert what they claim, and a
+  test that wrote 4 bytes past its buffer no longer does.
+- **Verified live, unseated**: `samvada_native_init` →
+  `samvada_pump_signals` ×2 → `samvada_release` → re-init against this
+  host's system bus (dbus-broker 37), from the 1.1.2 bundle: every call
+  0. No session control is taken on that path (ADR-0004); `TakeDevice`
+  still has never run on a seat (the CG lane).
+- `tools/differential/` compares a successful take as success, not as
+  two descriptor numbers, closes it, and refuses to run without
+  `SAMVADA_DIFF_TAKES_CONTROL=1` — it takes session control.
+
+- **What the re-verification found in the repairs themselves**, and
+  fixed (P(-1) audit § Re-verification). Five fresh reviewers broke the
+  repaired tree in 34 confirmed ways, none of them a way to misattribute a
+  descriptor — every H1 variant they replayed returned the reply's own:
+  - `take_device` now checks the descriptor **is** the device asked for —
+    a character device whose rdev is `(major, minor)`, by `statx`, open
+    read-write and not `O_PATH`, as logind opens it — so a wrong
+    attribution can no longer hand out a different device, a socket, or a
+    descriptor nobody could read. It proves identity, not provenance: a
+    descriptor naming the same node, opened read-write by someone allowed
+    to, still passes, and the attribution fix is what keeps one from
+    being handed out.
+  - A received descriptor never lands on 0..2 (the shim's
+    `F_DUPFD_CLOEXEC` minimum is 3 too): with stdout closed, a device on 1
+    would have taken every later print.
+  - The send is under the deadline too: a broker that stopped reading
+    blocked a call for ever once the send buffer filled. Every send is
+    non-blocking with a poll for writability for the time left, and
+    `SO_SNDTIMEO` (25 s) is the backstop; a request cut off part-way, for
+    any reason, latches the connection closed.
+  - A readable-but-empty socket (one `MSG_OOB` byte) no longer blocks a
+    call past its deadline — it hung for ever without `SO_RCVTIMEO`; a
+    clock that fails mid-call ends it instead of polling for ~24 days.
+  - The SASL handshake is bounded by the deadline alone (it kept a
+    32-read cap, which EINTR used up) and says why it failed: `-110`,
+    `-104`, `-71` or the errno, where its loop said `-13`. `OK` needs a
+    32-hex GUID. The handshake and Hello now run over a socketpair in
+    the tests.
+  - Every message the reply loop considers is validated whole first —
+    no code 0, no defined field twice, NUL-terminated strings, valid
+    object paths — so acceptance no longer depends on field order. The
+    Hello reply must name a `:` unique name; GetSessionByPID must answer
+    an `o` holding a valid path; a session path must be one.
+  - **The public layer**: a release forgets the device whatever logind
+    answers, so a device logind already dropped (hot-unplug) no longer
+    pins control for ever; a take that times out with other devices held
+    sends nothing more to a logind that is not answering, while a timed-out
+    *first* take still hands control back, so the console is not left
+    muted (ADR-0004); a timed-out `TakeControl` is remembered;
+    `release_device` range-checks; a negative descriptor with a success
+    code is `-9`; a 257th held device is refused, `-24` (`-EMFILE`).
+  - **The gates**: attribute directives (`#must_use public fn …`) and
+    `pub` no longer hide declarations; the errno map is asserted from the
+    fixture file at run time; syscall numbers are allow-listed, not
+    pattern-matched; the shim object's undefined symbols are allow-listed;
+    `shim_slot_check` checks every call's arguments. The bundle, compiled
+    as a consumer links it, must reference no external symbol (`nm -u`
+    empty), and the shim's undefined symbols must all be on
+    `tools/shim_symbols.txt`. Every bypass the reviewers demonstrated is a
+    planted violation in CI or a `--self-test`, which must fail for its own
+    reason. After the final pass: `cyr_scan` applies cycc's own `#` rule
+    (a `#word` comment or a `#define` holding a quote had hidden code from
+    every gate); `[deps].stdlib` is frozen (`tools/stdlib_allowed.txt`) and
+    modules that fork, exec or map executable memory are refused by name;
+    the syscall allow-list is positive and `mmap` / `mprotect` are refused;
+    `#derive`, `enum` and `#define` are refused in the bundle; the shim may
+    include only system headers and its objects may contain no syscall
+    instruction; `shim_slot_check`'s fake libsystemd can fail, pinning the
+    shim's error paths.
+  - A pidfd from `SO_PASSPIDFD` is closed, not leaked.
+
+### Changed
+- **Two receives per message.** Bounding every read to one message costs
+  a second `recvmsg` per message, and the call path a `poll` per wait —
+  the read pattern sd-bus uses. Over a socketpair (`tools/rxbench.cyr`),
+  three rounds alternating with 1.1.1, median (range): draining signals
+  **486 (479–501) → 2133 (2113–2138) ns per message**; a call whose reply
+  is already waiting **6.5 (6.46–6.64) → 14.2 (13.94–14.43) µs**; an idle
+  pump **652 (649–656) → 649 (638–653) ns** — flat once every receive
+  stopped clearing all 1032 bytes of its control buffer, which cost
+  ~150 ns. Against a logind round trip of well over 100 µs, and logind's
+  handful of signals per VT switch. The four CPU baselines are flat
+  (docs/benchmarks.md, Run 10).
+- The 1.0.1 parse-based descriptor dropping (`_dbs_unix_fds`,
+  `_dbs_drop_n`, `dbus_session_drop_fds_of`) is deleted; the one-fd
+  receive (`dbus_sys_recv_fd`, `dbus_sys_recv_fd_flags`,
+  `dbus_sys_parse_scm_rights`) is replaced by `dbus_sys_recv` and
+  `dbus_sys_parse_rights`; `dbus_socket_write_all` and
+  `dbus_frame_maybe_compact` are replaced by the deadline-bounded
+  `_dbs_write` and `dbus_frame_prepare`; the connect handshake is split
+  into `dbus_session_sasl` and `dbus_session_hello`, so the tests drive
+  it over a socketpair. All internal.
+
+### Removed
+- Dead code: `dbus_auth_no_fds` (never produced), `dbus_frame_ok`,
+  `dbus_frame_msg_flags`, `dbus_unmarshal_ok`, `dbus_unmarshal_flags`,
+  `dbus_session_unique`, `dbus_session_unique_len`,
+  `dbus_session_last_error` (and the state it read). The floor that
+  remains: 24 fns are reached only from tests — layout pins, test
+  hooks (`dbus_session_set_timeout_ms`, `dbus_session_fail_clock_after`,
+  `dbus_frame_moved`, ...) and
+  message builders — deliberately.
+
+### Documentation
+- `SECURITY.md` and the roadmap said a big-endian peer "fails safe"; its
+  descriptors were P1-1. True now, and both say since when.
+  `public-api.md` said logind accepts `ReleaseDevice` for a device never
+  taken: it answers `DeviceNotTaken` (`-22`). `CLAUDE.md` called
+  `objcopy -L` required; only below cyrius 6.6.2. `SECURITY.md`'s
+  supported-versions table still named 1.0.x current. Thirteen more
+  claims the repairs made false are corrected (counts, the device
+  counter, the auth rule, the differential's role), and `public-api.md`
+  records the native backend's per-case divergence from libsystemd on a
+  malformed `TakeDevice` reply, measured.
+- The roadmap's upstream-issue lines are gone: the roadmap holds
+  samvada's own work.
+
 ## [1.1.1] — 2026-10-29
 
 **The A lane, closed with evidence.** The roadmap's four open A items
@@ -162,8 +402,7 @@ signatures and the C shim unchanged. 879 asserts (was 586).
   every fn as a GLOBAL DEFAULT symbol on 6.7.18, the private ones
   included, although the cyrius guide says private fns are omitted
   from the exported symbol table. C code linked against the object can
-  therefore still declare an internal `extern`. Worth filing with
-  cyrius.
+  therefore still declare an internal `extern`.
 - **Corrupt-stream divergence, kept and documented.** A bad endian byte
   is -71 (`EPROTO`) here and -74 (`EBADMSG`) in sd-bus. On a bad
   protocol version, sd-bus drops the message and samvada fails the

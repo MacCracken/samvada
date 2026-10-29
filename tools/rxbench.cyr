@@ -1,0 +1,131 @@
+# @internal — receive-path microbench (1.1.2), not part of any build or gate
+# rxbench.cyr — what bounded reads cost, over a socketpair, no bus needed:
+#   idle_pump_ns      samvada_pump_signals() with nothing to read
+#   drain_ns_per_msg  draining small PauseDevice-shaped signals, per message
+#   call_ns           dbus_session_call() whose reply is already waiting
+#
+# Run from the repo root:
+#   cyrius build tools/rxbench.cyr build/rxbench && ./build/rxbench
+# For a comparison, build the same file against another tree's src/ (the
+# internal API it uses is unchanged since 1.1.1). docs/benchmarks.md Run 10
+# has the 1.1.1 → 1.1.2 numbers; the four CPU baselines are tests/samvada.bcyr.
+include "src/lib.cyr"
+include "src/dbus_sys.cyr"
+include "src/dbus_frame.cyr"
+include "src/dbus_auth.cyr"
+include "src/dbus_socket.cyr"
+include "src/dbus_marshal.cyr"
+include "src/dbus_unmarshal.cyr"
+include "src/dbus_session.cyr"
+
+var _ts = 0;
+fn now_ns() {
+    if (_ts == 0) { _ts = alloc(16); }
+    syscall(228, 1, _ts);
+    return load64(_ts) * 1000000000 + load64(_ts + 8);
+}
+
+fn pair() {
+    var p = alloc(8);
+    store64(p, 0);
+    sys_socketpair(1, 1, 0, p);
+    return load64(p);
+}
+
+fn build_signal(w) {
+    dbus_marshal_begin(dbus_marshal_type_signal(), 1, 9100);
+    var pth = "/org/freedesktop/login1/session/_31";
+    dbus_marshal_field_str(dbus_marshal_f_path(), 111, pth, strlen(pth));
+    var m = "PauseDevice";
+    dbus_marshal_field_str(dbus_marshal_f_member(), 115, m, strlen(m));
+    var sg = "uus";
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), sg, 3);
+    dbus_marshal_end_fields();
+    dbus_marshal_body_u32(226);
+    dbus_marshal_body_u32(0);
+    var k = "pause";
+    dbus_marshal_body_str(k, strlen(k));
+    dbus_marshal_finish();
+    var n = dbus_marshal_len();
+    var i = 0;
+    while (i < n) { store8(w + i, load8(dbus_marshal_buf() + i)); i = i + 1; }
+    return n;
+}
+
+fn build_reply(w, rser) {
+    dbus_marshal_begin(dbus_marshal_type_return(), 1, 5000);
+    dbus_marshal_field_u32(dbus_marshal_f_replyser(), rser);
+    dbus_marshal_end_fields();
+    dbus_marshal_finish();
+    var n = dbus_marshal_len();
+    var i = 0;
+    while (i < n) { store8(w + i, load8(dbus_marshal_buf() + i)); i = i + 1; }
+    return n;
+}
+
+fn main() {
+    alloc_init();
+    var bus = pair();
+    var a = bus & 0xFFFFFFFF;
+    var b = (bus >> 32) & 0xFFFFFFFF;
+    dbus_session_reset();
+    dbus_frame_init();
+    var w = alloc(512);
+    var drain = alloc(65536);
+
+    # (1) idle pump
+    var k = 0;
+    while (k < 1000) { dbus_native_pump_signals(b); k = k + 1; }
+    var t0 = now_ns();
+    k = 0;
+    while (k < 100000) { dbus_native_pump_signals(b); k = k + 1; }
+    var idle = (now_ns() - t0) / 100000;
+
+    # (2) drain 100 signals at a time, 50 rounds (a unix socket queues
+    # ~200 small writes before a writer blocks)
+    var n = build_signal(w);
+    var total = 0;
+    var msgs = 0;
+    var r = 0;
+    while (r < 50) {
+        var i = 0;
+        while (i < 100) { sys_write(a, w, n); i = i + 1; }
+        var t1 = now_ns();
+        var got = 1;
+        var seen = 0;
+        while (got > 0) {
+            got = dbus_native_pump_signals(b);
+            if (got > 0) { seen = seen + got; }
+        }
+        total = total + (now_ns() - t1);
+        msgs = msgs + seen;
+        r = r + 1;
+    }
+    var per_msg = total / msgs;
+
+    # (3) a call whose reply is already planted, 2000 times
+    var calls = 0;
+    var ctime = 0;
+    var serial = 1;
+    while (calls < 2000) {
+        var rn = build_reply(w, serial);
+        sys_write(a, w, rn);
+        build_reply(drain, serial);          # leave a valid message to "send"
+        var t2 = now_ns();
+        var rc = dbus_session_call(b, serial);
+        if (rc == 0) { dbus_session_done(); }
+        ctime = ctime + (now_ns() - t2);
+        sys_read(a, drain, 65536);           # discard the request samvada sent
+        serial = serial + 1;
+        calls = calls + 1;
+    }
+    var per_call = ctime / calls;
+
+    print("idle_pump_ns ", 13); print_num(idle); println("");
+    print("drain_ns_per_msg ", 17); print_num(per_msg); print(" msgs ", 6); print_num(msgs); println("");
+    print("call_ns ", 8); print_num(per_call); println("");
+    return 0;
+}
+
+var rc = main();
+syscall(60, rc);

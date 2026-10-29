@@ -1,0 +1,39 @@
+# samvada — every external symbol deps/samvada_main.c may reference.
+# One symbol per line, then why. CI's C-shim job compiles the shim in both
+# modes and fails if `nm -u` on either object names anything not listed.
+#
+# 1.1.2 (P(-1) re-verification). tools/security_scan.py reads the shim's
+# TEXT, and text can be walked past: a fn pointer (`= execve;`), token
+# pasting (`exe##cve`), a spawning libc call missing from its list
+# (daemon, forkpty, wordexp, _Fork, dlsym("system")) each compiled to a
+# `U <name>` the scan never saw. The object does not care how a call was
+# spelled. A new external call therefore needs a row here, in review.
+#
+# Derived from the objects gcc 16.2 builds from the shim at -O0 (what CI
+# compiles), -O2, -O3 and -Os, with and without -D_FORTIFY_SOURCE=3 and
+# -fstack-protector-strong, in library and -DSAMVADA_STANDALONE_MAIN mode:
+# the union of their `nm -u`, nothing added.
+
+# ---- libsystemd: the sd-bus calls the shim makes ----
+sd_bus_open_system          slot 0: a private system-bus connection
+sd_bus_call_method          GetSessionByPID, TakeDevice, ReleaseDevice, TakeControl, ReleaseControl
+sd_bus_message_read         reply decode: "o" (the session path), "hb" (fd, inactive)
+sd_bus_message_unref        drops each reply
+sd_bus_error_free           drops each sd_bus_error
+sd_bus_process              slot 32: the bounded signal pump
+sd_bus_flush_close_unref    slot 40: closes the private connection
+sd_bus_match_signal         slot 48: the PauseDevice / ResumeDevice match
+sd_bus_slot_unref           slot 56: drops a match
+
+# ---- libc ----
+fcntl                       F_DUPFD_CLOEXEC: the device fd's close-on-exec duplicate (floor 3)
+__errno_location            `errno`, captured after a failed fcntl
+memcpy                      copies the session path out (sb_get_session_path)
+memset                      zeroes the static fn table (samvada_shim_init); a call at -O0
+strlen                      the session path's length
+__stack_chk_fail            -fstack-protector (the distro gcc default): the canary-failure abort
+
+# ---- the Cyrius side, defined in the consumer's Cyrius object ----
+samvada_main                the Cyrius entry samvada_shim_init hands the table to
+_cyrius_init                -DSAMVADA_STANDALONE_MAIN only: the Cyrius runtime init
+alloc_init                  -DSAMVADA_STANDALONE_MAIN only: the Cyrius heap init

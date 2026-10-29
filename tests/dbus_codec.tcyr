@@ -468,6 +468,164 @@ fn test_unmarshal_bounds_fail_closed() {
     return 0;
 }
 
+# ---- P(-1) (1.1.2): the field walk ----
+# A header field of a type the walk had no case for ('y', 't', ...)
+# stopped it as "malformed", so whatever followed was unreachable — the
+# way a message hid its UNIX_FDS. Fields of every basic type are now
+# stepped over; a defined field of the wrong type is malformed, as in
+# sd-bus; a container-typed field is refused.
+fn t_field(p, at, code, sigch) {
+    store8(p + at, code); store8(p + at + 1, 1); store8(p + at + 2, sigch); store8(p + at + 3, 0);
+    return 0;
+}
+
+fn test_field_walk_steps_over_every_basic_type() {
+    test_group("unmarshal: unknown fields of any basic type are stepped over");
+    var m = alloc(128);
+    var sig = alloc(8);
+    # [200:'y' at 16][201:'t' at 24, value 8-aligned at 32][202:'n' at 40][UNIX_FDS:'u' at 48]
+    t_zero(m, 128);
+    t_hdr(m, 0, 40);
+    t_field(m, 16, 200, 121); store8(m + 20, 7);
+    t_field(m, 24, 201, 116); t_u32(m, 32, 5);
+    t_field(m, 40, 202, 110); store8(m + 44, 9);
+    t_field(m, 48, 9, 117); t_u32(m, 52, 1);
+    dbus_unmarshal_set_limit(56);
+    var off = dbus_unmarshal_find_field(m, dbus_marshal_f_unixfds(), sig);
+    assert_eq(off, 52, "THE PIN: UNIX_FDS is found past 'y', 't' and 'n' fields");
+    assert_eq(dbus_unmarshal_u32(m, off), 1, "with its value");
+
+    # A defined field with the wrong type: REPLY_SERIAL as 's'. It was read
+    # as a u32 — the string's length.
+    t_zero(m, 128);
+    t_hdr(m, 0, 16);
+    t_field(m, 16, 5, 115); t_u32(m, 20, 3); store8(m + 24, 65);
+    dbus_unmarshal_set_limit(32);
+    assert_eq(dbus_unmarshal_find_field(m, dbus_marshal_f_replyser(), sig),
+      dbus_unmarshal_malformed(), "THE PIN: REPLY_SERIAL typed 's' is malformed");
+
+    # A container: siglen 2, "ay".
+    t_zero(m, 128);
+    t_hdr(m, 0, 16);
+    store8(m + 16, 200); store8(m + 17, 2); store8(m + 18, 97); store8(m + 19, 121); store8(m + 20, 0);
+    dbus_unmarshal_set_limit(32);
+    assert_eq(dbus_unmarshal_find_field(m, dbus_marshal_f_unixfds(), sig),
+      dbus_unmarshal_malformed(), "a container-typed field is refused, fail-closed");
+
+    # A type that is not a type.
+    t_zero(m, 128);
+    t_hdr(m, 0, 8);
+    t_field(m, 16, 200, 63);
+    dbus_unmarshal_set_limit(24);
+    assert_eq(dbus_unmarshal_find_field(m, dbus_marshal_f_unixfds(), sig),
+      dbus_unmarshal_malformed(), "an unknown type code is malformed");
+
+    # No limit: refused before the header is read.
+    dbus_unmarshal_set_limit(0);
+    assert_eq(dbus_unmarshal_find_field(m, dbus_marshal_f_unixfds(), sig),
+      dbus_unmarshal_malformed(), "an unset limit is malformed");
+    dbus_unmarshal_set_limit(12);
+    assert_eq(dbus_unmarshal_find_field(m, dbus_marshal_f_unixfds(), sig),
+      dbus_unmarshal_malformed(), "a limit shorter than the header is malformed");
+    return 0;
+}
+
+fn test_marshal_refuses_a_long_signature() {
+    test_group("marshal: a signature over 255 bytes poisons the message");
+    var g = alloc(300);
+    var i = 0;
+    while (i < 300) { store8(g + i, 117); i = i + 1; }
+    dbus_marshal_begin(dbus_marshal_type_call(), 0, 1);
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), g, 255);
+    assert_eq(dbus_marshal_bad(), 0, "255 bytes is the limit, and allowed");
+    dbus_marshal_begin(dbus_marshal_type_call(), 0, 1);
+    dbus_marshal_field_sig(dbus_marshal_f_signature(), g, 256);
+    assert_eq(dbus_marshal_bad(), 1,
+      "THE PIN: 256 poisons it (it was written with a length byte of 0)");
+    return 0;
+}
+
+# ---- 1.1.2 re-verification: the whole field array, validated once ----
+# As sd-bus's bus_message_parse_fields: no code 0, no defined field
+# twice, strings/paths/signatures NUL-terminated with no NUL inside, and
+# valid object paths. find_field stopped at the first match, so a message
+# with junk after the field asked for was accepted.
+fn t_vmsg(m, body) {
+    # [PATH "/a" at 16][body-supplied field at 32]
+    t_zero(m, 128);
+    t_field(m, 16, 1, 111); t_u32(m, 20, 2); store8(m + 24, 47); store8(m + 25, 97);
+    return 0;
+}
+
+fn test_validate_the_whole_field_array() {
+    test_group("unmarshal: validate refuses what sd-bus refuses, wherever it sits");
+    var m = alloc(128);
+    # Well-formed: the marshaller's own Hello.
+    t_build_hello();
+    dbus_unmarshal_set_limit(dbus_marshal_len());
+    assert_eq(dbus_unmarshal_validate(dbus_marshal_buf()), 0, "the captured Hello validates");
+
+    # PATH "/a" (16..26), then MEMBER "Ping" (32..44): fields_len 29.
+    t_vmsg(m, 0); t_hdr(m, 0, 29);
+    t_field(m, 32, 3, 115); t_u32(m, 36, 4);
+    store8(m + 40, 80); store8(m + 41, 105); store8(m + 42, 110); store8(m + 43, 103);
+    dbus_unmarshal_set_limit(48);
+    assert_eq(dbus_unmarshal_validate(m), 0, "PATH + MEMBER validates");
+    # The same, MEMBER's NUL terminator replaced.
+    store8(m + 44, 33);
+    assert_eq(dbus_unmarshal_validate(m), dbus_unmarshal_malformed(), "THE PIN: a string with no NUL is malformed");
+    # An embedded NUL.
+    store8(m + 44, 0); store8(m + 41, 0);
+    assert_eq(dbus_unmarshal_validate(m), dbus_unmarshal_malformed(), "an embedded NUL is malformed");
+
+    # A second PATH ("/b", 32..42: fields_len 27).
+    t_vmsg(m, 0); t_hdr(m, 0, 27);
+    t_field(m, 32, 1, 111); t_u32(m, 36, 2); store8(m + 40, 47); store8(m + 41, 98);
+    dbus_unmarshal_set_limit(48);
+    assert_eq(dbus_unmarshal_validate(m), dbus_unmarshal_malformed(), "THE PIN: a defined field twice is malformed");
+    # Code 0 (INVALID), a 'y' at 32..36: fields_len 21.
+    t_vmsg(m, 0); t_hdr(m, 0, 21);
+    t_field(m, 32, 0, 121);
+    dbus_unmarshal_set_limit(48);
+    assert_eq(dbus_unmarshal_validate(m), dbus_unmarshal_malformed(), "code 0 is malformed");
+    # An unknown code twice is fine: only defined fields are unique
+    # ('y' at 32..36 and 40..44: fields_len 29).
+    t_vmsg(m, 0); t_hdr(m, 0, 29);
+    t_field(m, 32, 200, 121); t_field(m, 40, 200, 121);
+    dbus_unmarshal_set_limit(56);
+    assert_eq(dbus_unmarshal_validate(m), 0, "an unknown code twice validates");
+    # An invalid object path in PATH.
+    t_zero(m, 128); t_hdr(m, 0, 11);
+    t_field(m, 16, 1, 111); t_u32(m, 20, 2); store8(m + 24, 47); store8(m + 25, 47);
+    dbus_unmarshal_set_limit(32);
+    assert_eq(dbus_unmarshal_validate(m), dbus_unmarshal_malformed(), "PATH '//' is malformed");
+    # A signature with no NUL.
+    t_zero(m, 128); t_hdr(m, 0, 8);           # 'g' "hb": 20..23
+    t_field(m, 16, 8, 103); store8(m + 20, 2); store8(m + 21, 104); store8(m + 22, 98); store8(m + 23, 88);
+    dbus_unmarshal_set_limit(24);
+    assert_eq(dbus_unmarshal_validate(m), dbus_unmarshal_malformed(), "a signature with no NUL is malformed");
+    store8(m + 23, 0);
+    assert_eq(dbus_unmarshal_validate(m), 0, "and with it, valid");
+    return 0;
+}
+
+fn test_object_path_rules() {
+    test_group("unmarshal: object paths, as the D-Bus spec defines them");
+    var p = alloc(64);
+    assert_eq(dbus_unmarshal_path_ok(p, t_put(p, "/")), 1, "/");
+    assert_eq(dbus_unmarshal_path_ok(p, t_put(p, "/org/freedesktop/login1/session/_31")), 1, "a session path");
+    assert_eq(dbus_unmarshal_path_ok(p, t_put(p, "/A_z/0_9")), 1, "every allowed class");
+    assert_eq(dbus_unmarshal_path_ok(p, 0), 0, "empty");
+    assert_eq(dbus_unmarshal_path_ok(p, t_put(p, "org")), 0, "relative");
+    assert_eq(dbus_unmarshal_path_ok(p, t_put(p, "/org/")), 0, "trailing slash");
+    assert_eq(dbus_unmarshal_path_ok(p, t_put(p, "/org//x")), 0, "empty segment");
+    assert_eq(dbus_unmarshal_path_ok(p, t_put(p, "/org.x")), 0, "'.'");
+    assert_eq(dbus_unmarshal_path_ok(p, t_put(p, "/org-x")), 0, "'-'");
+    store8(p, 47); store8(p + 1, 0); store8(p + 2, 97);
+    assert_eq(dbus_unmarshal_path_ok(p, 3), 0, "an embedded NUL");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_audit_hostile_lengths_refused();
@@ -484,6 +642,10 @@ fn main() {
     test_malformed_field_array();
     test_marshal_refuses_out_of_range_lengths();
     test_unmarshal_bounds_fail_closed();
+    test_field_walk_steps_over_every_basic_type();
+    test_marshal_refuses_a_long_signature();
+    test_validate_the_whole_field_array();
+    test_object_path_rules();
     return assert_summary();
 }
 

@@ -38,19 +38,33 @@ var _samvada_outs  = 0;     # heap ptr to 16-byte (fd_out, active_out) scratch
 # KDSETMODE=KD_GRAPHICS (console blanks). Taking control at init therefore
 # muted the user's console before any device was requested, and left it muted
 # if the take then failed. See ADR-0004.
-var _samvada_control = 0;   # 1 once TakeControl has succeeded
-var _samvada_devices = 0;   # count of devices currently held
+# 0: control is not held. 1: held. 2: it MAY be held — a TakeControl or
+# ReleaseControl timed out, so logind's state is unknown and logind is
+# not answering (1.1.2). ReleaseControl is owed in states 1 and 2.
+var _samvada_control = 0;
+# The devices we hold, by number (1.1.2). Until then this was a bare count,
+# and a count cannot tell WHICH device a release is for: a take that failed
+# on our side after logind granted it, followed by a release of that
+# device, decremented the count for a device it never counted — and when
+# the count reached 0 samvada dropped control, which revokes every device,
+# including the one the consumer was still drawing to.
+var _samvada_held  = 0;     # heap: (major << 32) | minor, one word each
+var _samvada_heldn = 0;
 
 # Sized to fit any logind session path (`/org/freedesktop/login1/session/_NN`
 # is ~46 chars; 512 leaves headroom for any future scheme).
 var _SAMVADA_SESS_BUFLEN = 512;
 var _SAMVADA_OUTS_BUFLEN = 16;
 
+# A compositor holds a DRM node and its input devices; 256 is far past
+# any seat, and a fixed table is the only kind alloc() does not leak.
+fn _samvada_held_cap() { return 256; }
+
 # Version triple packed into a u32 (major << 16 | minor << 8 | patch).
 # Bumps lock-step with VERSION; consumers can do
 # `if (samvada_version() < ((1<<16)|(0<<8)|0)) { ... }` for gates.
 public fn samvada_version() {
-    return (1 << 16) | (1 << 8) | 1;
+    return (1 << 16) | (1 << 8) | 2;
 }
 
 # ---- private helpers ----
@@ -62,6 +76,51 @@ fn _samvada_have_table() {
 
 fn _samvada_slot(off) {
     return samvada_ffi_get_slot(_samvada_table, off);
+}
+
+# dbus carries device numbers as `u`. Checked HERE, before any wire
+# traffic (1.1.2): both backends check too, but only after the public
+# layer had already sent TakeControl — muting a seated VT for a request
+# that could never have been made.
+fn _samvada_devnum_ok(v) {
+    if (v < 0)          { return 0; }
+    if (v > 4294967295) { return 0; }         # UINT32_MAX
+    return 1;
+}
+
+fn _samvada_held_find(major, minor) {
+    var key = (major << 32) | minor;
+    var i = 0;
+    while (i < _samvada_heldn) {
+        if (load64(_samvada_held + i * 8) == key) { return i; }
+        i = i + 1;
+    }
+    return (0 - 1);
+}
+
+fn _samvada_held_add(major, minor) {
+    if (_samvada_heldn >= _samvada_held_cap()) { return -24; }
+    store64(_samvada_held + _samvada_heldn * 8, (major << 32) | minor);
+    _samvada_heldn = _samvada_heldn + 1;
+    return 0;
+}
+
+fn _samvada_held_del(i) {
+    if (i < 0) { return 0; }
+    if (i >= _samvada_heldn) { return 0; }
+    var last = _samvada_heldn - 1;
+    store64(_samvada_held + i * 8, load64(_samvada_held + last * 8));
+    _samvada_heldn = last;
+    return 0;
+}
+
+# Is this the bus itself failing, rather than logind refusing? Then no
+# follow-up call is worth making on it.
+fn _samvada_bus_failed(rc) {
+    if (rc == -104) { return 1; }             # ECONNRESET
+    if (rc == -107) { return 1; }             # ENOTCONN
+    if (rc == -110) { return 1; }             # ETIMEDOUT
+    return 0;
 }
 
 # ---- public API ----
@@ -99,6 +158,11 @@ public fn samvada_init(table) {
         _samvada_outs = alloc(_SAMVADA_OUTS_BUFLEN);
         if (_samvada_outs == 0) { samvada_release(); return -12; }
     }
+    if (_samvada_held == 0) {
+        _samvada_held = alloc(_samvada_held_cap() * 8);
+        if (_samvada_held == 0) { samvada_release(); return -12; }
+    }
+    _samvada_heldn = 0;
     # Zero the scratch on every init so stale data from a previous
     # cycle never leaks into a successful read.
     var i = 0;
@@ -145,27 +209,69 @@ public fn samvada_init(table) {
     return 0;
 }
 
-# Acquire session control if we do not already hold it. Returns 0 if control
-# is held on return (whether or not we acquired it just now), 1 if we
-# acquired it on THIS call, or a negative errno.
+# Take session control. Sent whenever no device is held, even if a
+# previous ReleaseControl failed and control may still be ours: logind
+# answers success when the caller already is the controller
+# (session_set_controller: `if (session_is_controller(s, sender)) return
+# 0;`), so asking again is free and it means a failed release can never
+# leave samvada believing it holds control it lost.
+#
+# A TakeControl that TIMES OUT may still have been granted — logind may
+# have muted the console and answered late — so it is recorded as
+# "may be held" (state 2), and a ReleaseControl is owed (1.1.2: it was
+# forgotten, and only the connection's close restored the VT).
 fn _samvada_take_control() {
-    if (_samvada_control != 0) { return 0; }
     var tc_slot = _samvada_slot(samvada_slot_take_control());
     if (tc_slot == 0) { return -38; }
     var rc = fncall2(tc_slot, _samvada_bus, _samvada_sess);
+    if (rc == -110) {
+        if (_samvada_control == 0) { _samvada_control = 2; }
+        return rc;
+    }
     if (rc < 0) { return rc; }
     _samvada_control = 1;
-    return 1;
+    return 0;
 }
 
-# Drop session control if held. logind restores the VT (session_restore_vt)
-# when the controller is released, so this is what un-mutes the console.
-fn _samvada_drop_control() {
+# Drop session control if it is, or may be, held. logind restores the
+# VT (session_restore_vt) when the controller is released, so this is
+# what un-mutes the console.
+#
+# What a failed ReleaseControl leaves (1.1.2):
+#   timed out (-110)            state 2: logind is not answering; asked
+#                               again at the next last-device release
+#   NotInControl (-22), or the  state 0: control is not ours, or the
+#   bus gone (-104 / -107)      connection's close released it
+#   anything else               kept: asked again at the next last-device
+#                               release, or at samvada_release
+# At `closing` (samvada_release), a controller logind did not answer last
+# time is not asked again: the connection is about to close, and closing
+# it releases control — logind tracks its controller's bus name — so the
+# call would only add another full budget to the release.
+fn _samvada_drop_control(closing) {
     if (_samvada_control == 0) { return 0; }
+    if (closing != 0) {
+        if (_samvada_control == 2) {
+            _samvada_control = 0;
+            return 0;
+        }
+    }
     var rc_slot = _samvada_slot(samvada_slot_release_control());
-    if (rc_slot != 0) { fncall2(rc_slot, _samvada_bus, _samvada_sess); }
-    _samvada_control = 0;
-    return 0;
+    var rc = 0;
+    if (rc_slot != 0) { rc = fncall2(rc_slot, _samvada_bus, _samvada_sess); }
+    if (rc >= 0) {
+        _samvada_control = 0;
+        return 0;
+    }
+    if (rc == -110) {
+        _samvada_control = 2;
+        return rc;
+    }
+    var gone = 0;
+    if (rc == -22) { gone = 1; }
+    if (_samvada_bus_failed(rc) != 0) { gone = 1; }
+    if (gone == 1) { _samvada_control = 0; }
+    return rc;
 }
 
 # Ask logind for DRM-master delegation on /dev/dri/card<N>. Returns
@@ -177,13 +283,23 @@ public fn samvada_session_take_device(major, minor) {
     if (_samvada_bus == 0)          { return -107; }
     var slot = _samvada_slot(samvada_slot_take_device());
     if (slot == 0) { return -38; }
+    var maj_ok = _samvada_devnum_ok(major);
+    var min_ok = _samvada_devnum_ok(minor);
+    if (maj_ok == 0) { return -22; }
+    if (min_ok == 0) { return -22; }
+    # A device we already hold: logind would answer DeviceIsTaken, which
+    # sd-bus maps to -EINVAL. Answered here, without the round trip — and
+    # without the failure path below, which must never touch a device the
+    # consumer is using.
+    if (_samvada_held_find(major, minor) >= 0) { return -22; }
+    if (_samvada_heldn >= _samvada_held_cap()) { return -24; }   # -EMFILE
 
     # logind answers NotInControl unless this connection holds control, so
-    # acquire it here rather than at init (ADR-0004). `acquired` records
-    # whether THIS call took it, so a failed take can hand it straight back
-    # and leave the user's VT untouched.
-    var acquired = _samvada_take_control();
-    if (acquired < 0) { return acquired; }
+    # acquire it here rather than at init (ADR-0004).
+    if (_samvada_heldn == 0) {
+        var tc = _samvada_take_control();
+        if (tc < 0) { return tc; }
+    }
 
     # 16-byte scratch: [+0] fd_out (i32), [+8] active_out (i32).
     # store64 the whole word; the C side writes only the low 32
@@ -194,48 +310,90 @@ public fn samvada_session_take_device(major, minor) {
     var rc = fncall6(slot, _samvada_bus, _samvada_sess,
       major, minor,
       _samvada_outs + 0, _samvada_outs + 8);
-    if (rc < 0) {
-        # Give control back if we took it purely for this failed attempt —
-        # otherwise a failed take leaves the console muted for a device we
-        # never got. `acquired == 1` means control was NOT held on entry,
-        # which means no device was held either (holding a device implies
-        # holding control), so this can never revoke a live fd.
-        if (acquired == 1) { _samvada_drop_control(); }
+    var fd = load64(_samvada_outs + 0) & 0xFFFFFFFF;
+    # Sign-extend the i32 fd back to a Cyrius-native int, so a negative
+    # can never read as a huge positive descriptor.
+    if ((fd & 0x80000000) != 0) { fd = fd - 0x100000000; }
+    if (rc >= 0) {
+        if (fd >= 0) {
+            _samvada_held_add(major, minor);
+            return fd;
+        }
+        # A backend that says success and hands back no descriptor broke
+        # the contract: -EBADF, not the negative number it returned
+        # (1.1.2: that number surfaced as an errno — -1 read as -EPERM).
+        rc = -9;
+    }
+    # The take failed. logind may still have GRANTED it — the reply was
+    # malformed, or the shim's dup failed — so put logind's view back in
+    # step with ours. With nothing held, handing control back does that
+    # wholesale (logind releases every device with it) and un-mutes the
+    # console for a device we never got. With other devices held, release
+    # just this one: it is not in our table, so it is not a descriptor the
+    # consumer has, and the worst logind can say is DeviceNotTaken.
+    #
+    # With nothing held, control goes back even when the take TIMED OUT:
+    # this call's TakeControl just succeeded, so the console is muted now,
+    # and nothing else would un-mute it — a consumer that falls back to
+    # kiosk keeps samvada initialised and takes nothing more (ADR-0004's
+    # defect shape, which the 1.1.2 re-verification's one-budget version
+    # reintroduced; P(-1) final pass). That costs a second budget only on
+    # this path, where logind just answered.
+    if (_samvada_heldn == 0) {
+        _samvada_drop_control(0);
         return rc;
     }
-    var fd = load64(_samvada_outs + 0) & 0xFFFFFFFF;
-    # Sign-extend the i32 fd back to a Cyrius-native int. Any
-    # negative-fd path was already handled by the rc < 0 branch
-    # in C, so the high bit shouldn't be set here, but be defensive.
-    if ((fd & 0x80000000) != 0) { fd = fd - 0x100000000; }
-    if (fd < 0) {
-        if (acquired == 1) { _samvada_drop_control(); }
-        return fd;
+    # With other devices held, not when logind is not answering (-110):
+    # another call would only cost another full budget. Control is
+    # recorded as "may be held"; a device logind granted late is released
+    # when the consumer next takes it (logind answers DeviceIsTaken, and
+    # this path releases it) — or by release_device.
+    if (rc == -110) {
+        _samvada_control = 2;
+        return rc;
     }
-    _samvada_devices = _samvada_devices + 1;
-    return fd;
+    if (_samvada_bus_failed(rc) == 0) {
+        var rd = _samvada_slot(samvada_slot_release_device());
+        if (rd != 0) { fncall4(rd, _samvada_bus, _samvada_sess, major, minor); }
+    }
+    return rc;
 }
 
 # Tell logind we're done with the device. Pairs with TakeDevice
 # at teardown (and on PauseDevice if the consumer chooses to drop).
+#
+# The device leaves samvada's table WHATEVER logind answers (1.1.2): the
+# consumer has said it is done with it. Until then a release that failed
+# kept it — and a device logind had already dropped (hot-unplugged, or
+# released by an earlier call that timed out) answers DeviceNotTaken, so
+# it stayed held for ever: control was never given back, the console
+# stayed muted, and the replugged device could not be taken again
+# (P(-1) re-verification). If logind does still hold it, the next take
+# gets DeviceIsTaken and the take's failure path releases it.
 public fn samvada_session_release_device(major, minor) {
     if (_samvada_have_table() == 0) { return -22; }
     if (_samvada_bus == 0)          { return -107; }
     var slot = _samvada_slot(samvada_slot_release_device());
     if (slot == 0) { return -38; }
+    # Checked here too (1.1.2), before the held-set key is formed: out of
+    # range, (major << 32) | minor aliases another device's key.
+    var maj_ok = _samvada_devnum_ok(major);
+    var min_ok = _samvada_devnum_ok(minor);
+    if (maj_ok == 0) { return -22; }
+    if (min_ok == 0) { return -22; }
     # sd_bus_call_method returns 1 on success; the documented contract here
     # is `0 | -err`. The C wrapper normalises too — this is the belt to its
     # braces, and it also covers a PURE_CYRIUS backend (0.5.1, audit MED-4).
     var rc = fncall4(slot, _samvada_bus, _samvada_sess, major, minor);
-    if (rc < 0) { return rc; }
-    if (_samvada_devices > 0) { _samvada_devices = _samvada_devices - 1; }
+    _samvada_held_del(_samvada_held_find(major, minor));
     # Once the consumer has given every device back, give session control
     # back too — logind runs session_restore_vt(), so the console and
     # keyboard return immediately rather than staying muted until the
     # process exits. This is the path mabda takes when the logind attempt
     # fails and it falls back to kiosk while leaving samvada initialized
     # (ADR-0004).
-    if (_samvada_devices == 0) { _samvada_drop_control(); }
+    if (_samvada_heldn == 0) { _samvada_drop_control(0); }
+    if (rc < 0) { return rc; }
     return 0;
 }
 
@@ -258,7 +416,7 @@ public fn samvada_release() {
         # Drop session control before closing, so logind restores the VT
         # (session_restore_vt) rather than leaving it in graphics mode until
         # the connection drops. Failure is not fatal and is ignored.
-        _samvada_drop_control();
+        _samvada_drop_control(1);
         var slot = _samvada_slot(samvada_slot_close_bus());
         if (slot != 0) { fncall1(slot, _samvada_bus); }
         _samvada_bus = 0;
@@ -276,7 +434,7 @@ public fn samvada_release() {
         while (i < _SAMVADA_SESS_BUFLEN) { store64(_samvada_sess + i, 0); i = i + 8; }
     }
     _samvada_control = 0;
-    _samvada_devices = 0;
+    _samvada_heldn = 0;
     _samvada_table = 0;
     return 0;
 }

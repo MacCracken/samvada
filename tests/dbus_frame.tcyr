@@ -383,7 +383,7 @@ fn t_stream(size, count, chunk, fed_out) {
         }
         if (got >= count) { spins = 0; }
         if (got < count) {
-            dbus_frame_maybe_compact();
+            dbus_frame_prepare(dbus_frame_hdr_size());
             var room = dbus_frame_space();
             var n = room;
             if (chunk > 0) {
@@ -462,7 +462,7 @@ fn test_over_cap_flood_costs_no_memory() {
         if (dbus_frame_next() != dbus_frame_need_more()) { oops = oops + 1; }
         var left = 65536;
         while (left > 0) {
-            dbus_frame_maybe_compact();
+            dbus_frame_prepare(dbus_frame_hdr_size());
             var n = dbus_frame_space();
             if (n > left) { n = left; }
             memcpy(dbus_frame_tail(), junk, n);
@@ -476,7 +476,7 @@ fn test_over_cap_flood_costs_no_memory() {
     assert_eq(oops, 0, "no junk was ever framed as a message");
     assert_eq(alloc_used() - before, 0, "THE PIN: 200 drained 64 KiB messages allocated nothing");
     # And the stream resynchronises: the next real message frames.
-    dbus_frame_maybe_compact();
+    dbus_frame_prepare(dbus_frame_hdr_size());
     var m = t_msg(_t_one, 40);
     memcpy(dbus_frame_tail(), _t_one, m);
     dbus_frame_commit(m);
@@ -505,6 +505,104 @@ fn test_declared_128mib_is_refused() {
     return 0;
 }
 
+# ---- 1.1.2: the production read pattern ----
+# The session layer never fills the buffer: every read asks
+# dbus_frame_want() how far the head message reaches, and takes at most
+# that (P(-1) audit, H1 — descriptors belong to the message whose bytes
+# they arrived with, so no read may straddle two). Driven here directly:
+# for every size, including over-cap ones being drained, no read crosses
+# a message boundary, every message frames, and compaction stays linear.
+fn t_bounded_stream(size, count, fed_out, crossed_out) {
+    if (_t_one == 0) { _t_one = alloc(8192); }
+    var m = 0;
+    if (size <= 8192) { m = t_msg(_t_one, size); }
+    if (size > 8192) {
+        t_fill(_t_one, 8192, 0);
+        t_hdr_declaring(_t_one, size - 16, 0);
+        m = size;
+    }
+    dbus_frame_init();
+    var total = size * count;
+    var fed = 0;
+    var got = 0;
+    var crossed = 0;
+    var spins = 0;
+    var more = 1;
+    while (more == 1) {
+        var r = dbus_frame_next();
+        while (r > 0) {
+            got = got + 1;
+            dbus_frame_advance(r);
+            r = dbus_frame_next();
+        }
+        more = 0;
+        if (fed < total) { more = 1; }
+        if (more == 1) {
+            var n = dbus_frame_prepare(dbus_frame_want());
+            if (n > total - fed) { n = total - fed; }
+            # The read is [fed, fed + n): it must not leave the message
+            # that `fed` falls in.
+            var first = fed / size;
+            var last = (fed + n - 1) / size;
+            if (first != last) { crossed = crossed + 1; }
+            if (n <= 0) { crossed = crossed + 1000; more = 0; }
+            var t = dbus_frame_tail();
+            var i = 0;
+            while (i < n) {
+                var at = (fed + i) % size;
+                var b = 0;
+                if (at < 8192) { b = load8(_t_one + at); }
+                store8(t + i, b);
+                i = i + 1;
+            }
+            dbus_frame_commit(n);
+            fed = fed + n;
+            spins = spins + 1;
+            if (spins > 1000000) { more = 0; }
+        }
+    }
+    var r2 = dbus_frame_next();
+    while (r2 > 0) { got = got + 1; dbus_frame_advance(r2); r2 = dbus_frame_next(); }
+    store64(fed_out, fed);
+    store64(crossed_out, crossed);
+    if (m <= 0) { return (0 - 1); }
+    return got;
+}
+
+fn test_bounded_reads_never_cross_a_message() {
+    test_group("frame: a read bounded by dbus_frame_want never crosses a message boundary");
+    var fed = alloc(8);
+    var crossed = alloc(8);
+    var sizes = alloc(8 * 6);
+    store64(sizes + 0, 24);
+    store64(sizes + 8, 4104);
+    store64(sizes + 16, 8184);
+    store64(sizes + 24, 8192);
+    store64(sizes + 32, 6007);
+    store64(sizes + 40, 20000);         # over-cap: drained, never framed
+    var i = 0;
+    while (i < 6) {
+        var sz = load64(sizes + i * 8);
+        var got = t_bounded_stream(sz, 5, fed, crossed);
+        assert_eq(load64(crossed), 0, "THE PIN: no read straddled two messages");
+        var want_got = 5;
+        if (sz > 8192) { want_got = 0; }
+        assert_eq(got, want_got, "every in-cap message framed, every over-cap one drained");
+        var ok = 0;
+        if (dbus_frame_moved() <= load64(fed)) { ok = 1; }
+        assert_eq(ok, 1, "and compaction moved no more than was received");
+        i = i + 1;
+    }
+    # want() when a whole message is already buffered: nothing to read.
+    dbus_frame_init();
+    var m = t_msg(_t_one, 40);
+    memcpy(dbus_frame_tail(), _t_one, m);
+    dbus_frame_commit(m);
+    assert_eq(dbus_frame_want(), 0, "a complete head message wants no read");
+    assert_eq(dbus_frame_prepare(0), 0, "and prepare(0) grants none");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_align8();
@@ -522,6 +620,7 @@ fn main() {
     test_hostile_compaction_is_linear();
     test_over_cap_flood_costs_no_memory();
     test_declared_128mib_is_refused();
+    test_bounded_reads_never_cross_a_message();
     return assert_summary();
 }
 

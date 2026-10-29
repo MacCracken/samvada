@@ -194,15 +194,15 @@ fn test_failed_init_does_not_latch_ebusy() {
 
 # ---- version triple ----
 fn test_samvada_version() {
-    test_group("v1.1.1 packed triple");
+    test_group("v1.1.2 packed triple");
     # Bumps lock-step with VERSION. Component asserts catch the
     # bit-shift reorder bug.
-    assert_eq(samvada_version(), (1 << 16) | (1 << 8) | 1,
-      "v1.1.1 packed triple");
+    assert_eq(samvada_version(), (1 << 16) | (1 << 8) | 2,
+      "v1.1.2 packed triple");
     var v = samvada_version();
     assert_eq((v >> 16) & 0xFF, 1, "major");
     assert_eq((v >> 8)  & 0xFF, 1, "minor");
-    assert_eq(v         & 0xFF, 1, "patch");
+    assert_eq(v         & 0xFF, 2, "patch");
     return 0;
 }
 
@@ -229,6 +229,9 @@ var _mock_take_rc      = 0;
 var _mock_pump_events  = 0;
 var _mock_sess_rc      = 0;
 var _mock_open_rc      = 0;
+var _mock_rctl_rc      = 0;
+var _mock_tctl_rc      = 0;
+var _mock_rel_rc       = 1;
 
 fn mock_open_system_bus(bus_out) {
     _mock_calls_open = _mock_calls_open + 1;
@@ -249,7 +252,7 @@ fn mock_get_session_path(bus, pid, out_buf, out_len) {
 
 fn mock_take_control(bus, sess) {
     _mock_calls_tctl = _mock_calls_tctl + 1;
-    return 0;
+    return _mock_tctl_rc;
 }
 
 fn mock_take_control_fail(bus, sess) {
@@ -259,7 +262,7 @@ fn mock_take_control_fail(bus, sess) {
 
 fn mock_release_control(bus, sess) {
     _mock_calls_rctl = _mock_calls_rctl + 1;
-    return 0;
+    return _mock_rctl_rc;
 }
 
 fn mock_take_device(bus, sess, major, minor, fd_out, active_out) {
@@ -279,7 +282,7 @@ fn mock_release_device(bus, sess, major, minor) {
     _mock_last_minor = minor;
     # Mimic sd_bus_call_method, which returns 1 on SUCCESS. samvada must
     # normalise this to 0 — that is the whole point of the pin below.
-    return 1;
+    return _mock_rel_rc;
 }
 
 fn mock_pump_signals(bus) {
@@ -325,6 +328,9 @@ fn mock_reset() {
     _mock_pump_events = 0;
     _mock_sess_rc     = 0;
     _mock_open_rc     = 0;
+    _mock_rctl_rc     = 0;
+    _mock_tctl_rc     = 0;
+    _mock_rel_rc      = 1;
     samvada_release();
     return 0;
 }
@@ -496,7 +502,7 @@ fn test_take_device_behaviour() {
     assert_eq(fd, 7, "fd read back from the out-parameter");
     # Error pass-through: a negative rc must surface unchanged, not as an fd.
     _mock_take_rc = (0 - 13);
-    var e = samvada_session_take_device(226, 1);
+    var e = samvada_session_take_device(226, 2);
     assert_eq(e, (0 - 13), "negative rc passes through (EACCES)");
     samvada_release();
     return 0;
@@ -563,6 +569,10 @@ fn test_release_drops_control_and_closes() {
     assert_eq(_mock_calls_rctl, 1, "ReleaseControl dispatched");
     assert_eq(_mock_calls_close, 1, "close_bus dispatched");
     # LOW-5: the scratch must not retain the (now dangling) bus pointer.
+    # Checked on the scratch itself (1.1.2): the pump's -22 below says only
+    # that the table was cleared, and passed with the wipe deleted.
+    assert_eq(load64(_samvada_outs + 0), 0, "the out scratch (last bus pointer, then fd) is wiped");
+    assert_eq(load64(_samvada_sess + 0), 0, "and so is the session path");
     assert_eq(samvada_pump_signals(), -22, "API disarmed after release");
     # Idempotent: a second release must not re-dispatch.
     assert_eq(samvada_release(), 0, "second release ok");
@@ -631,14 +641,229 @@ fn test_fd_sign_extension() {
     _mock_take_fd = 0;
     assert_eq(samvada_session_take_device(226, 0), 0, "fd 0 (stdin) survives");
     _mock_take_fd = 0x7FFFFFFF;
-    assert_eq(samvada_session_take_device(226, 0), 2147483647, "INT32_MAX");
+    assert_eq(samvada_session_take_device(226, 1), 2147483647, "INT32_MAX");
+    # A negative fd with a success rc is the backend breaking its contract,
+    # and is -EBADF (1.1.2) — never the negative number itself (-1 read as
+    # -EPERM), and never a huge positive one: the sign extension is what
+    # tells the two apart.
     _mock_take_fd = 0xFFFFFFFF;
-    assert_eq(samvada_session_take_device(226, 0), (0 - 1), "0xFFFFFFFF -> -1");
+    assert_eq(samvada_session_take_device(226, 2), (0 - 9), "0xFFFFFFFF is -1: -EBADF, not 4294967295");
     _mock_take_fd = 0xFFFFFFF7;
-    assert_eq(samvada_session_take_device(226, 0), (0 - 9), "0xFFFFFFF7 -> -9");
+    assert_eq(samvada_session_take_device(226, 3), (0 - 9), "0xFFFFFFF7 -> -EBADF");
     _mock_take_fd = 0x80000000;
-    assert_eq(samvada_session_take_device(226, 0), (0 - 2147483648), "INT32_MIN");
+    assert_eq(samvada_session_take_device(226, 4), (0 - 9), "INT32_MIN -> -EBADF, not 2147483648");
     samvada_release();
+    return 0;
+}
+
+# ---- P(-1) (1.1.2): the public layer keeps logind's view and its own in step ----
+
+# Device numbers are checked BEFORE TakeControl. Both backends check too,
+# but only after control was taken — muting a seated VT for a request
+# that could never be sent.
+fn test_devnums_checked_before_control() {
+    test_group("take_device range-checks major/minor before taking control");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    assert_eq(samvada_session_take_device(226, 4294967296), -22, "minor past UINT32_MAX refused");
+    assert_eq(samvada_session_take_device((0 - 1), 0), -22, "negative major refused");
+    assert_eq(_mock_calls_tctl, 0, "THE PIN: TakeControl was never sent");
+    assert_eq(_mock_calls_take, 0, "nor TakeDevice");
+    assert_eq(samvada_session_take_device(4294967295, 4294967295), 7, "UINT32_MAX itself is accepted");
+    samvada_release();
+    return 0;
+}
+
+# A device already held is refused without a round trip, and without the
+# failure path — which must never release a device the consumer holds.
+fn test_held_device_is_not_taken_twice() {
+    test_group("take_device refuses a device it already holds, and does not release it");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    assert_eq(samvada_session_take_device(226, 1), 7, "held");
+    assert_eq(samvada_session_take_device(226, 1), -22, "THE PIN: a second take is -EINVAL (logind: DeviceIsTaken)");
+    assert_eq(_mock_calls_take, 1, "and was never dispatched");
+    assert_eq(_mock_calls_rel, 0, "and nothing was released");
+    samvada_release();
+    return 0;
+}
+
+# THE COUNTER PIN. A take that failed on samvada's side after logind
+# granted it, then a release of that device: the bare counter decremented
+# for a device it never counted, reached 0, and dropped control — which
+# revokes EVERY device, the live one included.
+fn test_release_of_an_untracked_device_keeps_control() {
+    test_group("releasing a device samvada never handed out does not revoke the live one");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    assert_eq(samvada_session_take_device(226, 1), 7, "the live device");
+    _mock_take_rc = (0 - 9);
+    assert_eq(samvada_session_take_device(13, 64), (0 - 9), "a second take fails on our side");
+    _mock_take_rc = 0;
+    assert_eq(samvada_session_release_device(13, 64), 0, "the consumer releases it anyway");
+    assert_eq(_mock_calls_rctl, 0, "THE PIN: control is kept — 226:1 is still held");
+    assert_eq(samvada_session_release_device(226, 1), 0, "the live device released");
+    assert_eq(_mock_calls_rctl, 1, "and only now is control dropped");
+    samvada_release();
+    return 0;
+}
+
+# A take that fails with other devices held releases just that device,
+# best effort, in case logind granted it; not on a bus that has failed.
+fn test_failed_take_releases_what_logind_may_have_granted() {
+    test_group("a failed take with devices held releases that device, unless the bus failed");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    assert_eq(samvada_session_take_device(226, 1), 7, "one device held");
+    _mock_take_rc = (0 - 9);
+    assert_eq(samvada_session_take_device(13, 64), (0 - 9), "take fails");
+    assert_eq(_mock_calls_rel, 1, "THE PIN: ReleaseDevice sent for it");
+    assert_eq(_mock_last_major, 13, "for that device");
+    assert_eq(_mock_last_minor, 64, "exactly");
+    _mock_take_rc = (0 - 110);
+    assert_eq(samvada_session_take_device(13, 65), (0 - 110), "a take that timed out");
+    assert_eq(_mock_calls_rel, 1, "is not followed by a second 25-second call");
+    assert_eq(_mock_calls_rctl, 0, "and control is kept throughout");
+    samvada_release();
+    return 0;
+}
+
+# A failed ReleaseControl is remembered and asked again; and a take with
+# nothing held re-sends TakeControl, which logind answers idempotently.
+fn test_failed_release_control_is_retried() {
+    test_group("a failed ReleaseControl is retried, not forgotten");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    assert_eq(samvada_session_take_device(226, 1), 7, "held");
+    _mock_rctl_rc = (0 - 5);
+    assert_eq(samvada_session_release_device(226, 1), 0, "released; ReleaseControl fails");
+    assert_eq(_mock_calls_rctl, 1, "it was asked once");
+    assert_eq(samvada_session_take_device(226, 1), 7, "a new take");
+    assert_eq(_mock_calls_tctl, 2, "re-sends TakeControl, since nothing was held");
+    _mock_rctl_rc = 0;
+    assert_eq(samvada_session_release_device(226, 1), 0, "released again");
+    assert_eq(_mock_calls_rctl, 2, "ReleaseControl asked again");
+    _mock_rctl_rc = (0 - 5);
+    assert_eq(samvada_session_take_device(226, 1), 7, "held once more");
+    samvada_session_release_device(226, 1);
+    assert_eq(_mock_calls_rctl, 3, "a third ReleaseControl, failing");
+    samvada_release();
+    assert_eq(_mock_calls_rctl, 4, "THE PIN: samvada_release asks again before closing");
+    return 0;
+}
+
+# THE HELD-SET PIN (1.1.2 re-verification). A device logind has already
+# dropped — hot-unplugged, or released by a call that timed out —
+# answers DeviceNotTaken. It used to stay in the held set for ever:
+# control never went back (the console stayed muted) and the replugged
+# device could not be taken again. Now a release always forgets it.
+fn test_release_forgets_a_device_logind_dropped() {
+    test_group("a release logind refuses still forgets the device, and gives control back");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    assert_eq(samvada_session_take_device(13, 64), 7, "an input device");
+    assert_eq(samvada_session_take_device(226, 0), 7, "and the DRM node");
+    _mock_rel_rc = (0 - 22);                    # DeviceNotTaken: unplugged
+    assert_eq(samvada_session_release_device(13, 64), (0 - 22), "logind's answer is passed through");
+    _mock_rel_rc = 1;
+    assert_eq(samvada_session_release_device(226, 0), 0, "the DRM node released");
+    assert_eq(_mock_calls_rctl, 1, "THE PIN: control is given back — nothing is held");
+    assert_eq(samvada_session_take_device(13, 64), 7, "and the replugged device can be taken again");
+    assert_eq(_mock_calls_take, 3, "by asking logind, not refused locally");
+    samvada_release();
+    return 0;
+}
+
+# release_device range-checks too, before the held-set key is formed:
+# out of range, (major << 32) | minor aliases another device's key.
+fn test_release_checks_devnums() {
+    test_group("release_device range-checks major/minor before touching the held set");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    assert_eq(samvada_session_take_device(226, 1), 7, "226:1 held");
+    assert_eq(samvada_session_release_device(4294967296 + 226, 1), -22, "major 2^32+226 refused");
+    assert_eq(samvada_session_release_device(226, 4294967297), -22, "minor 2^32+1 refused");
+    assert_eq(_mock_calls_rel, 0, "neither was dispatched");
+    assert_eq(_mock_calls_rctl, 0, "and 226:1 is still held: control kept");
+    samvada_release();
+    return 0;
+}
+
+# A FIRST take that times out still hands control back: this call's
+# TakeControl just succeeded, so the console is muted, and nothing else
+# would un-mute it — a consumer falling back to kiosk takes nothing more
+# (ADR-0004). The 1.1.2 re-verification's one-budget version left it
+# muted for the life of the process (P(-1) final pass).
+fn test_timed_out_take_costs_one_budget() {
+    test_group("a timed-out first take still gives control back; with others held it sends nothing");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    _mock_take_rc = (0 - 110);
+    assert_eq(samvada_session_take_device(226, 0), (0 - 110), "the first take times out");
+    assert_eq(_mock_calls_tctl, 1, "control was taken for it");
+    assert_eq(_mock_calls_rctl, 1, "THE PIN: and handed straight back — the console is not left muted");
+    _mock_take_rc = 0;
+    samvada_release();
+    assert_eq(_mock_calls_rctl, 1, "samvada_release has nothing left to give back");
+
+    # With a device already held, a timed-out take sends nothing more to a
+    # logind that is not answering: no ReleaseDevice, no ReleaseControl.
+    mock_reset();
+    t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    assert_eq(samvada_session_take_device(226, 1), 7, "one device held");
+    _mock_take_rc = (0 - 110);
+    assert_eq(samvada_session_take_device(13, 64), (0 - 110), "a second take times out");
+    assert_eq(_mock_calls_rel, 0, "no ReleaseDevice after a timeout");
+    assert_eq(_mock_calls_rctl, 0, "and control kept: 226:1 is live");
+    _mock_take_rc = 0;
+    samvada_release();
+    assert_eq(_mock_calls_rctl, 0, "THE PIN: samvada_release does not wait on a logind that did not answer");
+    return 0;
+}
+
+# A TakeControl that times out may have been granted: logind may have
+# muted the console and answered late. It is recorded, so a ReleaseControl
+# is owed (it was forgotten until 1.1.2).
+fn test_timed_out_take_control_is_owed() {
+    test_group("a timed-out TakeControl leaves control owed");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    _mock_tctl_rc = (0 - 110);
+    assert_eq(samvada_session_take_device(226, 0), (0 - 110), "TakeControl times out");
+    assert_eq(_mock_calls_take, 0, "no device call after it");
+    _mock_tctl_rc = 0;
+    assert_eq(samvada_session_release_device(226, 0), 0, "a release of what may be held");
+    assert_eq(_mock_calls_rctl, 1, "THE PIN: sends the owed ReleaseControl");
+    # And at close: owed-but-unanswered control is left to the close.
+    _mock_tctl_rc = (0 - 110);
+    assert_eq(samvada_session_take_device(226, 0), (0 - 110), "times out again");
+    samvada_release();
+    assert_eq(_mock_calls_rctl, 1, "samvada_release does not wait on a logind that is not answering");
+    return 0;
+}
+
+# A ReleaseControl that answers NotInControl means control is not ours:
+# it is forgotten, not retried.
+fn test_not_in_control_is_not_retried() {
+    test_group("ReleaseControl answered NotInControl is not asked again");
+    mock_reset();
+    var t = mock_table_new();
+    assert_eq(samvada_init(t), 0, "init ok");
+    assert_eq(samvada_session_take_device(226, 1), 7, "held");
+    _mock_rctl_rc = (0 - 22);
+    assert_eq(samvada_session_release_device(226, 1), 0, "released; ReleaseControl -> NotInControl");
+    samvada_release();
+    assert_eq(_mock_calls_rctl, 1, "THE PIN: not asked a second time at release");
     return 0;
 }
 
@@ -679,6 +904,16 @@ fn main() {
     test_init_rejects_unknown_kind();
     test_fd_sign_extension();
     test_samvada_version();
+    test_devnums_checked_before_control();
+    test_held_device_is_not_taken_twice();
+    test_release_of_an_untracked_device_keeps_control();
+    test_failed_take_releases_what_logind_may_have_granted();
+    test_failed_release_control_is_retried();
+    test_release_forgets_a_device_logind_dropped();
+    test_release_checks_devnums();
+    test_timed_out_take_costs_one_budget();
+    test_timed_out_take_control_is_owed();
+    test_not_in_control_is_not_retried();
     return assert_summary();
 }
 

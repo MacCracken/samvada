@@ -24,6 +24,7 @@ SPDX-License-Identifier: GPL-3.0-only
 """
 
 import argparse
+import array
 import os
 import selectors
 import socket
@@ -31,6 +32,9 @@ import sys
 import time
 
 SYSTEM_BUS = "/run/dbus/system_bus_socket"
+# The kernel's per-message descriptor cap (SCM_MAX_FD) is 253, and dbus's
+# own; src/dbus_sys.cyr receives into the same 253 * 4 bytes (1.1.2).
+MAX_FDS = 253
 
 
 def hexdump(data: bytes, indent: str = "") -> str:
@@ -50,6 +54,7 @@ class Capture:
         self.path_bin = os.path.join(outdir, f"conn{conn_id}-{label}.bin")
         self.path_txt = os.path.join(outdir, f"conn{conn_id}-{label}.txt")
         self.label = label
+        self.conn_id = conn_id
         self.chunk = 0
         self.total = 0
         open(self.path_bin, "wb").close()
@@ -69,12 +74,19 @@ class Capture:
 
 
 def relay(listen_path, outdir, bus_path, quiet):
+    # Owner-only, for the socket AND the captures (1.1.2). The tap's
+    # upstream connection authenticates to the bus as the TAP's user, so
+    # anyone who can connect to the listening socket gets a bus
+    # connection with that identity; under the default umask the socket
+    # (and the captured traffic) could be reachable by other local users.
+    os.umask(0o077)
     os.makedirs(outdir, exist_ok=True)
     if os.path.exists(listen_path):
         os.unlink(listen_path)
 
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(listen_path)
+    os.chmod(listen_path, 0o600)
     srv.listen(8)
     if not quiet:
         print(f"tap listening on {listen_path} -> {bus_path}", file=sys.stderr)
@@ -116,10 +128,22 @@ def relay(listen_path, outdir, bus_path, quiet):
                 # reply carries its fd this way, and a relay that ignores
                 # ancillary data would silently break the very call the
                 # corpus exists to document.
+                #
+                # Room for the kernel's 253 (1.1.2): CMSG_SPACE(64) held 16,
+                # and the kernel CLOSES descriptors that do not fit — the tap
+                # forwarded 16 of a 20-fd message and said so only in a
+                # flags value, altering exactly the traffic M1 is about.
                 try:
-                    data, ancdata, flags, _ = peer.recvmsg(65536, socket.CMSG_SPACE(64))
+                    data, ancdata, flags, _ = peer.recvmsg(65536, socket.CMSG_SPACE(MAX_FDS * 4))
                 except OSError:
                     data, ancdata, flags = b"", [], 0
+                if flags & socket.MSG_CTRUNC:
+                    msg = (f"conn {cap.conn_id} {cap.label}: MSG_CTRUNC — the kernel dropped "
+                           f"descriptors (more than {MAX_FDS} in one message); this capture "
+                           "is NOT the traffic the peers sent")
+                    print(f"\n*** WARNING: {msg} ***\n", file=sys.stderr)
+                    with open(cap.path_txt, "a") as f:
+                        f.write(f"!!! {msg} !!!\n\n")
                 if not data and not ancdata:
                     for s in (peer, other):
                         try:
@@ -144,6 +168,18 @@ def relay(listen_path, outdir, bus_path, quiet):
                         other.sendmsg([data], ancdata)
                     except OSError:
                         pass
+                    # The kernel installed every forwarded descriptor in
+                    # THIS process too; sendmsg duplicated it to the peer.
+                    # Close ours, or the tap leaks one per fd-bearing
+                    # message (1.1.2).
+                    for lvl, typ, cdata in ancdata:
+                        if lvl == socket.SOL_SOCKET and typ == socket.SCM_RIGHTS:
+                            usable = len(cdata) - len(cdata) % 4
+                            for fd in array.array("i", cdata[:usable]):
+                                try:
+                                    os.close(fd)
+                                except OSError:
+                                    pass
                 elif data:
                     try:
                         other.sendall(data)

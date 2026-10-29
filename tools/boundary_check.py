@@ -16,6 +16,24 @@ against the vendored stdlib:
 so the claim "every internal is unreachable" is checked for all of them,
 not a sample. Neither program is ever run: ok.cyr calls take_device.
 
+1.1.2 (P(-1), M5): declarations are read through tools/cyr_scan.py —
+comments and strings blanked, matched anywhere on a line, every `fn`
+token accounted for — so an internal fn declared mid-line is called by
+bad.cyr like any other, instead of being skipped by a line-anchored regex.
+
+1.1.2 (P(-1) re-verification): a `pub fn` (the lexer's `public`) and a
+fn declared after an attribute on the same line (`#must_use public fn`)
+are public to cyr_scan now, so ok.cyr calls them and the manifest
+comparison names them; each call passes cyr_scan.arity()'s parameter
+count (commas inside `<..>`, `(..)` defaults are not parameters).
+
+1.1.2 (final pass): a fn hidden from cyr_scan behind a `#io("fd") .. "`
+comment was called by NEITHER consumer, so this printed "all 233 internal
+fns are refused as private" with a public one in the bundle. cyr_scan now
+reads `#` as cycc does, so that fn is public to it: ok.cyr calls it and the
+manifest comparison names it (ci.yml plants it). Input cycc itself reads
+two ways (cyr_scan.hazards()) makes the bundle unparsable here too.
+
 Usage:  boundary_check.py <repo-root> <manifest>
 Exit:   0 clean, 1 boundary broken, 2 usage/IO/toolchain error.
 """
@@ -26,7 +44,10 @@ import subprocess
 import sys
 import tempfile
 
-FN_DECL = re.compile(r'^(public\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)', re.M)
+sys.dont_write_bytecode = True      # a gate leaves no tools/__pycache__ behind
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cyr_scan  # noqa: E402
+
 PRIVATE_ERR = re.compile(r"'([A-Za-z_][A-Za-z0-9_]*)' is private to its file")
 
 
@@ -45,8 +66,7 @@ def manifest_names(path):
 
 
 def call(name, args):
-    arity = len([a for a in args.split(',') if a.strip()]) if args.strip() else 0
-    return f"    {name}({', '.join(['0'] * arity)});"
+    return f"    {name}({', '.join(['0'] * cyr_scan.arity(args))});"
 
 
 def program(calls):
@@ -70,7 +90,13 @@ def main():
     if shutil.which("cycc") is None:
         die("cycc is not on PATH")
     bundle = open(os.path.join(root, "dist", "samvada.cyr"), encoding="utf-8").read()
-    decls = FN_DECL.findall(bundle)
+    hz = cyr_scan.hazards(bundle)
+    if hz:
+        die("unparsable bundle: " + "; ".join(f"line {ln}: {why}" for ln, why in hz), 1)
+    try:
+        decls = cyr_scan.fn_decls(cyr_scan.strip(bundle))
+    except ValueError as e:
+        die(f"unparsable bundle: {e}", 1)
     public = {n: a for p, n, a in decls if p}
     internal = {n: a for p, n, a in decls if not p}
     if not public or not internal:

@@ -9,10 +9,23 @@ var _r_rel  = 0;
 var _r_pump = 0;
 var _r_close = 0;
 
+# A successful take is a DESCRIPTOR, and two backends hand out different
+# numbers for the same success. It is closed here, and recorded as 0:
+# the contract compared is "succeeded" versus the errno (1.1.2: the raw
+# numbers were compared, so a take that succeeded on both sides read as
+# a breach, and the descriptors were never closed).
+fn _r_took(rc) {
+    if (rc >= 0) {
+        sys_close(rc);
+        return 0;
+    }
+    return rc;
+}
+
 fn run_sequence_native() {
     _r_init = samvada_native_init();
     if (_r_init == 0) {
-        _r_take = samvada_session_take_device(226, 1);
+        _r_take = _r_took(samvada_session_take_device(226, 1));
         _r_rel  = samvada_session_release_device(226, 1);
         _r_pump = samvada_pump_signals();
     }
@@ -23,7 +36,7 @@ fn run_sequence_native() {
 # The shim path: the C side has already built the table and called
 # samvada_main() -> samvada_init(). We just exercise the rest.
 fn run_sequence_shim_tail() {
-    _r_take = samvada_session_take_device(226, 1);
+    _r_take = _r_took(samvada_session_take_device(226, 1));
     _r_rel  = samvada_session_release_device(226, 1);
     _r_pump = samvada_pump_signals();
     _r_close = samvada_release();

@@ -6,9 +6,14 @@
 # reach the failure paths — a real bus will not produce REJECTED or
 # a mid-line split on demand.
 
+include "src/lib.cyr"
+include "src/dbus_sys.cyr"
 include "src/dbus_frame.cyr"
 include "src/dbus_auth.cyr"
 include "src/dbus_socket.cyr"
+include "src/dbus_marshal.cyr"
+include "src/dbus_unmarshal.cyr"
+include "src/dbus_session.cyr"
 
 fn t_put(p, s) {
     var n = strlen(s);
@@ -65,6 +70,15 @@ fn test_line_kinds() {
     assert_eq(dbus_auth_line_kind(p, t_put(p, "REJECTED EXTERNAL")), 4, "REJECTED");
     assert_eq(dbus_auth_line_kind(p, t_put(p, "ERROR wat")), 5, "ERROR");
     assert_eq(dbus_auth_line_kind(p, t_put(p, "MOOSE")), 0, "unknown is not fatal");
+    # 1.1.2: `OK` takes exactly 32 hex digits, as sd-bus's client requires.
+    # Anything else is the server saying OK wrongly — an ERROR.
+    assert_eq(dbus_auth_line_kind(p, t_put(p, "OK ")), 5, "THE PIN: `OK ` with no GUID is an error");
+    assert_eq(dbus_auth_line_kind(p, t_put(p, "OK abc")), 5, "a short GUID is an error");
+    assert_eq(dbus_auth_line_kind(p, t_put(p, "OK 0d2fd0e6568e7bb893d923844c18448")), 5, "31 digits is an error");
+    assert_eq(dbus_auth_line_kind(p, t_put(p, "OK 0d2fd0e6568e7bb893d923844c1844830")), 5, "33 digits is an error");
+    assert_eq(dbus_auth_line_kind(p, t_put(p, "OK 0d2fd0e6568e7bb893d923844c18448g")), 5,
+      "a non-hex digit is an error");
+    assert_eq(dbus_auth_line_kind(p, t_put(p, "OK 0D2FD0E6568E7BB893D923844C184483")), 2, "upper-case hex is a GUID");
     return 0;
 }
 
@@ -115,7 +129,7 @@ fn test_residual_survives_for_the_framer() {
     test_group("auth: binary residual is left for the framer");
     dbus_frame_init();
     dbus_auth_reset();
-    t_feed("DATA\r\nOK abc\r\nAGREE_UNIX_FD\r\n");
+    t_feed("DATA\r\nOK 0123456789abcdef0123456789abcdef\r\nAGREE_UNIX_FD\r\n");
     var extra = dbus_frame_tail();
     store8(extra + 0, 108); store8(extra + 1, 2);
     store8(extra + 2, 1);   store8(extra + 3, 1);
@@ -199,8 +213,10 @@ fn test_sockaddr_guards() {
     return 0;
 }
 
+# The send path is _dbs_write (1.1.2), bounded by the call's deadline;
+# 0 here means no deadline, as when the clock has failed.
 fn test_write_all_over_socketpair() {
-    test_group("socket: write_all delivers every byte");
+    test_group("socket: the send path delivers every byte");
     var fds = alloc(8);
     store64(fds, 0);
     assert_eq(sys_socketpair(1, 1, 0, fds), 0, "pair");
@@ -209,15 +225,15 @@ fn test_write_all_over_socketpair() {
 
     var msg = alloc(64);
     var n = dbus_auth_write_blob(msg);
-    assert_eq(dbus_socket_write_all(a, msg, n), n, "all 48 bytes written");
+    assert_eq(_dbs_write(a, msg, n, 0), n, "all 48 bytes written");
 
     var rx = alloc(64);
     assert_eq(sys_read(b, rx, 64), 48, "48 bytes readable at the peer");
     assert_eq(load8(rx + 0), 0, "leading NUL survived");
     assert_eq(load8(rx + 47), 10, "trailing LF survived");
 
-    assert_eq(dbus_socket_write_all(a, 0, 4), -22, "null buffer rejected");
-    assert_eq(dbus_socket_write_all(a, msg, (0 - 1)), -22, "negative length rejected");
+    assert_eq(_dbs_write(a, 0, 4, 0), -22, "null buffer rejected");
+    assert_eq(_dbs_write(a, msg, (0 - 1), 0), -22, "negative length rejected");
     sys_close(a); sys_close(b);
     return 0;
 }
@@ -236,7 +252,7 @@ fn test_write_to_closed_peer_returns_epipe() {
     sys_close(b);
     var msg = alloc(16);
     t_put(msg, "hello");
-    var rc = dbus_socket_write_all(a, msg, 5);
+    var rc = _dbs_write(a, msg, 5, 0);
     assert(rc < 0, "the write fails");
     assert_eq(rc, -32, "with -EPIPE");
     assert(1, "and this line runs — the process was not signalled");

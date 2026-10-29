@@ -29,6 +29,39 @@ visibility was unused, every one of the bundle's 204 fns was reachable,
 and this gate approximated "public" as `samvada_*` minus the FFI plumbing.
 tools/boundary_check.py proves the boundary by compiling against it.
 
+1.1.2 (P(-1), M5): the bundle is read through tools/cyr_scan.py, with
+comments and strings blanked and declarations matched anywhere on a line.
+The regexes here were anchored at line start, so a `public fn` written
+after other code on the same line was not seen at all — a new export
+passed the freeze. cyr_scan also counts every `fn` and `public` token
+against the declarations it parsed, so an unfamiliar form fails here.
+
+1.1.2 (P(-1) re-verification): two more ways past this gate, both closed
+in cyr_scan and both planted by ci.yml after this gate's clean run:
+`#must_use public fn x() {..}` — cycc compiles the rest of an attribute
+line, cyr_scan read it as a comment — and `pub`, the lexer's synonym for
+`public`: `pub fn` counted as internal, and `pub var` / `pub struct` were
+not counted at all, so internal state was consumer-writable while this
+gate printed "matches the manifest". Arity now counts parameters, not
+commas (`Result<i64, i64>` is one), so a re-signed export cannot keep its
+name/arity key by adding a generic.
+
+1.1.2 (final pass): three more, each planted by ci.yml after this gate's
+clean run and each demonstrated with a consumer that compiled and called
+the planted name:
+  * a `#io("fd") .. "` or `#note: the "` comment, and an object-like
+    `#define NAME "`, opened a string in cyr_scan that hid the next lines
+    — a `public fn` there passed this gate, the boundary gate and the
+    security scan. cyr_scan now copies cycc's `#` rule exactly.
+  * `#derive(Serialize)` on an enum makes cycc emit `public fn
+    _cy_enum_name_eq` whatever the file's visibility, an export with no
+    `fn` token in the bundle's text; and an enum's members are names in
+    the consumer's scope (visibility covers fns and vars only). The bundle
+    may now hold no `#derive`, no `enum` and no `#define`
+    (cyr_scan.bundle_problems()), and nothing cycc reads two ways
+    (cyr_scan.hazards()) — so "the public surface is exactly the bundle's
+    `public fn`s" is a claim this gate can check.
+
 Usage:  surface_check.py <repo-root> <manifest>
 Exit:   0 clean, 1 drift, 2 usage/IO error.
 """
@@ -36,13 +69,13 @@ import os
 import re
 import sys
 
+sys.dont_write_bytecode = True      # a gate leaves no tools/__pycache__ behind
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cyr_scan  # noqa: E402
+
 # A public fn declared "clean" must not name a fn-table-ish parameter.
 # Word-bounded so a legitimate `slots` or `table_len` does not trip it.
 LEAKY_PARAM = re.compile(r'\b(table|fn_table|fntable|slot|fp|fnptr)\b')
-PUBLIC_DECL = re.compile(r'^public\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)', re.M)
-# A top-level declaration: what must not come before the `private` marker.
-TOP_DECL = re.compile(r'^(public\s+)?(fn|var|const|enum|struct|union|impl)\b', re.M)
-MARKER = re.compile(r'^private\s*;?\s*$', re.M)
 
 
 def die(msg, code=2):
@@ -55,23 +88,32 @@ def parse_bundle(path):
         src = open(path, encoding="utf-8").read()
     except OSError as e:
         die(f"cannot read {path}: {e}")
-    marker = MARKER.search(src)
-    if marker is None:
+    code = cyr_scan.strip(src)
+    why = cyr_scan.private_first(code)
+    if why is not None and why.startswith("no "):
         print("BUNDLE IS NOT PRIVATE: no top-level `private` marker, so every "
               "internal fn is consumer-reachable (src/visibility.cyr missing from [lib] modules?)")
         return None
-    first = TOP_DECL.search(src)
-    if first is not None and first.start() < marker.start():
+    if why is not None:
         print("`private` IS NOT THE BUNDLE'S FIRST DECLARATION: keep src/visibility.cyr "
               "first in [lib] modules. Measured: after a top-level statement cyrius 6.6.5 and "
               "6.7.5 refuse the marker ('unexpected private') and 6.7.18 refuses every later "
               "`public`; leading the bundle is valid on all of them")
         return None
+    try:
+        decls = cyr_scan.fn_decls(code)
+    except ValueError as e:
+        print(f"UNPARSABLE BUNDLE: {e}")
+        return None
+    problems = cyr_scan.bundle_problems(src)
+    if problems:
+        for ln, why in problems:
+            print(f"BUNDLE DECLARES WHAT NO MANIFEST ROW COVERS: dist/samvada.cyr:{ln}: {why}")
+        return None
     found = {}
-    for m in PUBLIC_DECL.finditer(src):
-        name, args = m.group(1), m.group(2).strip()
-        arity = len([a for a in args.split(',') if a.strip()]) if args else 0
-        found[f"{name}/{arity}"] = args
+    for public, name, args in decls:
+        if public:
+            found[f"{name}/{cyr_scan.arity(args)}"] = args.strip()
     if not found:
         die(f"{path} declared no public fns — bundle stale or unparsable?")
     return found

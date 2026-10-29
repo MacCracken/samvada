@@ -1,0 +1,25 @@
+# samvada — the frozen [deps].stdlib list: every stdlib module cyrius.cyml
+# may name. One module per line, then why.
+#
+# 1.1.2 (final pass). tools/security_scan.py judges samvada's own code, but
+# the stdlib is code too, and it is not scanned: cyrius.cyml [deps].stdlib
+# decides which lib/ modules `cyrius build` and `cyrius test` prepend to
+# every source, with no include line to see. Adding "process" to that one
+# list gave tests and src/main.cyr run() / spawn() — a fork and an execve
+# inside lib/ — with a clean scan (demonstrated: a test's run() forked a
+# child that exited 127). The scan now requires [deps].stdlib to name
+# EXACTLY these modules, and refuses by name the stdlib modules that fork,
+# exec, load code or map executable memory even if they are added here
+# (security_scan.py DENIED_STDLIB). A new module therefore needs a row here,
+# in review — and cannot be one of those.
+
+string          strlen / memeq / print helpers
+fmt             fmt_int and friends (test and smoke output)
+alloc           the bump allocator (alloc_init / alloc)
+io              file reads (tests read their fixtures)
+vec             growable vectors
+str             Str helpers
+syscalls        the sys_* wrappers and SYS_* numbers (judged by the scan's own syscall allow-list)
+assert          the test assertions
+tagged          tagged Result values
+fnptr           fncallN: the FFI fn-table dispatch

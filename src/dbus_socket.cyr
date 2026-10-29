@@ -112,6 +112,7 @@ fn dbus_socket_sock_cloexec() { return 524288; }   # SOCK_CLOEXEC
 # that is correct on both arches.
 fn dbus_socket_sol_socket()  { return 1; }
 fn dbus_socket_so_rcvtimeo() { return 20; }
+fn dbus_socket_so_sndtimeo() { return 21; }
 
 # One timeval, allocated on first use: this runs on every connect, and
 # alloc() never frees (1.1.1, A-1).
@@ -130,6 +131,22 @@ fn dbus_socket_set_recv_timeout(fd, secs, usecs) {
       dbus_socket_so_rcvtimeo(), tv, 16);
 }
 
+# The send's counterpart (1.1.2). The call path bounds every send by its
+# deadline; this is the backstop for when the clock has failed, so a
+# blocking send to a broker that stopped reading cannot block for ever.
+fn dbus_socket_set_send_timeout(fd, secs, usecs) {
+    if (fd < 0)    { return -22; }
+    if (secs < 0)  { return -22; }
+    if (usecs < 0) { return -22; }
+    if (_dbsk_tv == 0) { _dbsk_tv = alloc(16); }
+    if (_dbsk_tv == 0) { return -12; }
+    var tv = _dbsk_tv;
+    store64(tv + 0, secs);
+    store64(tv + 8, usecs);
+    return sys_setsockopt(fd, dbus_socket_sol_socket(),
+      dbus_socket_so_sndtimeo(), tv, 16);
+}
+
 # The receive timeout is armed HERE, at connect, not at first call —
 # so it covers the SASL handshake too. Before this, a peer that
 # accepted the connection and then said nothing hung samvada
@@ -142,11 +159,28 @@ fn dbus_socket_set_recv_timeout(fd, secs, usecs) {
 # every other client on the bus.
 fn dbus_socket_default_timeout_secs() { return 25; }
 
+# F_DUPFD_CLOEXEC (Linux 1030; the stdlib's FcntlCmd stops at F_SETFL).
+fn dbus_socket_f_dupfd_cloexec() { return 1030; }
+
+# Never leave the bus on a stdio number (1.1.2). A process that closed
+# stdin gets its socket at 0, which the public layer read as "no bus"
+# and refused, leaking the connection; at 1 or 2, any later print would
+# write into the dbus stream. So a socket on 0..2 is moved to the lowest
+# number >= 3, close-on-exec, and the original closed.
+fn dbus_socket_above_stdio(fd) {
+    if (fd > 2) { return fd; }
+    var nfd = sys_fcntl(fd, dbus_socket_f_dupfd_cloexec(), 3);
+    sys_close(fd);
+    return nfd;
+}
+
 fn dbus_socket_connect(sa, addrlen) {
     if (sa == 0)      { return -22; }
     if (addrlen <= 0) { return -22; }
     var t = dbus_socket_sock_stream() | dbus_socket_sock_cloexec();
-    var fd = sys_socket(dbus_socket_af_unix(), t, 0);
+    var fd0 = sys_socket(dbus_socket_af_unix(), t, 0);
+    if (fd0 < 0) { return fd0; }
+    var fd = dbus_socket_above_stdio(fd0);
     if (fd < 0) { return fd; }
     var rc = sys_connect(fd, sa, addrlen);
     if (rc < 0) {
@@ -156,37 +190,13 @@ fn dbus_socket_connect(sa, addrlen) {
     # Best-effort: a kernel that refuses the option must not stop us
     # connecting. The call-level deadline is the real bound.
     dbus_socket_set_recv_timeout(fd, dbus_socket_default_timeout_secs(), 0);
+    dbus_socket_set_send_timeout(fd, dbus_socket_default_timeout_secs(), 0);
     return fd;
 }
 
 # ---- reliable write ----
-# A unix STREAM socket may accept fewer bytes than offered, so the
-# loop is required: a torn request desynchronises the connection and
-# the bus drops it.
-#
-# Honest caveat, so a future closeout does not "prove" this with a
-# test that cannot fail: at samvada's message sizes (48-238 bytes,
-# against a default SO_SNDBUF of hundreds of KB) a short write does
-# not occur. The loop is correct and permanently unexercised unless
-# a test forces SO_SNDBUF small.
-#
-# EINTR (-4) is retried. It has never been observed here, because
-# installing a non-SA_RESTART handler needs an SA_RESTORER trampoline
-# the stdlib does not provide — so this branch is handled but not
-# claimed to be tested.
-fn dbus_socket_write_all(fd, buf, len) {
-    if (buf == 0)  { return -22; }
-    if (len < 0)   { return -22; }
-    var sent = 0;
-    while (sent < len) {
-        var n = sys_sendto(fd, buf + sent, len - sent,
-          dbus_socket_msg_nosignal(), 0, 0);
-        if (n < 0) {
-            if (n == -4) { continue; }        # EINTR
-            return n;
-        }
-        if (n == 0) { return -32; }           # -EPIPE: no progress possible
-        sent = sent + n;
-    }
-    return sent;
-}
+# Lives in dbus_session.cyr as _dbs_write since 1.1.2, where the call's
+# deadline bounds it: a unix STREAM socket may accept fewer bytes than
+# offered, so it loops — a torn request desynchronises the connection —
+# and every send carries MSG_NOSIGNAL (above). The blocking write_all
+# that lived here bounded nothing.

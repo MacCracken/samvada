@@ -53,7 +53,9 @@ pins. New citations land here as numbered items
 
 - **[S-3] `sd_bus_default_system(3)`** —
   <https://www.freedesktop.org/software/systemd/man/sd_bus_default_system.html>.
-  Backs `sb_open_system_bus`.
+  Documents `sd_bus_open_system`, which backs `sb_open_system_bus` since
+  1.1.2 (a private connection; through 1.1.1 it was the thread's shared
+  `sd_bus_default_system`, documented on the same page).
 - **[S-4] `sd_bus_call_method(3)`** —
   <https://www.freedesktop.org/software/systemd/man/sd_bus_call_method.html>.
   Backs `sb_get_session_path`, `sb_take_device`,

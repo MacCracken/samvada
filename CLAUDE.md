@@ -73,7 +73,9 @@ CYRIUS_DCE=1 cyrius build ...               # release build (CI default)
 #   2. there is NO `--emit-object` flag. `cyrius build` emits a finished
 #      executable; a relocatable needs the `object;` directive through cycc.
 #      This is the ONE sanctioned direct-cycc invocation.
-#   3. `objcopy -L` on the Cyrius object is REQUIRED, not optional.
+#   3. `objcopy -L` on the Cyrius object is needed ONLY on a cyrius pin below
+#      6.6.2; from 6.6.2 `object;` builds emit the libc-reserved names
+#      vis=HIDDEN (consumer-link.md step 3 has the check and the command).
 cc -c deps/samvada_main.c \
    $(pkg-config --cflags libsystemd) \
    -o build/samvada_main.o
@@ -81,8 +83,6 @@ cc -c deps/samvada_main.c \
   for m in syscalls string fmt alloc io vec str assert tagged fnptr; do \
       echo "include \"lib/$m.cyr\""; done; \
   cat src/app.cyr; } | cycc > build/app.o
-objcopy -L memcpy -L memset -L memchr -L strlen \
-        -L strchr -L strstr -L memeq -L atoi build/app.o
 cc build/samvada_main.o build/app.o build/main.o \
    $(pkg-config --libs libsystemd) \
    -o build/myapp
@@ -94,15 +94,16 @@ cc build/samvada_main.o build/app.o build/main.o \
 - Test after every change, not after the feature is "done"
 - ONE change at a time — never bundle unrelated changes
 - Research before implementation — check vidya field notes / sibling repos for existing patterns
-- Build with `cyrius build`, never raw `cat file | cc5` — the manifest auto-resolves deps and prepends includes. **One exception**: emitting a relocatable `.o` for the consumer link, which has no `cyrius build` equivalent (there is no `--emit-object` flag) and requires the `object;` directive piped through `cycc`, followed by `objcopy -L` symbol localization. That path is documented in `docs/guides/consumer-link.md` and nowhere else
+- Build with `cyrius build`, never raw `cat file | cc5` — the manifest auto-resolves deps and prepends includes. **One exception**: emitting a relocatable `.o` for the consumer link, which has no `cyrius build` equivalent (there is no `--emit-object` flag) and requires the `object;` directive piped through `cycc` (plus `objcopy -L` symbol localization on a cyrius pin below 6.6.2). That path is documented in `docs/guides/consumer-link.md` and nowhere else
 - Source files only need project includes — stdlib auto-resolves from `cyrius.cyml`
 - Every buffer declaration is a contract: `var buf[N]` = N **bytes**, not N entries
 - **Append-after-kind invariant** — `samvada_slot_kind` stays at offset 64 forever; new slots append after the existing tail so v0 callers reading a v(N+1) table never misread a fnptr as the kind word
 - **C wrappers stay ≤6 args** so dispatch is `fncall6`-safe across x86_64 SysV + aarch64 (cyrius's 6-arg fncall convention)
-- **Fd-passing is dup-safe** — every fd from `SCM_RIGHTS` gets `dup`'d before the dbus message is unref'd, so the consumer's fd lifetime is independent of dbus message lifetime
+- **A handed-out fd's lifetime is independent of the message** — the shim duplicates with `F_DUPFD_CLOEXEC` (minimum 3) before the dbus message is unref'd; the native backend receives with `MSG_CMSG_CLOEXEC`, moves anything on 0..2 above stdio, and claims the descriptor out of its message's queue. No descriptor is ever handed out on 0..2
 - **Errors are negative sd-bus errnos** at the FFI boundary so the C convention passes through unchanged; consumers branch on `< 0`. The native backend's error-name map **is** sd-bus's table: `tests/fixtures/sdbus_errno_map.tsv` is `tools/sdbus_errno_probe.c`'s output from libsystemd, and CI re-checks it — change the map only by regenerating the fixture, never by hand-picking an errno
 - **The consumer bundle is private-by-default** — `src/visibility.cyr` leads `[lib] modules`, so a consumer can name only `public fn`s. A new public fn needs `public fn` **and** a `tools/public_surface.txt` row (both gates fail otherwise); never put the marker anywhere but first
-- **Every consumed dbus message drops its own descriptors** (`dbus_session_done` / `dbus_session_drop_fds_of`) — never `dbus_frame_advance` past a message without it, or the next `take_device` pops a stranger's fd FIFO
+- **A descriptor belongs to the message whose bytes it arrived with** — every read is bounded to the head message (`dbus_frame_want` / `dbus_frame_prepare`, via `_dbs_recv`), and `dbus_frame_advance` closes every descriptor that message did not hand out. Never read past the head message, never consume one without `dbus_frame_advance`, and never attribute a descriptor by parsing the message (that is how 1.1.2's HIGH happened). `take_device` claims by the reply's `h` index and checks, by `statx`, that the descriptor **is** the device asked for
+- **The security scan allow-lists, it does not pattern-match** (1.1.2) — a new `syscall(` number or `SYS_*` name needs a row in `tools/security_scan.py`'s allow-list, a new stdlib module a row in `tools/stdlib_allowed.txt` (and modules that fork, exec, load code or map executable memory are refused by name), and `#define`, `enum` and `#derive` are refused in the bundle's sources. Grow the list in review; never loosen a check to make a finding go away
 - **No `alloc()` on a repeating path** — `alloc()` never frees and the consumer runs for days; scratch is allocated once and reused. The heap tests pin zero growth per call; a new call path gets one
 - The C shim lives at the consumer's edge — samvada itself does not link libsystemd
 
@@ -278,6 +279,9 @@ docs/ (when earned):
 
 # Resolved deps (auto-generated by cyrius deps)
 /lib/
+
+# Python bytecode (tools/*.py import each other)
+__pycache__/
 
 # Release / toolchain artifacts
 cyrius-*.tar.gz

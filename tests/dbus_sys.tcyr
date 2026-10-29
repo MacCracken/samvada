@@ -104,6 +104,8 @@ fn test_dbus_sys_layout() {
     assert_eq(dbus_sys_cmsg_data_off(),   16, "CMSG_DATA - cmsghdr");
     assert_eq(dbus_sys_cmsg_len_1fd(),    20, "CMSG_LEN(sizeof int)");
     assert_eq(dbus_sys_cmsg_space_1fd(),  24, "CMSG_SPACE(sizeof int)");
+    assert_eq(dbus_sys_fd_max(),         253, "SCM_MAX_FD");
+    assert_eq(dbus_sys_ctrl_size(),     1032, "CMSG_SPACE(253 * sizeof int)");
     assert_eq(dbus_sys_sol_socket(),       1, "SOL_SOCKET");
     assert_eq(dbus_sys_scm_rights(),       1, "SCM_RIGHTS");
     assert_eq(dbus_sys_msg_ctrunc(),       8, "MSG_CTRUNC");
@@ -159,11 +161,11 @@ fn test_scm_rights_round_trip() {
     assert_eq(sent, 1, "sendmsg wrote 1 byte");
 
     var buf = alloc(64);
-    var out = alloc(8);
-    store64(out, 0);
-    var got = dbus_sys_recv_fd(b, buf, 64, out);
+    var got = dbus_sys_recv(b, buf, 64, 0);
     assert_eq(got, 1, "recvmsg read 1 byte");
-    var rfd = load64(out);
+    assert_eq(dbus_sys_rx_count(), 1, "one descriptor delivered");
+    assert_eq(dbus_sys_rx_truncated(), 0, "and nothing truncated");
+    var rfd = dbus_sys_rx_fd(0);
     assert(rfd > 2, "an fd was received");
     assert(rfd != payload, "and it is a NEW descriptor number");
 
@@ -193,16 +195,16 @@ fn test_scm_rights_round_trip() {
 # ---- guards ----
 fn test_dbus_sys_rejects_bad_args() {
     test_group("dbus_sys: argument guards");
-    var out = alloc(8);
-    assert_eq(dbus_sys_recv_fd(0, 0, 64, out),   -22, "null buf rejected");
-    assert_eq(dbus_sys_recv_fd(0, 1024, 0, out), -22, "zero buflen rejected");
-    assert_eq(dbus_sys_recv_fd(0, 1024, (0 - 1), out), -22, "negative buflen rejected");
-    assert_eq(dbus_sys_recv_fd(0, 1024, 64, 0),  -22, "null fd_out rejected");
+    assert_eq(dbus_sys_recv(0, 0, 64, 0),   -22, "null buf rejected");
+    assert_eq(dbus_sys_recv(0, 1024, 0, 0), -22, "zero buflen rejected");
+    assert_eq(dbus_sys_recv(0, 1024, (0 - 1), 0), -22, "negative buflen rejected");
+    assert_eq(dbus_sys_rx_fd((0 - 1)), (0 - 1), "rx_fd below range is -1");
+    assert_eq(dbus_sys_rx_fd(dbus_sys_fd_max()), (0 - 1), "rx_fd past the count is -1");
     return 0;
 }
 
-# A message with NO ancillary data must report "no fd" via fd_out,
-# not leave stale bytes there, and must still return the byte count.
+# A message with NO ancillary data must report no descriptors — not a
+# previous receive's — and must still return the byte count.
 fn test_recv_without_fd_reports_none() {
     test_group("recv with no SCM_RIGHTS reports no fd");
     var fds = alloc(8);
@@ -216,11 +218,10 @@ fn test_recv_without_fd_reports_none() {
     assert_eq(sys_write(a, msg, 1), 1, "plain write");
 
     var buf = alloc(64);
-    var out = alloc(8);
-    store64(out, 0x5A5A5A5A);                 # poison, must be overwritten
-    var n = dbus_sys_recv_fd(b, buf, 64, out);
+    var n = dbus_sys_recv(b, buf, 64, 0);
     assert_eq(n, 1, "one byte read");
-    assert_eq(load64(out), (0 - 1), "fd_out is -1, not the poison value");
+    assert_eq(dbus_sys_rx_count(), 0, "no descriptor reported");
+    assert_eq(dbus_sys_rx_fd(0), (0 - 1), "and rx_fd(0) is -1");
 
     sys_close(a); sys_close(b);
     return 0;
@@ -239,19 +240,17 @@ fn test_rejects_wrong_cmsg_type() {
 
     var sent = t_send_wrong_cmsg(a);
     var buf = alloc(64);
-    var out = alloc(8);
-    store64(out, 0x5A5A5A5A);
 
     # The kernel validates SCM_CREDENTIALS and refuses a forged one, so
     # sendmsg may fail outright. Only read if something was actually
     # queued — a blocking recvmsg on an empty queue hangs the suite,
     # which is exactly what the first draft of this test did.
     if (sent == 1) {
-        var n = dbus_sys_recv_fd(b, buf, 64, out);
+        var n = dbus_sys_recv(b, buf, 64, 0);
         assert_eq(n, 1, "byte still delivered");
-        assert_eq(load64(out), (0 - 1),
-          "fd_out is -1 — the wrong-type payload was NOT read as an fd");
-        assert(load64(out) != 0x7FFFFFFF, "the bogus payload never became an fd");
+        assert_eq(dbus_sys_rx_count(), 0,
+          "no descriptor — the wrong-type payload was NOT read as an fd");
+        assert(dbus_sys_rx_fd(0) != 0x7FFFFFFF, "the bogus payload never became an fd");
     }
     if (sent != 1) {
         assert(sent < 0, "kernel refused the forged cmsg (also acceptable)");
@@ -260,11 +259,7 @@ fn test_rejects_wrong_cmsg_type() {
     return 0;
 }
 
-# Send one byte plus TWO fds. The receiver reserves CMSG_SPACE for
-# one, so the kernel truncates and sets MSG_CTRUNC — and the fd in
-# the dropped part is closed by the kernel and gone. This is the
-# only way to reach that path, and it matters: silently returning
-# the first fd would hide that a descriptor was lost.
+# Send one byte plus TWO fds.
 fn t_send_two_fds(sock, fd_a, fd_b) {
     t_send_init();
     if (_t_ctrl2 == 0) { _t_ctrl2 = alloc(32); }
@@ -287,8 +282,11 @@ fn t_send_two_fds(sock, fd_a, fd_b) {
     return sys_sendmsg(sock, _t_mh, 0);
 }
 
-fn test_msg_ctrunc_is_refused() {
-    test_group("a surplus SCM_RIGHTS fd is closed, not leaked");
+# Until 1.1.2 the receive kept ONE descriptor and closed the rest, so a
+# message that legitimately carried two lost one. Every descriptor is now
+# delivered, in order, and the caller decides which message owns it.
+fn test_two_fds_are_both_delivered() {
+    test_group("SCM_RIGHTS: both descriptors of a two-fd message are delivered");
     var fds = alloc(8);
     store64(fds, 0);
     assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, fds), 0, "pair");
@@ -302,29 +300,22 @@ fn test_msg_ctrunc_is_refused() {
 
     var sent = t_send_two_fds(a, f1, f2);
     var buf = alloc(64);
-    var out = alloc(8);
-    store64(out, (0 - 1));
     if (sent == 1) {
-        # CMSG_SPACE(1 fd) and CMSG_SPACE(2 fds) are BOTH 24 bytes, so
-        # two fds fit our one-fd buffer exactly and arrive with NO
-        # MSG_CTRUNC. The surplus descriptor is real and installed; the
-        # module must close it rather than leak it.
-        var n = dbus_sys_recv_fd(b, buf, 64, out);
+        var n = dbus_sys_recv(b, buf, 64, 0);
         assert_eq(n, 1, "the byte was delivered");
-        var rfd = load64(out);
-        assert(rfd > 2, "the first fd was handed back");
-
-        # The kernel installs a cmsg's descriptors at the lowest free
-        # numbers, in order, so the surplus lands at rfd + 1. Probe it
-        # DIRECTLY: fstat must fail with -EBADF because the module
-        # closed it. (A lowest-free-fd probe cannot see this — closing
-        # rfd frees a lower number, so the probe reports the same value
-        # whether or not rfd+1 leaked.)
-        var st = alloc(160);
-        var surplus = rfd + 1;
-        var alive = sys_fstat(surplus, st);
-        assert(alive < 0, "the SURPLUS fd is closed, not leaked");
-        sys_close(rfd);
+        assert_eq(dbus_sys_rx_count(), 2, "THE PIN: both descriptors delivered");
+        assert_eq(dbus_sys_rx_truncated(), 0, "nothing truncated");
+        var r1 = dbus_sys_rx_fd(0);
+        var r2 = dbus_sys_rx_fd(1);
+        assert(r1 > 2, "first is a real descriptor");
+        assert(r2 > 2, "second is a real descriptor");
+        var st1 = alloc(160);
+        var st2 = alloc(160);
+        sys_fstat(r1, st1);
+        sys_fstat(f1, st2);
+        assert_eq(load64(st1 + 8), load64(st2 + 8), "in order: the first is f1's file");
+        sys_close(r1);
+        sys_close(r2);
     }
     if (sent != 1) { assert(sent < 0, "kernel refused the two-fd send"); }
     sys_close(f1); sys_close(f2); sys_close(a); sys_close(b);
@@ -346,10 +337,9 @@ fn t_count_open_fds() {
     return n;
 }
 
-# Send one byte plus THREE fds. CMSG_SPACE(3 ints) = 16 + 16 = 32 > the
-# 24-byte control buffer dbus_sys_recv_fd reserves, so the kernel DOES
-# truncate here and sets MSG_CTRUNC — while still installing the two
-# descriptors that fit. Those two are real, open, and ours.
+# Send one byte plus THREE fds. Through 1.1.1 the receive reserved room
+# for one, so this truncated (MSG_CTRUNC), and the truncation branch threw
+# the message's bytes away and answered -EPROTO.
 fn t_send_three_fds(sock, f1, f2, f3) {
     t_send_init();
     if (_t_ctrl3 == 0) { _t_ctrl3 = alloc(40); }
@@ -373,12 +363,13 @@ fn t_send_three_fds(sock, f1, f2, f3) {
     return sys_sendmsg(sock, _t_mh, 0);
 }
 
-# MSG_CTRUNC must not leak the descriptors that DID fit. The kernel has
-# already installed them in our table by the time recvmsg returns; an
-# early error return without closing them leaks an fd per truncated
-# message, unbounded, in a compositor.
-fn test_msg_ctrunc_closes_what_arrived() {
-    test_group("MSG_CTRUNC does not leak the fds that fit");
+# THE M1 PIN (1.1.2). A three-descriptor message truncated the old 24-byte
+# control buffer; the receive returned -EPROTO and discarded the bytes,
+# and the session layer — rightly — read -EPROTO as a disconnect. So any
+# bus peer that could send samvada a three-fd signal closed its
+# connection. With room for SCM_MAX_FD reserved, nothing truncates.
+fn test_three_fds_do_not_truncate() {
+    test_group("SCM_RIGHTS: a three-fd message is delivered whole, not refused");
     var fds = alloc(8);
     store64(fds, 0);
     assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, fds), 0, "pair");
@@ -395,26 +386,92 @@ fn test_msg_ctrunc_closes_what_arrived() {
     var f3 = load64(pb) & 0xFFFFFFFF;
     var f4 = (load64(pb) >> 32) & 0xFFFFFFFF;
 
+    var before = t_count_open_fds();
     var sent = t_send_three_fds(a, f1, f2, f3);
     var buf = alloc(64);
-    var out = alloc(8);
-    store64(out, (0 - 1));
-    var before = t_count_open_fds();
-    var after = before;
     if (sent == 1) {
-        var n = dbus_sys_recv_fd(b, buf, 64, out);
-        assert_eq(n, -71, "EPROTO reported on truncated ancillary data");
-        after = t_count_open_fds();
-        # Count open descriptors, exactly as the C proof of this defect
-        # did. A lowest-free-fd probe is NOT sufficient here (it was tried
-        # and silently passed against the leaking version): the kernel
-        # installs the surviving fds at the lowest free numbers, so closing
-        # anything below them hides the leak.
-        assert_eq(after, before, "MSG_CTRUNC closed every descriptor the kernel installed");
+        var n = dbus_sys_recv(b, buf, 64, 0);
+        assert_eq(n, 1, "THE PIN: the byte is delivered, not refused with -EPROTO");
+        assert_eq(dbus_sys_rx_count(), 3, "all three descriptors delivered");
+        assert_eq(dbus_sys_rx_truncated(), 0, "and nothing truncated");
+        var i = 0;
+        while (i < dbus_sys_rx_count()) { sys_close(dbus_sys_rx_fd(i)); i = i + 1; }
+        assert_eq(t_count_open_fds(), before, "every delivered descriptor was real and is closed");
     }
     if (sent != 1) { assert(sent < 0, "kernel refused the three-fd send"); }
     sys_close(f1); sys_close(f2); sys_close(f3); sys_close(f4);
     sys_close(a); sys_close(b);
+    return 0;
+}
+
+# Send one byte plus `count` copies of one descriptor — the kernel
+# installs a fresh descriptor for each, so this is `count` real fds.
+var _t_ctrln = 0;
+fn t_send_n_fds(sock, fd, count) {
+    t_send_init();
+    if (_t_ctrln == 0) { _t_ctrln = alloc(16 + 253 * 4 + 8); }
+    store64(_t_byte, 0x42);
+    store64(_t_iov + 0, _t_byte);
+    store64(_t_iov + 8, 1);
+    var clen = 16 + count * 4;
+    var space = (clen + 7) & (0 - 8);
+    var i = 0;
+    while (i < space) { store64(_t_ctrln + i, 0); i = i + 8; }
+    store64(_t_ctrln + 0, clen);
+    store32(_t_ctrln + 8, dbus_sys_sol_socket());
+    store32(_t_ctrln + 12, dbus_sys_scm_rights());
+    i = 0;
+    while (i < count) { store32(_t_ctrln + 16 + i * 4, fd); i = i + 1; }
+    i = 0;
+    while (i < 56) { store64(_t_mh + i, 0); i = i + 8; }
+    store64(_t_mh + 16, _t_iov);
+    store64(_t_mh + 24, 1);
+    store64(_t_mh + 32, _t_ctrln);
+    store64(_t_mh + 40, space);
+    return sys_sendmsg(sock, _t_mh, 0);
+}
+
+# SO_PASSCRED makes the kernel put SCM_CREDENTIALS (32 bytes) ahead of the
+# descriptors, so 250 of them no longer fit the 1032-byte buffer: the one
+# way left to reach MSG_CTRUNC.
+fn t_passcred(sock) {
+    var one = alloc(8);
+    store64(one, 1);
+    return sys_setsockopt(sock, dbus_sys_sol_socket(), 16, one, 4);   # SO_PASSCRED
+}
+
+# MSG_CTRUNC keeps the BYTES, delivers the descriptors that fit, and says
+# the set is incomplete — it no longer refuses the message (1.1.2). It
+# also shows the receive walks past a non-SCM_RIGHTS cmsg: the
+# credentials come first.
+fn test_ctrunc_keeps_the_bytes() {
+    test_group("MSG_CTRUNC: bytes kept, descriptors that fit delivered, set flagged");
+    var fds = alloc(8);
+    store64(fds, 0);
+    assert_eq(sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, fds), 0, "pair");
+    var a = load64(fds) & 0xFFFFFFFF;
+    var b = (load64(fds) >> 32) & 0xFFFFFFFF;
+    var pa = alloc(8);
+    store64(pa, 0);
+    sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, pa);
+    var f1 = load64(pa) & 0xFFFFFFFF;
+    var f2 = (load64(pa) >> 32) & 0xFFFFFFFF;
+    assert_eq(t_passcred(b), 0, "SO_PASSCRED set on the receiver");
+
+    var before = t_count_open_fds();
+    var sent = t_send_n_fds(a, f1, 250);
+    assert_eq(sent, 1, "250 descriptors sent");
+    var buf = alloc(64);
+    var n = dbus_sys_recv(b, buf, 64, 0);
+    assert_eq(n, 1, "THE PIN: the byte is delivered");
+    assert_eq(dbus_sys_rx_truncated(), 1, "and the truncation is reported");
+    var k = dbus_sys_rx_count();
+    assert(k > 200, "the descriptors that fit after the credentials were delivered");
+    assert(k < 250, "and not more than fit");
+    var i = 0;
+    while (i < k) { sys_close(dbus_sys_rx_fd(i)); i = i + 1; }
+    assert_eq(t_count_open_fds(), before, "closing them leaves nothing behind");
+    sys_close(f1); sys_close(f2); sys_close(a); sys_close(b);
     return 0;
 }
 
@@ -435,66 +492,75 @@ fn t_ctrl_build(ctrl, clen, level, ctype, payload) {
 
 fn test_parser_guards() {
     test_group("cmsg parser: every guard is reachable and rejects");
-    var ctrl = alloc(32);
-    var out  = alloc(8);
+    var ctrl = alloc(64);
     var GOOD = dbus_sys_cmsg_len_1fd();
 
     # the accepting case first, so the rejections mean something
-    store64(out, 0);
     t_ctrl_build(ctrl, GOOD, dbus_sys_sol_socket(), dbus_sys_scm_rights(), 9);
-    assert_eq(dbus_sys_parse_scm_rights(ctrl, 24, out), 0, "well-formed cmsg accepted");
-    assert_eq(load64(out), 9, "fd extracted");
+    assert_eq(dbus_sys_parse_rights(ctrl, 24), 1, "well-formed cmsg accepted");
+    assert_eq(dbus_sys_rx_fd(0), 9, "fd extracted");
 
     # wrong cmsg_type (SCM_CREDENTIALS shape)
-    store64(out, (0 - 1));
     t_ctrl_build(ctrl, GOOD, dbus_sys_sol_socket(), 2, 0x7FFFFFFF);
-    assert_eq(dbus_sys_parse_scm_rights(ctrl, 24, out), -2, "wrong cmsg_type rejected");
-    assert_eq(load64(out), (0 - 1), "fd_out untouched by a rejected cmsg");
+    assert_eq(dbus_sys_parse_rights(ctrl, 24), 0, "wrong cmsg_type rejected");
+    assert_eq(dbus_sys_rx_fd(0), (0 - 1), "and no stale fd survives the reset");
 
     # wrong level
     t_ctrl_build(ctrl, GOOD, 41, dbus_sys_scm_rights(), 0x7FFFFFFF);
-    assert_eq(dbus_sys_parse_scm_rights(ctrl, 24, out), -2, "wrong cmsg_level rejected");
+    assert_eq(dbus_sys_parse_rights(ctrl, 24), 0, "wrong cmsg_level rejected");
 
     # cmsg_len below the floor — a truncated header
     t_ctrl_build(ctrl, 12, dbus_sys_sol_socket(), dbus_sys_scm_rights(), 7);
-    assert_eq(dbus_sys_parse_scm_rights(ctrl, 24, out), -2, "short cmsg_len rejected");
+    assert_eq(dbus_sys_parse_rights(ctrl, 24), 0, "short cmsg_len rejected");
 
     # cmsg_len claiming MORE than the kernel says it filled — an
     # over-read if believed
     t_ctrl_build(ctrl, 4096, dbus_sys_sol_socket(), dbus_sys_scm_rights(), 7);
-    assert_eq(dbus_sys_parse_scm_rights(ctrl, 24, out), -2, "cmsg_len > controllen rejected");
+    assert_eq(dbus_sys_parse_rights(ctrl, 24), 0, "cmsg_len > controllen rejected");
 
     # controllen below the floor
     t_ctrl_build(ctrl, GOOD, dbus_sys_sol_socket(), dbus_sys_scm_rights(), 7);
-    assert_eq(dbus_sys_parse_scm_rights(ctrl, 8, out), -2, "short controllen rejected");
-    assert_eq(dbus_sys_parse_scm_rights(ctrl, 0, out), -2, "zero controllen rejected");
+    assert_eq(dbus_sys_parse_rights(ctrl, 8), 0, "short controllen rejected");
+    assert_eq(dbus_sys_parse_rights(ctrl, 0), 0, "zero controllen rejected");
 
-    # null arguments
-    assert_eq(dbus_sys_parse_scm_rights(0, 24, out), -2, "null ctrl rejected");
-    assert_eq(dbus_sys_parse_scm_rights(ctrl, 24, 0), -2, "null fd_out rejected");
+    # a SECOND cmsg is found by CMSG_NXTHDR: credentials first (24 bytes,
+    # aligned), the descriptor after — what SO_PASSCRED produces
+    var i = 0;
+    while (i < 64) { store64(ctrl + i, 0); i = i + 8; }
+    store64(ctrl + 0, 28);                         # CMSG_LEN(12): struct ucred
+    store32(ctrl + 8, dbus_sys_sol_socket());
+    store32(ctrl + 12, 2);                         # SCM_CREDENTIALS
+    store64(ctrl + 32, GOOD);                      # next header at align8(28)
+    store32(ctrl + 40, dbus_sys_sol_socket());
+    store32(ctrl + 44, dbus_sys_scm_rights());
+    store32(ctrl + 48, 11);
+    assert_eq(dbus_sys_parse_rights(ctrl, 56), 1, "the descriptor after a credentials cmsg is found");
+    assert_eq(dbus_sys_rx_fd(0), 11, "and it is the right one");
+
+    # null argument
+    assert_eq(dbus_sys_parse_rights(0, 24), -22, "null ctrl rejected");
     return 0;
 }
 
 # The fd is an int32 on the wire. Sign-extension has to be explicit
 # because Cyrius `>>` is logical and there is no unsigned type, so a
-# kernel-impossible negative must not read back as a huge positive.
+# kernel-impossible negative must not read back as a huge positive fd —
+# it is not collected at all.
 fn test_parser_sign_extension() {
     test_group("cmsg parser: int32 fd sign-extension");
     var ctrl = alloc(32);
-    var out  = alloc(8);
     var L = dbus_sys_cmsg_len_1fd();
     t_ctrl_build(ctrl, L, dbus_sys_sol_socket(), dbus_sys_scm_rights(), 0);
-    assert_eq(dbus_sys_parse_scm_rights(ctrl, 24, out), 0, "fd 0 parsed");
-    assert_eq(load64(out), 0, "fd 0");
+    assert_eq(dbus_sys_parse_rights(ctrl, 24), 1, "fd 0 parsed");
+    assert_eq(dbus_sys_rx_fd(0), 0, "fd 0");
     t_ctrl_build(ctrl, L, dbus_sys_sol_socket(), dbus_sys_scm_rights(), 0x7FFFFFFF);
-    dbus_sys_parse_scm_rights(ctrl, 24, out);
-    assert_eq(load64(out), 2147483647, "INT32_MAX");
+    dbus_sys_parse_rights(ctrl, 24);
+    assert_eq(dbus_sys_rx_fd(0), 2147483647, "INT32_MAX");
     t_ctrl_build(ctrl, L, dbus_sys_sol_socket(), dbus_sys_scm_rights(), 0xFFFFFFFF);
-    dbus_sys_parse_scm_rights(ctrl, 24, out);
-    assert_eq(load64(out), (0 - 1), "0xFFFFFFFF -> -1, not 4294967295");
+    assert_eq(dbus_sys_parse_rights(ctrl, 24), 0, "0xFFFFFFFF is -1: not a descriptor");
+    assert(dbus_sys_rx_fd(0) != 4294967295, "and never read as 4294967295");
     t_ctrl_build(ctrl, L, dbus_sys_sol_socket(), dbus_sys_scm_rights(), 0x80000000);
-    dbus_sys_parse_scm_rights(ctrl, 24, out);
-    assert_eq(load64(out), (0 - 2147483648), "INT32_MIN");
+    assert_eq(dbus_sys_parse_rights(ctrl, 24), 0, "INT32_MIN: not a descriptor");
     return 0;
 }
 
@@ -513,7 +579,6 @@ fn test_scm_rights_no_fd_leak() {
     sys_close((load64(probe) >> 32) & 0xFFFFFFFF);
 
     var buf = alloc(64);
-    var out = alloc(8);
     var fds = alloc(8);
     var pair2 = alloc(8);
     var i = 0;
@@ -529,9 +594,8 @@ fn test_scm_rights_no_fd_leak() {
         var p = load64(pair2) & 0xFFFFFFFF;
         var pp = (load64(pair2) >> 32) & 0xFFFFFFFF;
         t_send_fd(a, p);
-        store64(out, 0);
-        dbus_sys_recv_fd(b, buf, 64, out);
-        var rfd = load64(out);
+        dbus_sys_recv(b, buf, 64, 0);
+        var rfd = dbus_sys_rx_fd(0);
         if (rfd > 2) { sys_close(rfd); }
         sys_close(p); sys_close(pp); sys_close(a); sys_close(b);
         i = i + 1;
@@ -549,12 +613,13 @@ fn test_scm_rights_no_fd_leak() {
 }
 
 # ---- A-1 (1.1.1): a peer that truncates every message ----
-# MSG_CTRUNC is peer-driven: attach more descriptors than the 1-fd cmsg
-# buffer holds and the kernel truncates every receive. Until 1.1.1 the
-# truncation branch did an alloc(8) each time, so such a peer grew the
-# never-freeing heap by 8 bytes per message, forever.
+# Truncation is peer-driven. Until 1.1.1 the truncation branch did an
+# alloc(8) each time, so such a peer grew the never-freeing heap by 8
+# bytes per message, forever. 1.1.2 reaches the branch the one way left
+# (SO_PASSCRED + 250 descriptors) and holds it to the same bound: no heap,
+# and no descriptor the caller did not get to close.
 fn test_sustained_ctrunc_is_bounded() {
-    test_group("SCM_RIGHTS: 300 truncated receives leak no descriptor and no heap");
+    test_group("SCM_RIGHTS: 100 truncated receives leak no descriptor and no heap");
     var fds = alloc(8);
     sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, fds);
     var a = load64(fds) & 0xFFFFFFFF;
@@ -563,29 +628,31 @@ fn test_sustained_ctrunc_is_bounded() {
     sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, pa);
     var f1 = load64(pa) & 0xFFFFFFFF;
     var f2 = (load64(pa) >> 32) & 0xFFFFFFFF;
-    var pb = alloc(8);
-    sys_socketpair(dbus_sys_af_unix(), dbus_sys_sock_stream(), 0, pb);
-    var f3 = load64(pb) & 0xFFFFFFFF;
-    var f4 = (load64(pb) >> 32) & 0xFFFFFFFF;
+    t_passcred(b);
     var buf = alloc(64);
-    var out = alloc(8);
     # Warm the path once.
-    t_send_three_fds(a, f1, f2, f3);
-    dbus_sys_recv_fd(b, buf, 64, out);
+    t_send_n_fds(a, f1, 250);
+    dbus_sys_recv(b, buf, 64, 0);
+    var j = 0;
+    while (j < dbus_sys_rx_count()) { sys_close(dbus_sys_rx_fd(j)); j = j + 1; }
     var open0 = t_count_open_fds();
     var heap0 = alloc_used();
-    var eproto = 0;
+    var trunc = 0;
     var i = 0;
-    while (i < 300) {
-        if (t_send_three_fds(a, f1, f2, f3) == 1) {
-            if (dbus_sys_recv_fd(b, buf, 64, out) == -71) { eproto = eproto + 1; }
+    while (i < 100) {
+        if (t_send_n_fds(a, f1, 250) == 1) {
+            if (dbus_sys_recv(b, buf, 64, 0) == 1) {
+                if (dbus_sys_rx_truncated() != 0) { trunc = trunc + 1; }
+            }
+            j = 0;
+            while (j < dbus_sys_rx_count()) { sys_close(dbus_sys_rx_fd(j)); j = j + 1; }
         }
         i = i + 1;
     }
-    assert_eq(eproto, 300, "every receive was truncated and reported -EPROTO");
-    assert_eq(t_count_open_fds(), open0, "no descriptor leaked across 300 truncations");
+    assert_eq(trunc, 100, "every receive was truncated, and kept its byte");
+    assert_eq(t_count_open_fds(), open0, "no descriptor leaked across 100 truncations");
     assert_eq(alloc_used() - heap0, 0, "THE PIN: and the heap did not grow (was 8 bytes per truncation)");
-    sys_close(f1); sys_close(f2); sys_close(f3); sys_close(f4);
+    sys_close(f1); sys_close(f2);
     sys_close(a); sys_close(b);
     return 0;
 }
@@ -598,8 +665,9 @@ fn main() {
     test_scm_rights_round_trip();
     test_recv_without_fd_reports_none();
     test_rejects_wrong_cmsg_type();
-    test_msg_ctrunc_is_refused();
-    test_msg_ctrunc_closes_what_arrived();
+    test_two_fds_are_both_delivered();
+    test_three_fds_do_not_truncate();
+    test_ctrunc_keeps_the_bytes();
     test_parser_guards();
     test_parser_sign_extension();
     test_scm_rights_no_fd_leak();

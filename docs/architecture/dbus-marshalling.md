@@ -2,7 +2,7 @@
 
 This page documents the bytes that flow across the dbus socket
 when samvada's v0.x C shim calls into logind. It is *not* a
-general dbus tutorial — it is the slice of the spec the v1.1.1
+general dbus tutorial — it is the slice of the spec the v1.1.2
 fn-table actually exercises, written so the v1.0 pure-Cyrius
 marshaller has a concrete target to replace the libsystemd
 calls against.
@@ -18,7 +18,7 @@ Every member name, signature and argument direction below was
 see [§Verification against logind](#verification-against-logind)
 for the exact commands and the raw output.
 
-## What samvada v1.1.1 sends
+## What samvada v1.1.2 sends
 
 Five method calls, one acknowledgement it is *obliged* to send
 but does not yet, and two signals it does not yet receive. Every
@@ -97,13 +97,14 @@ Three ordering constraints are load-bearing:
 3. **`PauseDeviceComplete` before logind's pause timeout** —
    see §[PauseDevice / ResumeDevice](#pausedevice--resumedevice--the-signals-samvada-does-not-yet-receive).
 
-Everything down to and including `TakeControl` lives in
-`samvada_init()` (`src/samvada.cyr`: open bus →
-`GetSessionByPID` → `TakeControl`, each step aborting init on a
-negative rc); the tail lives in `samvada_release()`
-(`ReleaseControl` through slot +80, then close bus). The middle
-— `TakeDevice` / `ReleaseDevice` — is the consumer's to drive,
-one call per device, between those two.
+`samvada_init()` (`src/samvada.cyr`) does open bus →
+`GetSessionByPID`, each step aborting init on a negative rc, and takes
+**no** control (ADR-0004, since 0.6.0). `TakeControl` is sent by the
+first `samvada_session_take_device`, immediately before `TakeDevice`,
+and `ReleaseControl` when the last device is released, or by
+`samvada_release()` (slot +80) before it closes the bus. The middle —
+`TakeDevice` / `ReleaseDevice` — is the consumer's to drive, one call
+per device.
 
 ## Session control — TakeControl / ReleaseControl
 
@@ -406,7 +407,7 @@ unref'ing the message — without that, the fd's lifetime ends
 when sd-bus frees the message, and the consumer's drm fd
 silently closes.
 
-The duplication is `fcntl(fd, F_DUPFD_CLOEXEC, 0)`, **not**
+The duplication is `fcntl(fd, F_DUPFD_CLOEXEC, 3)` (never onto 0..2, since 1.1.2), **not**
 `dup(2)`. `dup(2)` clears `FD_CLOEXEC` on the new descriptor, so
 the pre-0.5.1 code handed the consumer a DRM-master fd that
 survived any `execve` and leaked master rights into unrelated
@@ -417,17 +418,36 @@ pure-Cyrius `recvmsg(2)` loop has to make the same choice
 explicitly: pass `MSG_CMSG_CLOEXEC` on the `recvmsg` and use
 `F_DUPFD_CLOEXEC` for any duplicate it hands out.
 
-For v1.0 pure-Cyrius the `recvmsg(2)` loop must:
-1. Set up an `iovec` for the message bytes.
-2. Set up a `cmsghdr` buffer sized for `CMSG_SPACE(sizeof(int) * N)`.
-3. After `recvmsg`, walk `CMSG_FIRSTHDR / CMSG_NXTHDR`, look
-   for `cmsg_level == SOL_SOCKET && cmsg_type == SCM_RIGHTS`,
-   copy the int[] out of `CMSG_DATA(cmsg)`.
-4. Index by the `h` field in the message body.
+The native backend's receive (`src/dbus_sys.cyr`,
+`src/dbus_frame.cyr`, `_dbs_recv` in `src/dbus_session.cyr`), as of
+1.1.2:
+
+1. An `iovec` for the message bytes, and a control buffer of
+   `CMSG_SPACE(253 * sizeof(int))` = 1032 bytes. 253 is `SCM_MAX_FD`,
+   the most one `sendmsg` can carry; a unix stream receive stops after
+   the first segment that carried descriptors, so it is also the most
+   one `recvmsg` can deliver. Until 1.1.2 the buffer held one, and a
+   three-descriptor message truncated — which closed the bus (P1-2).
+2. After `recvmsg`, walk `CMSG_FIRSTHDR / CMSG_NXTHDR` over every
+   cmsg (`SO_PASSCRED` puts `SCM_CREDENTIALS` first), and copy each
+   `SCM_RIGHTS` int[] out of `CMSG_DATA`. `MSG_CTRUNC` keeps the bytes
+   and marks the message's descriptor set incomplete.
+3. **Every read is bounded to the message at the head of the
+   buffer** — the rest of its 16-byte header, then the rest of the
+   message. The kernel detaches an skb's descriptors when the skb's
+   first byte is read, so the descriptors a bounded read delivers
+   arrived with that message's bytes, and with no other's. This is
+   sd-bus's rule (`bus_socket_read_message` reads no further than the
+   current message). Consuming the message closes every descriptor it
+   did not hand out. Until 1.1.2 samvada read up to 8 KiB at a time
+   and counted each message's descriptors from its own `UNIX_FDS`,
+   which a message samvada could not parse made zero (P1-1).
+4. Index by the `h` field in the message body: `TakeDevice` hands
+   out the descriptor its reply's `h` names, and only if the reply is
+   `(hb)` and its `UNIX_FDS` matches what arrived.
 
 If the reader closes its receive socket before consuming the
-fd-bearing cmsg, the kernel closes the fd. (libsystemd handles
-this; the pure-Cyrius marshaller has to mirror it.)
+fd-bearing cmsg, the kernel closes the fd.
 
 ## SASL EXTERNAL auth (connect path)
 

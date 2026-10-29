@@ -8,12 +8,16 @@
 
 ## Version
 
-**1.1.1** — 2026-10-29. The A lane closed, all but signing tags
-(roadmap): sd-bus error parity, a dead connection reported as sd-bus
-reports it, stray reply descriptors closed, zero heap per call, a
-128 MiB message cap, a private-by-default bundle, release assets
-checked against the tag. Same toolchain as 1.1.0 (cyrius 6.7.18);
-consumers need cyrius ≥ 6.6.5.
+**1.1.2** — 2026-10-29. A deep P(-1) pass: one HIGH — any local user
+could choose the descriptor `TakeDevice` returned — five MEDIUM, and an
+adversarial re-verification of the repairs (`docs/audit/2026-10-29-p1-audit.md`).
+Descriptors are attributed by stream position, with every read bounded
+to one message; `take_device` checks the descriptor is the device asked
+for; calls are bounded by their deadline alone, send and receive; the
+public layer holds devices by number; every CI gate was rebuilt on a
+comment-aware lexer and proven able to fail. Same toolchain as 1.1.0
+(cyrius 6.7.18); consumers need cyrius **≥ 6.6.13** (was 6.6.5: the
+bundle now calls `fd_wait_ready` and `sys_statx`).
 
 samvada speaks dbus natively in Cyrius over a raw unix socket.
 `samvada_native_init()` gives a consumer a working bus connection
@@ -21,9 +25,11 @@ with **no libsystemd, no C shim, no `pkg-config`, nothing to
 link**. The libsystemd shim is retained as a fallback and as the
 differential reference; its deletion is scheduled for 1.2.0.
 
-Three audit passes have shipped — the pre-1.0 pass over the native
-marshaller (1.0.0), the A-lane completion (1.0.1) and its close-out
-(1.1.1, `docs/audit/2026-10-29-audit.md`). **samvada is a stable
+Four audit passes have shipped — the pre-1.0 pass over the native
+marshaller (1.0.0), the A-lane completion (1.0.1), its close-out
+(1.1.1, `docs/audit/2026-10-29-audit.md`) and the 1.1.2 P(-1) pass
+(`docs/audit/2026-10-29-p1-audit.md`), which found a HIGH the first
+three missed. **samvada is a stable
 release, not an audited-hardened one**: tags are unsigned, and the
 seated `TakeDevice` path has never run. Both are in `SECURITY.md` and
 the roadmap.
@@ -55,7 +61,8 @@ the roadmap.
     the sidecar is **derived by compiling the bundle** on six
     targets, not copied from `[deps] stdlib`, and the bundle
     carries the matching `include` block. It still warns, at 6.7.18,
-    that `sys_recvmsg` is undefined on x86_64-windows (roadmap).
+    that `sys_recvmsg` is undefined on x86_64-windows — a known warning, not
+    work: samvada is Linux-only (roadmap § Out of scope).
   - `cyrius deps` writes `cyrius.lock` for a stdlib-only project
     (6.6.9+); the lock is tracked. `cyrius deps --locked` checks it
     against `lib/` without writing (6.7.6+).
@@ -83,23 +90,27 @@ Public surface — eight `public fn`s (`src/samvada.cyr`, plus
 **mechanically** by `tools/surface_check.py` in CI. They are the
 **only** fns a consumer can name: the bundle is private-by-default
 (`src/visibility.cyr`, first in `[lib] modules`), and
-`tools/boundary_check.py` proves all 204 others are refused:
+`tools/boundary_check.py` proves all 234 others are refused:
 
 - `samvada_native_init()` → `0 | -err`. **The supported entry
   point for the native backend.** Hides the FFI table entirely.
   The table is allocated once and reused across init/release.
-- `samvada_version()` → packed u32 (1.1.1).
+- `samvada_version()` → packed u32 (1.1.2).
 - `samvada_session_take_device(major, minor)` → `fd | -err`.
   Acquires session control on first use (ADR-0004) and hands it
   back if the take fails. Device numbers are range-checked
-  `0 ≤ v ≤ UINT32_MAX` **before** the 64→32 narrowing.
+  `0 ≤ v ≤ UINT32_MAX` **before** control is taken; a device already
+  held is `-22` without a round trip.
 - `samvada_session_release_device(major, minor)` → `0 | -err`.
-  Drops session control when the last device is released, so
-  logind restores the VT. The accounting is a **count**, not an
-  identity set — see `SECURITY.md`.
+  Devices are held **by number** (`(major << 32) | minor`, 256
+  entries); a release forgets the device whatever logind answers, and
+  control is dropped when the table is empty, so logind restores the VT.
+  The table is a copy of logind's state that nothing re-syncs
+  (`SECURITY.md`).
 - `samvada_pump_signals()` → `events | -err`; `-ECONNRESET` once the
-  connection is gone (1.1.1). Allocates nothing
-  per call.
+  connection is gone (1.1.1), any other receive error since 1.1.2.
+  Drains until the socket is empty (256 events / 1024 receives per
+  call). Allocates nothing per call.
 - `samvada_release()` → `0` (idempotent). **logind revokes devices
   taken via `TakeDevice` when control is released**, so
   outstanding consumer fds become invalid.
@@ -109,30 +120,41 @@ Public surface — eight `public fn`s (`src/samvada.cyr`, plus
 Native backend — all in `[lib] modules`, so all of it ships in the
 consumer bundle:
 
-- `src/dbus_sys.cyr` — `SCM_RIGHTS` fd receive; the `recvmsg` half
-  and the cmsg walk, split so every guard is testable.
-- `src/dbus_socket.cyr` — `sockaddr_un` (both forms), connect,
-  the stdlib's `sys_sendto`+`MSG_NOSIGNAL` write-all, and `SO_RCVTIMEO` armed at
-  connect (25 s, so it covers the SASL handshake).
+- `src/dbus_sys.cyr` — `SCM_RIGHTS` fd receive: room for 253
+  descriptors (`SCM_MAX_FD`), every cmsg walked, `MSG_CTRUNC` keeps the
+  bytes; the `recvmsg` half and the walk split so every guard is
+  testable.
+- `src/dbus_socket.cyr` — `sockaddr_un` (both forms), connect (the
+  socket moved above stdio), and `SO_RCVTIMEO` / `SO_SNDTIMEO` armed at
+  connect (25 s): the backstop when the clock has failed.
 - `src/dbus_frame.cyr` — message framing; owns THE 8192-byte
-  receive buffer that `dbus_auth` borrows, plus the fd queue.
+  receive buffer that `dbus_auth` borrows, and the head message's
+  descriptors. Every read is bounded to the head message
+  (`dbus_frame_want` / `dbus_frame_prepare`), so a descriptor belongs to
+  the message it arrived with, and `dbus_frame_advance` closes every one
+  that message did not hand out.
 - `src/dbus_auth.cyr` — SASL `EXTERNAL`. Can only report success
-  by having *seen* `AGREE_UNIX_FD`.
+  by having seen `OK <32-hex GUID>` and then `AGREE_UNIX_FD`.
 - `src/dbus_marshal.cyr` — encoder. **Poisons** on an out-of-range
   length rather than truncating; the call path refuses to transmit
   a poisoned buffer.
 - `src/dbus_unmarshal.cyr` — decoder. Bounds **fail closed**: an
-  undeclared message extent refuses rather than permits.
-- `src/dbus_session.cyr` — the six logind calls, serial counter,
+  undeclared message extent refuses rather than permits. Every message
+  the reply loop considers is validated whole first
+  (`dbus_unmarshal_validate`, sd-bus's `bus_message_parse_fields` rules).
+- `src/dbus_session.cyr` — the five logind calls (plus Hello), serial counter,
   reply correlation, error mapping, `dbus_native_populate()`.
   Reply matching requires `DESTINATION` to equal the unique name
   learned at `Hello`, refuses replies that predate their request
-  (send-time watermark), and bounds every call on a
-  `CLOCK_MONOTONIC` deadline. Error names map exactly as sd-bus maps
-  them (`tests/fixtures/sdbus_errno_map.tsv`); a dead connection is
-  latched (`_dbs_closed`) and answered as sd-bus answers it; every
-  consumed message closes its own descriptors (`dbus_session_done`);
-  no call allocates.
+  (a send-time watermark, a stream position since 1.1.2), and bounds
+  every call, send and receive, on a `CLOCK_MONOTONIC` deadline: each
+  wait is a poll for the time left. Error names map exactly as sd-bus
+  maps them (`tests/fixtures/sdbus_errno_map.tsv`); a dead connection
+  is latched (`_dbs_closed`) and answered as sd-bus answers it;
+  `take_device` hands out the reply's `h`-indexed descriptor only if
+  `statx` says it is the device asked for; the connect handshake is
+  `dbus_session_sasl` + `dbus_session_hello`, driven over a socketpair
+  in the tests; no call allocates.
 - `src/visibility.cyr` — a bare `private`, bundle-only: it makes
   `dist/samvada.cyr` private-by-default. Not in `src/lib.cyr`, so
   samvada's own build and tests still reach the internals.
@@ -153,18 +175,24 @@ Plumbing:
 
 ## Tests
 
-**879 asserts.** Every repair in the 1.0.0 and 1.0.1 audits is
-mutation-tested.
+**1152 asserts**, in six suites; `cyrius test` reports seven files
+(`src/test.cyr`, the `[build].test` entry, asserts nothing — the
+"6"/"7" printed after the suites is the file count, which 1.1.1's table
+misread as asserts). Every repair in the 1.0.0, 1.0.1, 1.1.1 and 1.1.2
+audits is mutation-tested.
 
 | File | Asserts | Covers |
 |---|---|---|
-| `tests/samvada.tcyr` | 162 | public API, the pure-Cyrius mock backend, FFI layout invariants |
-| `tests/dbus_session.tcyr` | 385 | logind layer, reply provenance, fd ownership, timeouts, devnum bounds, hostile SASL; the sd-bus error table (186 rows); disconnect, logind restart, Pause/Resume orderings; zero heap per call; sustained fd traffic |
-| `tests/dbus_frame.tcyr` | 115 | framing, the receive buffer, the fd queue; linear compaction, over-cap floods, the 128 MiB cap |
-| `tests/dbus_codec.tcyr` | 76 | marshal/unmarshal, overflow poisoning, fail-closed bounds |
-| `tests/dbus_sys.tcyr` | 70 | `SCM_RIGHTS`, cmsg guards, descriptor-leak counting, sustained `MSG_CTRUNC` |
-| `tests/dbus_auth.tcyr` | 65 | SASL handshake |
-| `src/test.cyr` | 6 | `[build].test` entry |
+| `tests/samvada.tcyr` | 238 | public API, the pure-Cyrius mock backend, FFI layout invariants; the held-device table and the control lifecycle |
+| `tests/dbus_session.tcyr` | 512 | logind layer, reply provenance, descriptor attribution (the H1 proofs of concept), the `rdev` check, timeouts and the send deadline, devnum bounds, hostile SASL, the handshake and Hello over a socketpair; the sd-bus error table (186 rows, and the fixture file read at run time); disconnect, logind restart, Pause/Resume orderings; zero heap per call; sustained fd traffic |
+| `tests/dbus_frame.tcyr` | 135 | framing, the receive buffer, the head message's descriptors; bounded reads never cross a message; linear compaction, over-cap floods, the 128 MiB cap |
+| `tests/dbus_codec.tcyr` | 105 | marshal/unmarshal, overflow poisoning, fail-closed bounds, the field walk, whole-array validation, object paths |
+| `tests/dbus_sys.tcyr` | 91 | `SCM_RIGHTS`, every cmsg walked, 253-descriptor room, `MSG_CTRUNC` keeping the bytes, descriptor-leak counting |
+| `tests/dbus_auth.tcyr` | 71 | SASL handshake, the `OK` GUID, the send path |
+
+On aarch64 (`qemu-aarch64` user mode) every suite passes but for five
+asserts that need `MSG_CTRUNC`, which qemu-user never delivers to the
+guest (roadmap).
 
 - `tests/fixtures/dbus/` — 15 files of **real captured wire
   traffic** (14 real, 1 synthetic, labelled in `MANIFEST.md`).
@@ -176,19 +204,42 @@ mutation-tested.
 
 ## Tools
 
+- `tools/cyr_scan.py` — the comment-, string- and directive-aware
+  lexer every gate reads code through (1.1.2): declarations matched
+  anywhere on a line, `pub`/`public` both, every `fn` and `public` token
+  accounted for. `--self-test` runs first in CI.
 - `tools/surface_check.py` + `tools/public_surface.txt` — freezes
   the 8-fn public surface and requires the bundle's `private` marker;
-  **a CI gate**, run right after the distlib freshness check.
+  **a CI gate**, run right after the distlib freshness check, with a
+  planted violation per demonstrated bypass that must fail.
 - `tools/boundary_check.py` — compiles consumers against the bundle:
   every `public fn` reachable, every other fn refused. **A CI gate**.
+- `tools/security_scan.py` — no process creation, no system paths, no
+  ≥ 64 KB static buffers; a positive syscall allow-list, no executable
+  memory, no `#define` / `enum` / `#derive` in the bundle; also judges
+  `dist/samvada.cyr` whole and `cyrius.cyml` (1.1.2). **A CI gate**,
+  with `--self-test`.
+- `tools/stdlib_allowed.txt` — the frozen `[deps].stdlib` list the scan
+  holds `cyrius.cyml` to, each module with its reason.
+- `tools/rxbench.cyr` — the receive-path microbench (benchmarks Run 10);
+  not a gate.
+- `tools/shim_slot_check.c` — links the C shim against a fake
+  libsystemd and calls every slot, checking what each sends: member,
+  destination, interface, path and arguments (1.1.2). **A CI gate**,
+  with sed-mutated shims that must fail.
+- `tools/shim_symbols.txt` — every symbol the shim's object may leave
+  undefined (`nm -u`), each justified; the bundle's own object must
+  leave none, and the shim's objects may contain no syscall
+  instruction (`objdump`). **CI gates**.
 - `tools/sdbus_errno_probe.c` — asks libsystemd for each error name's
   errno; produced `tests/fixtures/sdbus_errno_map.tsv`, and CI's
   c-shim job re-runs it against the runner's libsystemd.
 - `tools/dbus_tap.py` — `AF_UNIX` relay for capturing traffic.
 - `tools/dbus_decode.py` — spec decoder for captured bytes.
 - `tools/differential/` — runs both backends in one process and
-  compares error codes. **CI does not run it**, and it is the only
-  gate covering C-shim wrapper *wiring*.
+  compares error codes. **CI does not run it**: it takes logind session
+  control, and refuses to start without `SAMVADA_DIFF_TAKES_CONTROL=1`.
+  The shim's wrapper wiring is gated by `tools/shim_slot_check.c`.
 
 ## Dependencies
 
@@ -209,12 +260,12 @@ mutation-tested.
   so the smaller sidecar does not reach it. It calls only
   `samvada_session_take_device` / `samvada_session_release_device`,
   under `-D MABDA_LOGIND` (off by default).
-  - **Downstream check, 1.1.1** (compile-only): a scratch copy of
-    mabda on its own 6.7.5 pin builds `programs/smoke.cyr` and
-    `programs/native_present_e2e.cyr` under `-D MABDA_LOGIND`
-    against the 1.1.1 bundle — private-by-default — with no
-    `undefined function` and no `private to its file`. Neither was
-    run — both reach DRM master.
+  - **Downstream check, 1.1.2** (compile-only, as for 1.1.1): a
+    scratch copy of mabda on its own 6.7.5 pin builds
+    `programs/smoke.cyr` and `programs/native_present_e2e.cyr` under
+    `-D MABDA_LOGIND` against the 1.1.2 bundle (byte-identical to
+    `dist/samvada.cyr`), with no `undefined function` and no `private
+    to its file`. Neither was run — both reach DRM master.
   - How: mabda resolves samvada by **git tag**, and `cyrius build`
     re-resolves deps even with `--no-deps`, so a bundle dropped into
     `mabda/lib/` is overwritten before it compiles. In a scratch

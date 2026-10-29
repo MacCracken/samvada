@@ -1,5 +1,5 @@
 # @internal — native-dbus logind session layer
-# dbus_session.cyr — the six logind calls, natively.
+# dbus_session.cyr — the logind calls (and Hello), natively.
 #
 # This is the module that has to match the FROZEN FFI SHAPES, and
 # that constraint is not cosmetic. src/samvada.cyr dispatches with
@@ -43,7 +43,6 @@
 fn dbus_session_max_serial() { return 4294967295; }
 
 var _dbs_serial = 0;
-var _dbs_last_err = 0;      # last ERROR_NAME mapped errno
 
 # ---- a dead connection is a state, not an event (1.1.1, A-4) ----
 # Set the first time the connection is seen to have gone: an orderly
@@ -86,11 +85,8 @@ var _dbs_closed = 0;
 var _dbs_uniq  = 0;         # copied out of the frame buffer, which moves
 var _dbs_uniqn = 0;
 
-fn dbus_session_unique_len() { return _dbs_uniqn; }
-fn dbus_session_unique()     { return _dbs_uniq; }
-
 # Copy, never alias: the name arrives inside the framer's buffer and
-# dbus_frame_advance / maybe_compact will move or overwrite it.
+# dbus_frame_advance / compaction will move or overwrite it.
 fn dbus_session_set_unique(p, n) {
     if (p == 0)  { return -22; }
     if (n <= 0)  { return -22; }
@@ -132,14 +128,12 @@ fn dbus_session_next_serial() {
 
 fn dbus_session_reset() {
     _dbs_serial = 0;
-    _dbs_last_err = 0;
     _dbs_closed = 0;
     _dbs_uniqn = 0;
     _dbs_timeout_ms = 25000;
+    _dbs_clock_fail = 0;
     return 0;
 }
-
-fn dbus_session_last_error() { return _dbs_last_err; }
 
 fn dbus_session_closed() { return _dbs_closed; }
 
@@ -179,6 +173,24 @@ fn _dbs_io_fail(e) {
     return e;
 }
 
+# The errno for a framer fault, or 0 if `r` is not one. ONE mapping
+# shared by the call path and pump_signals (1.1.2): until then each
+# carried its own copy, and two copies of a parity table are how the
+# backends drift apart. EOF, with or without a partial message, is the
+# connection going — sd-bus reads it as -ECONNRESET either way
+# (bus-socket.c) — so it latches _dbs_closed. An unreadable stream is
+# -EPROTO (sd-bus says -EBADMSG for a bad endian byte: a documented
+# divergence), and a message declaring >= 128 MiB is -ENOBUFS, as in
+# sd-bus.
+fn _dbs_frame_fault(r) {
+    if (r == dbus_frame_eof())       { return _dbs_lost(); }
+    if (r == dbus_frame_truncated()) { return _dbs_lost(); }
+    if (r == dbus_frame_badendian()) { return -71; }
+    if (r == dbus_frame_badproto())  { return -71; }
+    if (r == dbus_frame_toolong())   { return -105; }
+    return 0;
+}
+
 # ---- error mapping ----
 # The frozen API promises "sd-bus errno pass-through", so the native
 # backend has to reproduce libsystemd's dbus-name -> errno mapping
@@ -198,16 +210,6 @@ fn _dbs_io_fail(e) {
 # libsystemd. Scope: org.freedesktop.DBus.Error.* (sd-bus's own map),
 # org.freedesktop.login1.* and System.Error.* — the only peers samvada
 # calls. Anything else is -EIO, as it is in sd-bus.
-fn _dbs_name_is(p, n, lit) {
-    if (n != strlen(lit)) { return 0; }
-    var i = 0;
-    while (i < n) {
-        if (load8(p + i) != load8(lit + i)) { return 0; }
-        i = i + 1;
-    }
-    return 1;
-}
-
 fn _dbs_has_prefix(p, n, lit) {
     var ln = strlen(lit);
     if (n < ln) { return 0; }
@@ -217,6 +219,11 @@ fn _dbs_has_prefix(p, n, lit) {
         i = i + 1;
     }
     return 1;
+}
+
+fn _dbs_name_is(p, n, lit) {
+    if (n != strlen(lit)) { return 0; }
+    return _dbs_has_prefix(p, n, lit);
 }
 
 # System.Error.<NAME> -> errno, as sd-bus's errno_from_name() reads it:
@@ -438,8 +445,20 @@ fn dbus_session_clock_monotonic() { return 1; }
 
 var _dbs_ts = 0;
 
+# Test hook (1.1.2): the clock answers `n` more times, then fails with
+# -EFAULT, so the deadline paths' clock-failure branches are reachable
+# from a test. 0 = off; reset by dbus_session_reset().
+var _dbs_clock_fail = 0;
+fn dbus_session_fail_clock_after(n) {
+    if (n < 0) { _dbs_clock_fail = 0; return 0; }
+    _dbs_clock_fail = n + 1;
+    return 0;
+}
+
 # Monotonic milliseconds, or a negative errno if the clock fails.
 fn dbus_session_now_ms() {
+    if (_dbs_clock_fail == 1) { return -14; }
+    if (_dbs_clock_fail > 1) { _dbs_clock_fail = _dbs_clock_fail - 1; }
     if (_dbs_ts == 0) { _dbs_ts = alloc(16); }
     if (_dbs_ts == 0) { return -12; }
     store64(_dbs_ts + 0, 0);
@@ -472,6 +491,10 @@ fn dbus_session_timeout_ms() { return _dbs_timeout_ms; }
 # position as dbus_frame_close_fds and the whole dbus_unmarshal_*
 # surface, which is the premise AUDIT-1 already rests on. The real
 # contract is now stated in public-api.md instead of denied here.
+# (Since 1.1.1 the bundle is private-by-default — src/visibility.cyr —
+# so a Cyrius consumer can no longer name this, or any other internal fn
+# of the bundle; C code linked against an `object;` build still can.)
+#
 # One day, well past any bus's patience and far below the point where
 # `t0 + timeout` could overflow i64. The cap is not cosmetic: the
 # deadline is armed as `deadline = t0 + timeout` and gated on
@@ -510,11 +533,11 @@ fn dbus_session_eagain() { return -11; }
 # a scratch OUT-parameter whose value dies within a few statements;
 # none is live across another's use.
 #   +0,+8  dest_ok       — find_field out, str_at out
-#   +16    drop_fds_of   — find_field out
+#   +16    take_device   — find_field sig out, UNIX_FDS
 #   +24    reply loop    — find_field sig out
 #   +32    reply loop    — ERROR name ptr
-#   +40    reply loop    — received fd
-#   +48    pump_signals  — received fd
+#   +40    take_device   — body signature ptr
+#   +48    (free since 1.1.2: the receive no longer has an fd out-slot)
 #   +56    a reply body's string — Hello's unique name, GetSessionByPID's path
 var _dbs_scr = 0;
 fn _dbs_scratch() {
@@ -551,8 +574,9 @@ fn dbus_session_dest_ok(p) {
 # reason is a lesson learned twice in one release.
 #
 # These fns ship in dist/samvada.cyr — 198 exported functions against
-# a documented public surface of seven — so a consumer we do not
-# control reaches them directly. strlen(sess) on a null pointer is a
+# a documented public surface of seven, when this was written — so a
+# consumer we do not control reached them directly (private-by-default
+# since 1.1.1, but C linked against an `object;` build still can). strlen(sess) on a null pointer is a
 # segfault, not an error code. The PUBLIC path survives only because
 # samvada_init happens to allocate _samvada_sess as a zeroed buffer,
 # so it is never null there: luck, not design, which is the exact
@@ -564,9 +588,14 @@ fn dbus_session_dest_ok(p) {
 # too. Measured: exit=139 before, -22 after. Hence ONE predicate that
 # all four call, rather than four copies of a guard that can be
 # half-applied again.
+#
+# 1.1.2: and it must be a valid object path. It goes on the wire as the
+# PATH field, and an empty, relative or trailing-slash path was sent as
+# given — a message sd-bus refuses to build (-EINVAL) and a broker may
+# treat as a protocol violation (P(-1) re-verification).
 fn dbus_session_sess_ok(sess) {
     if (sess == 0) { return 0; }
-    return 1;
+    return dbus_unmarshal_path_ok(sess, strlen(sess));
 }
 
 # ---- device-number validation ----
@@ -588,78 +617,130 @@ fn dbus_session_devnum_ok(v) {
     return 1;
 }
 
-# Discard the descriptors that arrived with a message we are about
-# to throw away.
-#
-# There is ONE fd queue and it had TWO fill sites — the reply loop
-# and pump_signals — but only ONE drain site, take_device, which
-# pops FIFO. logind's ResumeDevice signal carries an fd, and
-# pump_signals never surfaces signals (ADR-0004), so that descriptor
-# sat at the head of the queue until the next take_device collected
-# it BY MISTAKE. Measured before this fix, with a signal fd and a
-# reply fd both queued:
-#
-#   signal fd X inode = 3201875
-#   reply  fd Y inode = 3201877
-#   take_fd() inode   = 3201875   <-- the SIGNAL's fd
-#
-# A compositor asking for an input device would have been handed the
-# DRM descriptor from an earlier resume. Exactly AUDIT-4's shape: an
-# index into a queue whose fill path was never exercised.
-#
-# The fix is the one the wire format already specifies: a message
-# declares its own descriptor count in UNIX_FDS, and SCM_RIGHTS
-# descriptors arrive in stream order, so discarding a message means
-# discarding exactly that many from the head.
-# How many descriptors the message at `p` declares (its UNIX_FDS).
-fn _dbs_unix_fds(p) {
-    var sc = _dbs_scratch() + 16;
-    var off = dbus_unmarshal_find_field(p, dbus_marshal_f_unixfds(), sc);
-    if (off < 0) { return 0; }                # absent or malformed: none
-    var n = dbus_unmarshal_u32(p, off);
-    if (n <= 0) { return 0; }
-    # A lying UNIX_FDS must not turn into an unbounded close loop.
-    var cap = dbus_frame_fdq_cap();
-    if (n > cap) { n = cap; }
-    return n;
-}
+# ---- descriptors belong to the message they arrived with ----
+# Twice now a descriptor has reached take_device from the wrong message.
+# 1.0.1: a ResumeDevice SIGNAL's descriptor sat at the head of the one
+# fd queue until the next take_device collected it — measured, signal
+# fd inode 3201875, reply fd 3201877, take_fd() 3201875. The fix counted
+# each consumed message's descriptors from its own UNIX_FDS field and
+# closed that many. 1.1.2: that count is only as good as the parse, and
+# a message samvada cannot walk — any big-endian one, or one with an
+# unknown field type ahead of UNIX_FDS — counted as carrying NONE, so a
+# bus peer could plant a descriptor of its choosing ahead of the
+# TakeDevice reply's and have it returned as the device (P(-1) audit,
+# H1). Now the framer owns attribution (dbus_frame_fdq_cap): every read
+# stops at the end of the head message, and advancing past a message
+# closes every descriptor it did not hand out. Nothing about the
+# message's own contents is consulted.
 
-# Close `n` descriptors from the head of the queue.
-fn _dbs_drop_n(n) {
-    var closed = 0;
-    var i = 0;
-    while (i < n) {
-        var fd = dbus_frame_take_fd();
-        if (fd >= 0) {
-            sys_close(fd);
-            closed = closed + 1;
-        }
-        i = i + 1;
-    }
-    return closed;
-}
-
-fn dbus_session_drop_fds_of(p) {
-    return _dbs_drop_n(_dbs_unix_fds(p));
-}
-
-# Consume the reply dbus_session_call left at the frame base, closing
-# every descriptor it carried. All reply-consuming paths but
-# take_device go through here (1.1.1): until then they advanced past
-# the reply with dbus_frame_advance() alone, so a descriptor riding on
-# a TakeControl, ReleaseDevice or GetSessionByPID reply — or on an
-# ERROR reply — stayed at the head of the queue for the next
-# take_device to pop as its own. Only the bus and logind can send a
-# reply (the forgery audit), and neither puts a descriptor on these,
-# so this is defence in depth: the queue's invariant is that every
-# consumed message takes its own descriptors with it.
+# Consume the reply dbus_session_call left at the frame base; every
+# descriptor it carried is closed with it (dbus_frame_advance).
 fn dbus_session_done() {
     var r = dbus_frame_next();
     if (r <= 0) { return 0; }
-    dbus_unmarshal_set_limit(r);
-    dbus_session_drop_fds_of(dbus_frame_base());
     dbus_frame_advance(r);
     return 0;
+}
+
+# ONE receive, bounded to the message at the head of the buffer, and the
+# descriptors that came with it queued as that message's. Shared by the
+# call path and pump_signals so the two cannot attribute differently.
+#
+#   returns > 0  bytes received
+#           0    the peer closed (EOF is now recorded in the framer)
+#           < 0  the receive's errno, untouched
+fn _dbs_recv(fd, flags) {
+    var want = dbus_frame_prepare(dbus_frame_want());
+    # Nothing can be read without crossing a message boundary — an
+    # impossible state once dbus_frame_next has said need_more. Treat it
+    # as a cut stream rather than read past the boundary.
+    if (want <= 0) { dbus_frame_set_eof(); return 0; }
+    var got = dbus_sys_recv(fd, dbus_frame_tail(), want, flags);
+    if (got < 0) { return got; }
+    if (got == 0) { dbus_frame_set_eof(); return 0; }
+    dbus_frame_commit(got);
+    var n = dbus_sys_rx_count();
+    var i = 0;
+    while (i < n) {
+        # Never on a stdio number (1.1.2): in a consumer that closed
+        # stdout, a device on 1 would take every later print — and on an
+        # evdev node a write is injected input. A move that fails loses
+        # the descriptor, so the message's count no longer matches and a
+        # TakeDevice reply is refused.
+        var rfd = dbus_sys_rx_fd(i);
+        if (rfd <= 2) { rfd = dbus_socket_above_stdio(rfd); }
+        dbus_frame_push_fd(rfd);
+        i = i + 1;
+    }
+    if (dbus_sys_rx_truncated() != 0) { dbus_frame_fds_incomplete(); }
+    return got;
+}
+
+# Reads a call may make when the clock has failed and there is no
+# deadline: the bound of last resort. With a working clock (always, on
+# Linux) the deadline is the only bound.
+fn dbus_session_read_backstop() { return 65536; }
+
+# ---- a write the deadline bounds (1.1.2) ----
+# Write all `len` bytes, or give up at `deadline` (monotonic ms; 0 = no
+# clock: SO_SNDTIMEO, armed at connect, is the bound). With a deadline
+# every send is MSG_DONTWAIT, and a full send buffer is a poll for
+# writability for the time left.
+#
+# Until 1.1.2 the send was outside every bound: dbus_socket_write_all
+# blocked, retried EINTR without limit, and no SO_SNDTIMEO was set, so a
+# broker that stopped reading blocked the call for ever once the send
+# buffer filled — "the call ends at its deadline" held only for the
+# receive (P(-1) re-verification).
+#
+#   returns len, -110 at the deadline, or a send errno. A request cut off
+#   part-way leaves half a message in the stream, which can never be
+#   resynchronised: the connection is then latched closed.
+fn _dbs_write(fd, buf, len, deadline) {
+    if (buf == 0) { return -22; }
+    if (len < 0)  { return -22; }
+    var sent = 0;
+    var now = 0;
+    while (sent < len) {
+        var flags = dbus_socket_msg_nosignal();
+        if (deadline > 0) { flags = flags | dbus_sys_msg_dontwait(); }
+        var n = sys_sendto(fd, buf + sent, len - sent, flags, 0, 0);
+        if (n == -4) { continue; }                # EINTR
+        var full = 0;
+        if (n == dbus_session_eagain()) { full = 1; }
+        if (full == 1) {
+            var out = 0;
+            if (deadline <= 0) { out = 1; }       # SO_SNDTIMEO expired
+            if (out == 0) {
+                now = dbus_session_now_ms();
+                if (now < 0) { out = 1; }
+                if (out == 0) {
+                    if (now >= deadline) { out = 1; }
+                }
+                if (out == 0) {
+                    var ready = fd_wait_ready(fd, 1, deadline - now);
+                    if (ready == 0) { out = 1; }
+                    if (ready < 0) {
+                        if (ready != -4) { return _dbs_cut(sent, ready); }
+                    }
+                }
+            }
+            if (out == 1) { return _dbs_cut(sent, -110); }
+            continue;
+        }
+        if (n < 0) { return _dbs_cut(sent, n); }
+        if (n == 0) { return _dbs_cut(sent, -32); }   # -EPIPE: no progress possible
+        sent = sent + n;
+    }
+    return sent;
+}
+
+# A send that stops part-way left half a message in the stream, which no
+# later write can resynchronise: latch the connection closed, whatever
+# stopped it (1.1.2 final pass: only the timeout latched).
+fn _dbs_cut(sent, err) {
+    if (sent > 0) { _dbs_closed = 1; }
+    return err;
 }
 
 # ---- the call/reply cycle ----
@@ -673,21 +754,6 @@ fn dbus_session_done() {
 # via dbus_frame_base()), or a negative errno on an ERROR reply or
 # transport failure.
 fn dbus_session_call(fd, serial) {
-    # SEND-TIME WATERMARK, captured before the request goes out.
-    # Bytes already sitting in the buffer cannot be a reply to a
-    # request that has not been sent yet — no peer can answer before
-    # it receives. sd-bus gets this for free by remembering the
-    # receive queue's length at send time (sd-bus.c:2448); samvada's
-    # framer is a byte buffer, so the equivalent is the count of
-    # bytes already pending, decremented as they are consumed.
-    #
-    # A COUNT, not an offset, on purpose: dbus_frame_maybe_compact()
-    # slides the buffer contents and would invalidate any absolute
-    # position. The count of outstanding bytes survives it.
-    #
-    # This closes the pre-plant window that sequential serials would
-    # otherwise leave open: an attacker who can get bytes into the
-    # buffer early cannot have them answer a later call.
     # Refuse to transmit a message the marshaller could not build.
     # Without this, an over-long or negative length poisons the buffer
     # and dbus_marshal_len() still reports a total — which would put
@@ -695,28 +761,66 @@ fn dbus_session_call(fd, serial) {
     if (dbus_marshal_bad() != 0) { return -22; }
     if (_dbs_closed != 0) { return -107; }        # -ENOTCONN: see _dbs_closed
 
-    var stale = dbus_frame_have();
+    # Nor is a request written onto a stream that can no longer be framed
+    # (1.1.2). A bad endian byte, a bad version or a header declaring
+    # >= 128 MiB is never consumed, so every later read stops at it; until
+    # 1.1.2 each later call still SENT its request — a TakeControl, say,
+    # that logind then acted on — and only afterwards reported the fault.
+    # The fault's errno is unchanged, and it is not a disconnect: sd-bus
+    # does not close the bus for -EBADMSG either.
+    var lost = dbus_frame_next();
+    if (lost < 0) {
+        if (lost != dbus_frame_need_more()) {
+            var lf = _dbs_frame_fault(lost);
+            if (lf < 0) { return lf; }
+        }
+    }
 
-    # WALL-CLOCK DEADLINE for the whole call. SO_RCVTIMEO (armed at
-    # connect) bounds a single receive, but not the call: a peer that
-    # dribbles one byte per read satisfies every individual timeout
-    # while the call runs unbounded. The deadline is what actually
-    # closes that, and it is why the bound is a clock and not the
-    # pre-existing "64 spins", which counts MESSAGES.
+    # SEND-TIME WATERMARK, captured before the request goes out. Bytes
+    # already received cannot be a reply to a request that has not been
+    # sent yet — no peer can answer before it receives. sd-bus gets this
+    # by remembering the receive queue's length at send time
+    # (sd-bus.c:2448). This closes the pre-plant window sequential serials
+    # would otherwise leave open: bytes an attacker gets into the buffer
+    # early cannot answer a later call.
     #
-    # A clock failure disables the deadline rather than failing the
-    # call — degrade to the old behaviour, do not invent an error.
+    # A STREAM POSITION since 1.1.2: a message whose first byte arrived
+    # before `wm` predates the request, including one that straddles it.
+    # Until then it was a count of pending bytes, decremented by each
+    # message consumed — and not by the bytes an over-cap drain discarded,
+    # so after a drain the count never reached 0 and the genuine reply
+    # was refused as stale (P(-1) audit, M3).
+    var wm = dbus_frame_received();
+
+    # WALL-CLOCK DEADLINE for the whole call, and since 1.1.2 the ONLY
+    # bound on it. SO_RCVTIMEO bounds a single receive, not the call: a
+    # peer that dribbles one byte per read satisfies every individual
+    # timeout while the call runs unbounded. So every wait is a poll for
+    # the time that is LEFT, and the call ends at the deadline — not at
+    # deadline + one more SO_RCVTIMEO, as it could before.
+    #
+    # Until 1.1.2 the loop was also capped at 64 reads. That counted
+    # MESSAGES, and a bus peer can send messages: 64 one-descriptor
+    # signals (or 512 KiB of junk) ahead of the reply failed the call
+    # with -ETIMEDOUT at once (P(-1) audit, M2).
+    #
+    # A clock that fails at t0 leaves the call without a deadline rather
+    # than failing it; the read backstop and SO_RCVTIMEO are what is
+    # left. One that fails mid-call ends it (-ETIMEDOUT): see the wait.
     var deadline = 0;
     var t0 = dbus_session_now_ms();
     if (t0 >= 0) { deadline = t0 + dbus_session_timeout_ms(); }
 
     var total = dbus_marshal_len();
-    var w = dbus_socket_write_all(fd, dbus_marshal_buf(), total);
+    var w = _dbs_write(fd, dbus_marshal_buf(), total, deadline);
+    # The deadline's own -ETIMEDOUT is not a disconnect (see
+    # dbus_session_is_disconnect); a send errno is classified.
+    if (w == -110) { return -110; }
     if (w < 0) { return _dbs_io_fail(w); }
 
-    var spins = 0;
-    var fdslot = _dbs_scratch() + 40;
-    while (spins < 64) {
+    var reads = 0;
+    var now = 0;
+    while (1 == 1) {
         var r = dbus_frame_next();
         while (r > 0) {
             var p = dbus_frame_base();
@@ -726,17 +830,22 @@ fn dbus_session_call(fd, serial) {
             dbus_unmarshal_set_limit(r);
             var ty = dbus_unmarshal_type(p);
             var sig = _dbs_scratch() + 24;
-            var rs_off = dbus_unmarshal_find_field(p, dbus_marshal_f_replyser(), sig);
+            # The whole field array is validated before anything is read
+            # from it (1.1.2), so acceptance cannot depend on field order.
+            # An invalid message is nobody's reply: it is dropped, as
+            # sd-bus drops it, and the call waits on.
+            var rs_off = (0 - 1);
+            if (dbus_unmarshal_validate(p) == 0) {
+                rs_off = dbus_unmarshal_find_field(p, dbus_marshal_f_replyser(), sig);
+            }
             var mine = 0;
             if (rs_off > 0) {
                 if (dbus_unmarshal_u32(p, rs_off) == serial) { mine = 1; }
             }
-            # Predates the request: it was in the buffer before we
-            # wrote, so whatever it is answering, it is not this.
-            # A message that straddles the watermark started arriving
-            # before the request left, so it counts as stale too.
+            # Predates the request: it started arriving before we wrote,
+            # so whatever it is answering, it is not this.
             if (mine == 1) {
-                if (stale > 0) { mine = 0; }
+                if (dbus_frame_pos() < wm) { mine = 0; }
             }
             # Addressed to someone else, whatever its REPLY_SERIAL says.
             if (mine == 1) {
@@ -753,74 +862,65 @@ fn dbus_session_call(fd, serial) {
                         var n = dbus_unmarshal_str_at(p, eo, ptr);
                         rc = dbus_session_map_error(load64(ptr), n);
                     }
-                    _dbs_last_err = rc;
-                    # An ERROR reply is consumed here, so its descriptors go
-                    # with it — left queued, the next take_device would pop
-                    # one FIFO as its own (1.1.1; the 1.0.1 shape).
-                    dbus_session_drop_fds_of(p);
-                    dbus_frame_advance(r);
+                    dbus_frame_advance(r);        # and its descriptors
                     return rc;
                 }
             }
-            # Not ours — a signal, a pre-existing message, or a
-            # reply to something else. Its descriptors go with it.
-            dbus_session_drop_fds_of(p);
-            if (stale > 0) {
-                stale = stale - r;
-                if (stale < 0) { stale = 0; }
-            }
+            # Not ours — a signal, a pre-existing message, or a reply to
+            # something else. Its descriptors go with it.
             dbus_frame_advance(r);
             r = dbus_frame_next();
         }
-        # EOF, with or without a partial message, is the connection
-        # going: sd-bus reads it as -ECONNRESET either way (bus-socket.c).
-        if (r == dbus_frame_eof())       { return _dbs_lost(); }
-        if (r == dbus_frame_truncated()) { return _dbs_lost(); }
-        if (r == dbus_frame_badendian()) { return -71; }
-        if (r == dbus_frame_badproto())  { return -71; }
-        if (r == dbus_frame_toolong())   { return -105; }   # -ENOBUFS, as sd-bus
+        var fault = _dbs_frame_fault(r);
+        if (fault < 0) { return fault; }
 
-        dbus_frame_maybe_compact();
         # THE REPLY IS AN FD-BEARING MESSAGE, so this read must be a
         # recvmsg. TakeDevice's entire purpose is the descriptor, and
-        # Inhibit returns one too. sys_read() delivers the BYTES and
-        # lets the kernel discard the SCM_RIGHTS payload: the reply
-        # parses perfectly, its UNIX_FDS field still says 1, the body
-        # still carries a valid index, and the descriptor is simply
-        # gone. Nothing downstream can tell.
-        #
-        # This was the one message samvada could never receive. It
-        # survived five releases because an unseated host answers
-        # TakeDevice with AccessDenied, and an ERROR reply carries no
-        # fd — so the fd path was never once exercised. Measured on
-        # the live bus via Inhibit: UNIX_FDS=1, take_fd() == -1.
-        # The pump path always used recvmsg; this one did not.
-        # Out of time before committing to another blocking receive.
+        # Inhibit returns one too. sys_read() delivers the BYTES and lets
+        # the kernel discard the SCM_RIGHTS payload: the reply parses
+        # perfectly, its UNIX_FDS field still says 1, and the descriptor
+        # is simply gone. It survived five releases because an unseated
+        # host answers TakeDevice with AccessDenied, which carries no fd.
+        # With a deadline the receive never blocks: the poll waited, and a
+        # poll can report a socket readable with nothing to read — one
+        # MSG_OOB byte does it — so a blocking receive there would sit out
+        # SO_RCVTIMEO past the deadline, or for ever without it (P(-1)
+        # re-verification). -EAGAIN after a ready poll is a poll again.
+        var flags = 0;
         if (deadline > 0) {
-            var now = dbus_session_now_ms();
+            now = dbus_session_now_ms();
+            # A clock that worked at t0 and fails now cannot be allowed to
+            # disarm the bound mid-call — `deadline - now` with a negative
+            # `now` is a poll of ~24 days. The call times out instead.
+            if (now < 0) { return -110; }
             if (now >= deadline) { return -110; }
+            var ready = fd_wait_ready(fd, 0, deadline - now);
+            if (ready == 0) { return -110; }      # the deadline passed first
+            if (ready == -4) { continue; }        # EINTR: re-check the clock
+            if (ready < 0) { return _dbs_io_fail(ready); }
+            flags = dbus_sys_msg_dontwait();
         }
-
-        var space = dbus_frame_space();
-        if (space <= 0) { dbus_frame_set_eof(); }
-        if (space > 0) {
-            store64(fdslot, (0 - 1));
-            var got = dbus_sys_recv_fd_flags(fd, dbus_frame_tail(), space,
-              fdslot, 0);
-            if (got == 0) { dbus_frame_set_eof(); }
-            # SO_RCVTIMEO expired: the whole receive budget passed
-            # with nothing arriving. Report it as a timeout, not as
+        if (deadline <= 0) {
+            reads = reads + 1;
+            if (reads > dbus_session_read_backstop()) { return -110; }
+        }
+        var got = _dbs_recv(fd, flags);
+        # EINTR is retried, not returned (1.1.2): SO_RCVTIMEO makes the
+        # kernel refuse to restart an interrupted receive, so any signal
+        # the consumer handles arrived here as -EINTR and failed the call
+        # (P(-1) audit, M4). The deadline still bounds the retry.
+        if (got == -4) { continue; }
+        if (got == dbus_session_eagain()) {
+            if (deadline > 0) { continue; }
+            # SO_RCVTIMEO expired, on the clock-failed path: the whole
+            # receive budget passed with nothing arriving. A timeout, not
             # the raw -EAGAIN, which would reach the consumer as a
             # nonsensical "try again" on a blocking API.
-            if (got == dbus_session_eagain()) { return -110; }
-            if (got < 0)  { return _dbs_io_fail(got); }
-            if (got > 0)  { dbus_frame_commit(got); }
-            var qfd = load64(fdslot);
-            if (qfd >= 0) { dbus_frame_push_fd(qfd); }
+            return -110;
         }
-        spins = spins + 1;
+        if (got < 0) { return _dbs_io_fail(got); }
     }
-    return -110;                                  # -ETIMEDOUT
+    return -110;                                  # -ETIMEDOUT (unreachable)
 }
 
 # ---- no allocation per call (1.1.1, A-1) ----
@@ -854,6 +954,158 @@ var _dbs_blob = 0;
 # Every fn below matches a frozen fncallN shape exactly. The
 # `bus` argument is the connected socket fd.
 
+# Does the message at `p` (limit already set) carry body signature `lit`?
+# An absent SIGNATURE field is the empty signature.
+fn _dbs_body_sig_is(p, lit) {
+    var sc = _dbs_scratch() + 16;
+    var so = dbus_unmarshal_find_field(p, dbus_marshal_f_signature(), sc);
+    if (so == dbus_unmarshal_notfound()) {
+        if (strlen(lit) == 0) { return 1; }
+        return 0;
+    }
+    if (so < 0) { return 0; }
+    var sp = _dbs_scratch() + 40;
+    var sn = dbus_unmarshal_sig_at(p, so, sp);
+    return _dbs_name_is(load64(sp), sn, lit);
+}
+
+# Reads the SASL handshake may make when the clock has failed.
+fn dbus_session_sasl_backstop() { return 4096; }
+
+# The SASL EXTERNAL exchange on a connected socket: write the pipelined
+# blob, then read server lines until AGREE_UNIX_FD.
+#
+#   returns 0              authenticated, fd passing agreed
+#           -13 (EACCES)   the server said REJECTED or ERROR
+#           -110           the deadline passed
+#           -104           the server closed the connection
+#           -71 (EPROTO)   the buffer filled with no complete exchange
+#           other < 0      the receive's errno
+#
+# Bounded like the call path (1.1.2): one deadline, every wait a poll
+# for the time left, a non-blocking receive after it, EINTR retried
+# without using up anything. Until 1.1.2 the loop was also capped at 32
+# reads — a server that sent its 58-byte reply in more than 32 pieces
+# failed the connect — every failure was reported -13, and a signal
+# used up one of the 32 (P(-1) re-verification).
+fn dbus_session_sasl(fd) {
+    if (_dbs_blob == 0) { _dbs_blob = alloc(64); }
+    if (_dbs_blob == 0) { return -12; }
+    var deadline = 0;
+    var t0 = dbus_session_now_ms();
+    if (t0 >= 0) { deadline = t0 + dbus_session_timeout_ms(); }
+    var bn = dbus_auth_write_blob(_dbs_blob);
+    var w = _dbs_write(fd, _dbs_blob, bn, deadline);
+    if (w < 0) { return w; }
+    var reads = 0;
+    var now = 0;
+    while (1 == 1) {
+        # A buffer full of lines with no end will never complete: say so
+        # now, rather than wait out the deadline for room that cannot come.
+        var space = dbus_frame_space();
+        if (space <= 0) { return -71; }
+        var flags = 0;
+        if (deadline > 0) {
+            now = dbus_session_now_ms();
+            if (now < 0) { return -110; }         # the clock failed mid-way
+            if (now >= deadline) { return -110; }
+            var ready = fd_wait_ready(fd, 0, deadline - now);
+            if (ready == 0) { return -110; }
+            if (ready == -4) { continue; }
+            if (ready < 0) { return ready; }
+            flags = dbus_sys_msg_dontwait();
+        }
+        if (deadline <= 0) {
+            reads = reads + 1;
+            if (reads > dbus_session_sasl_backstop()) { return -110; }
+        }
+        # recvmsg, not read(): the same receive the call path uses. A
+        # descriptor here would be a server breaking the protocol; it is
+        # closed, not queued — no message owns it.
+        var got = dbus_sys_recv(fd, dbus_frame_tail(), space, flags);
+        var i = 0;
+        while (i < dbus_sys_rx_count()) { sys_close(dbus_sys_rx_fd(i)); i = i + 1; }
+        if (got == -4) { continue; }
+        if (got == dbus_session_eagain()) {
+            if (deadline > 0) { continue; }
+            return -110;                          # SO_RCVTIMEO, no clock
+        }
+        if (got < 0) { return got; }
+        if (got == 0) { return -104; }            # -ECONNRESET, as sd-bus
+        dbus_frame_commit(got);
+        var st = dbus_auth_drain_lines();
+        if (st == dbus_auth_ok()) { return 0; }
+        if (st != dbus_auth_need_more()) { return -13; }
+    }
+    return -110;
+}
+
+# The connect handshake on a connected socket: SASL, then Hello, whose
+# reply names us. Split out of dbus_native_open_system_bus (1.1.2) so it
+# can be driven over a socketpair: until then it ran only against the
+# real system bus, and none of its failure paths had a test.
+#
+#   returns 0 or a negative errno; the caller closes `fd` on failure.
+fn dbus_session_handshake(fd) {
+    var sr = dbus_session_sasl(fd);
+    if (sr < 0) { return sr; }
+    return dbus_session_hello(fd);
+}
+
+# Hello, so the bus assigns a unique name. Without it every subsequent
+# call is refused. A failure closes whatever descriptors it left queued
+# (1.1.2: they stayed open until the next init).
+fn dbus_session_hello(fd) {
+    var rc = _dbs_hello(fd);
+    if (rc < 0) { dbus_frame_close_fds(); }
+    return rc;
+}
+
+fn _dbs_hello(fd) {
+    var serial = dbus_session_next_serial();
+    var hpath = "/org/freedesktop/DBus";
+    dbus_marshal_begin(dbus_marshal_type_call(), 0, serial);
+    dbus_marshal_field_str(dbus_marshal_f_path(), 111, hpath, strlen(hpath));
+    var hm = "Hello";
+    dbus_marshal_field_str(dbus_marshal_f_member(), 115, hm, strlen(hm));
+    var bus_name = "org.freedesktop.DBus";
+    dbus_marshal_field_str(dbus_marshal_f_interface(), 115, bus_name, strlen(bus_name));
+    dbus_marshal_field_str(dbus_marshal_f_dest(), 115, bus_name, strlen(bus_name));
+    dbus_marshal_end_fields();
+    dbus_marshal_finish();
+    var rc = dbus_session_call(fd, serial);
+    if (rc < 0) { return rc; }
+
+    # KEEP the assigned unique name. The Hello reply's body is a
+    # single STRING and samvada used to advance straight past it —
+    # which is precisely why it could not tell whether any later
+    # reply was addressed to it. Everything dbus_session_dest_ok()
+    # does rests on this one string.
+    #
+    # And check it (1.1.2): an `s` body, a name that starts ':' (a unique
+    # name, sd-bus's hello_callback), with no NUL inside. -EPROTO if not.
+    var hlen = dbus_frame_next();
+    dbus_unmarshal_set_limit(hlen);
+    var hp = dbus_frame_base();
+    var ok = _dbs_body_sig_is(hp, "s");
+    dbus_unmarshal_body_begin(hp);
+    var uptr = _dbs_scratch() + 56;
+    var un = dbus_unmarshal_next_str(uptr);
+    if (un < 2) { ok = 0; }
+    if (ok == 1) {
+        if (load8(load64(uptr)) != 58) { ok = 0; }               # ':'
+        if (_dbu_no_nul(load64(uptr), un) == 0) { ok = 0; }
+    }
+    if (ok == 0) {
+        dbus_frame_advance(hlen);
+        return -71;                               # -EPROTO: no unique name
+    }
+    var su = dbus_session_set_unique(load64(uptr), un);
+    dbus_frame_advance(hlen);
+    if (su < 0) { return su; }
+    return 0;
+}
+
 # fncall1(slot, bus_out) -> 0 | -err
 fn dbus_native_open_system_bus(bus_out) {
     dbus_frame_init();
@@ -869,75 +1121,11 @@ fn dbus_native_open_system_bus(bus_out) {
     var fd = dbus_socket_connect(sa, alen);
     if (fd < 0) { return fd; }
 
-    if (_dbs_blob == 0) { _dbs_blob = alloc(64); }
-    if (_dbs_blob == 0) { sys_close(fd); return -12; }
-    var blob = _dbs_blob;
-    var bn = dbus_auth_write_blob(blob);
-    var w = dbus_socket_write_all(fd, blob, bn);
-    if (w < 0) { sys_close(fd); return w; }
-
-    var st = dbus_auth_need_more();
-    var spins = 0;
-    while (spins < 32) {
-        var got = sys_read(fd, dbus_frame_tail(), dbus_frame_space());
-        # SO_RCVTIMEO covers the handshake too: a peer that accepts
-        # the connection and then says nothing used to hang here.
-        if (got == dbus_session_eagain()) { sys_close(fd); return -110; }
-        if (got <= 0) { spins = 99; }
-        if (got > 0) {
-            dbus_frame_commit(got);
-            st = dbus_auth_drain_lines();
-            if (st == dbus_auth_ok()) { spins = 99; }
-            if (st < 0) {
-                if (st != dbus_auth_need_more()) { spins = 99; }
-            }
-        }
-        spins = spins + 1;
-    }
-    if (st != dbus_auth_ok()) { sys_close(fd); return -13; }
-
-    # Hello, so the bus assigns a unique name. Without it every
-    # subsequent call is refused.
-    var serial = dbus_session_next_serial();
-    var hpath = "/org/freedesktop/DBus";
-    dbus_marshal_begin(dbus_marshal_type_call(), 0, serial);
-    dbus_marshal_field_str(dbus_marshal_f_path(), 111, hpath, strlen(hpath));
-    var hm = "Hello";
-    dbus_marshal_field_str(dbus_marshal_f_member(), 115, hm, strlen(hm));
-    var bus_name = "org.freedesktop.DBus";
-    dbus_marshal_field_str(dbus_marshal_f_interface(), 115, bus_name, strlen(bus_name));
-    dbus_marshal_field_str(dbus_marshal_f_dest(), 115, bus_name, strlen(bus_name));
-    dbus_marshal_end_fields();
-    dbus_marshal_finish();
-    var rc = dbus_session_call(fd, serial);
-    if (rc < 0) { sys_close(fd); return rc; }
-
-    # KEEP the assigned unique name. The Hello reply's body is a
-    # single STRING and samvada used to advance straight past it —
-    # which is precisely why it could not tell whether any later
-    # reply was addressed to it. Everything dbus_session_dest_ok()
-    # does rests on this one string.
-    var hlen = dbus_frame_next();
-    dbus_unmarshal_set_limit(hlen);
-    var hp = dbus_frame_base();
-    # The reply's descriptors, if any, go with it (see dbus_session_done).
-    dbus_session_drop_fds_of(hp);
-    dbus_unmarshal_body_begin(hp);
-    var uptr = _dbs_scratch() + 56;
-    var un = dbus_unmarshal_next_str(uptr);
-    if (un < 0) {
-        dbus_frame_advance(hlen);
+    var rc = dbus_session_handshake(fd);
+    if (rc < 0) {
         sys_close(fd);
-        return -71;                               # -EPROTO: no unique name
+        return rc;
     }
-    var sr = dbus_session_set_unique(load64(uptr), un);
-    if (sr < 0) {
-        dbus_frame_advance(hlen);
-        sys_close(fd);
-        return sr;
-    }
-    dbus_frame_advance(hlen);
-
     store64(bus_out, fd);
     return 0;
 }
@@ -960,10 +1148,17 @@ fn dbus_native_get_session_path(bus, pid, out_buf, out_len) {
     if (rc < 0) { return rc; }
     var p = dbus_frame_base();
     dbus_unmarshal_set_limit(dbus_frame_next());
+    # An `o` body holding a valid object path (1.1.2). The C shim's
+    # sd_bus_message_read("o") checks both; the native backend checked
+    # neither, so a path with an embedded NUL was copied out and later
+    # cut short by strlen().
+    var sig_ok = _dbs_body_sig_is(p, "o");
     dbus_unmarshal_body_begin(p);
     var ptr = _dbs_scratch() + 56;
     var n = dbus_unmarshal_next_str(ptr);
     if (n < 0) { dbus_session_done(); return -71; }
+    if (sig_ok == 0) { dbus_session_done(); return -71; }
+    if (dbus_unmarshal_path_ok(load64(ptr), n) == 0) { dbus_session_done(); return -71; }
     if (n + 1 > out_len) {
         dbus_session_done();
         return -105;                              # -ENOBUFS
@@ -1005,8 +1200,51 @@ fn dbus_native_release_control(bus, sess) {
     return rc;
 }
 
+# ---- is this descriptor the device that was asked for? (1.1.2) ----
+# logind opens the device node for the requested devnum — read-write,
+# O_RDWR|O_CLOEXEC|O_NOCTTY|O_NONBLOCK (logind-session-device.c) — and
+# hands the descriptor over, so a genuine TakeDevice descriptor is a
+# CHARACTER device whose rdev is exactly (major, minor), open O_RDWR and
+# not O_PATH. take_device asks the kernel, which no message can argue
+# with: a wrong attribution can no longer hand out a different device, a
+# socket, or a descriptor nobody could read.
+#
+# What it does NOT prove is provenance. A descriptor naming the same
+# node, opened read-write by anyone who may open it (renderD128 is
+# 0666), passes too — the attribution fix (dbus_frame_fdq_cap) is what
+# keeps such a descriptor from being handed out. The first cut checked
+# only the type and rdev, and an O_PATH descriptor — which any user can
+# open on any node, readable or not — passed (P(-1) final pass).
+#
+# statx, not fstat: struct statx has ONE layout on every Linux arch
+# (include/uapi/linux/stat.h — u16 stx_mode @28, u32 stx_rdev_major
+# @128, u32 stx_rdev_minor @132), where struct stat's differs between
+# x86_64 and aarch64. AT_EMPTY_PATH with "" stats the descriptor itself.
+var _dbs_stx = 0;                 # 256 bytes, allocated on first take
+
+fn dbus_session_fd_is_device(fd, major, minor) {
+    if (_dbs_stx == 0) { return 0; }
+    var i = 0;
+    while (i < 256) { store64(_dbs_stx + i, 0); i = i + 8; }
+    # Read-write, as logind opens it. This also refuses O_PATH: F_GETFL
+    # reports an O_PATH descriptor's access mode as O_RDONLY (a separate
+    # O_PATH test was mutation-tested and is subsumed by this one).
+    var fl = sys_fcntl(fd, 3, 0);                     # F_GETFL
+    if (fl < 0) { return 0; }
+    if ((fl & 3) != 2) { return 0; }                  # O_ACCMODE != O_RDWR
+    var rc = sys_statx(fd, "", 4096, 1, _dbs_stx);   # AT_EMPTY_PATH, STATX_TYPE
+    if (rc < 0) { return 0; }
+    var mode = load16(_dbs_stx + 28);
+    if ((mode & 61440) != 8192) { return 0; }         # S_IFMT, S_IFCHR
+    if (load32(_dbs_stx + 128) != major) { return 0; }
+    if (load32(_dbs_stx + 132) != minor) { return 0; }
+    return 1;
+}
+
 # fncall6(slot, bus, sess_cstr, major, minor, fd_out, active_out) -> 0 | -err
 fn dbus_native_take_device(bus, sess, major, minor, fd_out, active_out) {
+    if (_dbs_stx == 0) { _dbs_stx = alloc(256); }
+    if (_dbs_stx == 0) { return -12; }
     if (dbus_session_sess_ok(sess) == 0) { return -22; }
     var maj_ok = dbus_session_devnum_ok(major);
     var min_ok = dbus_session_devnum_ok(minor);
@@ -1027,23 +1265,48 @@ fn dbus_native_take_device(bus, sess, major, minor, fd_out, active_out) {
     var p = dbus_frame_base();
     var r = dbus_frame_next();
     dbus_unmarshal_set_limit(r);
-    var declared = _dbs_unix_fds(p);
+    # The reply must be the one logind sends, `(hb)`, with exactly the
+    # descriptors it says it carries — sd-bus's own rule (bus-message.c:
+    # a UNIX_FDS that disagrees with what arrived is -EBADMSG, and an
+    # `h` index past the descriptors is -EBADMSG). The queue holds this
+    # reply's descriptors and no other message's (dbus_frame_fdq_cap);
+    # the body's `h` is an INDEX into them, and it is honoured, not
+    # assumed to be 0. Anything else is the peer-bus contract violation
+    # public-api.md calls -EBADF, and nothing is handed out (1.1.2: until
+    # then the index and the signature were ignored, and a malformed
+    # `inactive` reached active_out as -1201).
+    var ok = 1;
+    var sc = _dbs_scratch() + 16;
+    var so = dbus_unmarshal_find_field(p, dbus_marshal_f_signature(), sc);
+    if (so < 0) { ok = 0; }
+    if (ok == 1) {
+        var sp = _dbs_scratch() + 40;
+        var sn = dbus_unmarshal_sig_at(p, so, sp);
+        if (_dbs_name_is(load64(sp), sn, "hb") == 0) { ok = 0; }
+    }
+    var declared = 0;
+    var uo = dbus_unmarshal_find_field(p, dbus_marshal_f_unixfds(), sc);
+    if (uo == dbus_unmarshal_malformed()) { ok = 0; }
+    if (uo > 0) { declared = dbus_unmarshal_u32(p, uo); }
+    if (declared != dbus_frame_fd_total()) { ok = 0; }
+    if (dbus_frame_fd_bad() != 0) { ok = 0; }
     dbus_unmarshal_body_begin(p);
     var idx = dbus_unmarshal_next_fd_index();
     var inactive = dbus_unmarshal_next_bool();
-    # The descriptor itself came via SCM_RIGHTS and was queued by
-    # the framer; the body carries only an index into that queue.
-    # Taken only if THIS reply declared one: with every consumed message
-    # dropping its own (dbus_session_done), the head of the queue is
-    # this reply's first descriptor or nothing — never a later
-    # message's. Any extra it declared goes with it.
+    if (idx < 0) { ok = 0; }
+    if (inactive < 0) { ok = 0; inactive = 0; }
     var fd = (0 - 1);
-    if (declared >= 1) { fd = dbus_frame_take_fd(); }
-    _dbs_drop_n(declared - 1);
+    if (ok == 1) { fd = dbus_frame_claim_fd(idx); }
+    if (fd >= 0) {
+        if (dbus_session_fd_is_device(fd, major, minor) == 0) {
+            sys_close(fd);
+            fd = (0 - 1);
+        }
+    }
     store64(fd_out, fd);
     store64(active_out, inactive);
-    dbus_frame_advance(r);
-    if (fd < 0) { return -9; }                    # -EBADF: no fd arrived
+    dbus_frame_advance(r);                        # closes every other one
+    if (fd < 0) { return -9; }                    # -EBADF: no usable fd
     return 0;
 }
 
@@ -1086,36 +1349,47 @@ fn dbus_native_release_device(bus, sess, major, minor) {
 fn dbus_native_pump_signals(bus) {
     var drained = 0;
     var io = 0;
-    if (bus > 0) {
-        dbus_frame_maybe_compact();
-        var space = dbus_frame_space();
-        if (space > 0) {
-            var scratch = _dbs_scratch() + 48;
-            store64(scratch, (0 - 1));
-            var got = dbus_sys_recv_fd_flags(bus, dbus_frame_tail(), space,
-              scratch, dbus_sys_msg_dontwait());
-            if (got > 0) { dbus_frame_commit(got); }
-            if (got == 0) { dbus_frame_set_eof(); }
-            # -EAGAIN is the normal "nothing to read"; a disconnect errno
-            # is the connection going.
-            if (got < 0) {
-                if (dbus_session_is_disconnect(got) != 0) { io = _dbs_lost(); }
-            }
-            var qfd = load64(scratch);
-            if (qfd >= 0) { dbus_frame_push_fd(qfd); }
-        }
-    }
-    var r = dbus_frame_next();
-    while (r > 0) {
-        drained = drained + 1;
-        # Signals are not surfaced (ADR-0004), so a descriptor riding
-        # on one has no owner. Closing it here is what keeps it from
-        # being collected by the next take_device.
-        dbus_unmarshal_set_limit(r);
-        dbus_session_drop_fds_of(dbus_frame_base());
-        dbus_frame_advance(r);
-        if (drained >= 256) { return drained; }
+    var reads = 0;
+    var more = 1;
+    var r = 0;
+    while (more == 1) {
         r = dbus_frame_next();
+        while (r > 0) {
+            drained = drained + 1;
+            # Signals are not surfaced (ADR-0004), so a descriptor riding
+            # on one has no owner: advancing past the message closes it.
+            dbus_frame_advance(r);
+            if (drained >= 256) { return drained; }
+            r = dbus_frame_next();
+        }
+        more = 0;
+        # Read until the socket is empty, one bounded receive at a time
+        # (1.1.2: it read once per call, which with reads bounded to one
+        # message would report at most one event per pump). Capped per
+        # call like the C shim's drain, and for the same reason: the
+        # frozen signature has no cap argument. A drain the cap cuts off
+        # continues on the next pump.
+        if (r == dbus_frame_need_more()) {
+            if (bus > 2) {
+                if (reads < 1024) { more = 1; }
+            }
+        }
+        if (more == 1) {
+            reads = reads + 1;
+            var got = _dbs_recv(bus, dbus_sys_msg_dontwait());
+            # -EAGAIN is the normal "nothing more to read", and an
+            # interrupted receive simply ends this pump. A disconnect errno
+            # is the connection going; any other failure is returned
+            # (1.1.2: it was swallowed, so a pump on a broken descriptor
+            # reported a quiet bus forever).
+            if (got < 0) {
+                more = 0;
+                var quiet = 0;
+                if (got == dbus_session_eagain()) { quiet = 1; }
+                if (got == -4) { quiet = 1; }
+                if (quiet == 0) { io = _dbs_io_fail(got); }
+            }
+        }
     }
     # A dead or corrupt stream is an ERROR, not "no events" (1.1.1,
     # A-4). Until 1.1.1 this returned `drained` whatever stopped the
@@ -1129,11 +1403,8 @@ fn dbus_native_pump_signals(bus) {
     # same state; the shim returns the error at once and drops the
     # count. An unreadable stream is -EPROTO, as on the call path.
     if (drained > 0) { return drained; }
-    if (r == dbus_frame_eof())       { return _dbs_lost(); }
-    if (r == dbus_frame_truncated()) { return _dbs_lost(); }
-    if (r == dbus_frame_badendian()) { return -71; }
-    if (r == dbus_frame_badproto())  { return -71; }
-    if (r == dbus_frame_toolong())   { return -105; }   # -ENOBUFS, as sd-bus
+    var fault = _dbs_frame_fault(r);
+    if (fault < 0) { return fault; }
     if (io < 0) { return io; }
     if (_dbs_closed != 0) { return -104; }      # sd-bus: BUS_CLOSED -> -ECONNRESET
     return 0;
@@ -1142,7 +1413,7 @@ fn dbus_native_pump_signals(bus) {
 # fncall1(slot, bus) -> 0
 fn dbus_native_close_bus(bus) {
     dbus_frame_close_fds();
-    if (bus > 0) { sys_close(bus); }
+    if (bus > 2) { sys_close(bus); }              # never stdio: see dbus_socket_connect
     return 0;
 }
 

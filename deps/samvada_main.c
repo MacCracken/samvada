@@ -64,11 +64,19 @@ extern long samvada_main(int64_t fn_table_ptr);
  * logging it.
  */
 
+/*
+ * A PRIVATE connection, not the thread's default bus (1.1.2). Session
+ * control belongs to a CONNECTION: on sd_bus_default_system's shared
+ * one, any other code in the consumer's process using the default bus
+ * would share samvada's TakeControl -- and samvada's close would not
+ * end it. sd_bus_open_system gives samvada a connection of its own,
+ * as the native backend has always had.
+ */
 static long
 sb_open_system_bus(int64_t bus_out_ptr)
 {
     sd_bus *bus = NULL;
-    int r = sd_bus_default_system(&bus);
+    int r = sd_bus_open_system(&bus);
     if (r < 0) {
         return (long)r;
     }
@@ -199,15 +207,30 @@ sb_take_device(int64_t bus_, int64_t sess_cstr, int64_t major, int64_t minor,
     }
     /* F_DUPFD_CLOEXEC, not dup(): dup() CLEARS FD_CLOEXEC, so the DRM-master
      * fd would survive any execve the consumer performs and leak master
-     * rights into an unrelated child (0.5.1, audit MED-3). */
-    int dup_fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+     * rights into an unrelated child (0.5.1, audit MED-3).
+     *
+     * Lowest acceptable descriptor 3, not 0 (1.1.2): a consumer started with
+     * stdin, stdout or stderr closed has 0, 1 or 2 free, and the device would
+     * land there. Every later print to stdout or stderr -- a libc warning, a
+     * Cyrius diagnostic -- would then be written INTO the device, and on an
+     * evdev node a write injects input events. */
+    int dup_fd = fcntl(fd, F_DUPFD_CLOEXEC, 3);
     int dup_errno = (dup_fd < 0) ? errno : 0;
     *(int32_t *)(uintptr_t)fd_out     = (int32_t)dup_fd;
     *(int32_t *)(uintptr_t)active_out = (int32_t)inactive;
 
     sd_bus_message_unref(reply);
     sd_bus_error_free(&err);
-    return (dup_fd < 0) ? -dup_errno : 0;
+    if (dup_fd < 0) {
+        /* logind GRANTED the device and we cannot hand it out. Giving it
+         * back is the CALLER's job: from 1.1.2 the Cyrius public layer sends
+         * ReleaseDevice after a failed take for both backends, so the shim
+         * sending one here too released the device twice. dup_errno was
+         * captured before the cleanup calls could touch errno; a failed
+         * fcntl that left errno 0 still fails, as -EBADF. */
+        return (dup_errno > 0) ? -dup_errno : -EBADF;
+    }
+    return 0;
 }
 
 static long
@@ -298,11 +321,13 @@ sb_pump_signals(int64_t bus_)
     return drained;
 }
 
+/* Flush, close and drop the private connection (1.1.2: sd_bus_unref,
+ * which on the old shared default bus did not close it). */
 static long
 sb_close_bus(int64_t bus_)
 {
     sd_bus *bus = (sd_bus *)(uintptr_t)bus_;
-    sd_bus_unref(bus);
+    sd_bus_flush_close_unref(bus);
     return 0;
 }
 

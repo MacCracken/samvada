@@ -152,8 +152,99 @@ jobs:
         # Mutation-verified before wiring: a new export, a re-signed
         # export, a removed export, and a "clean" fn that gains a
         # fn-table parameter each exit 1; the pristine bundle exits 0.
+        #
+        # 1.1.2 (P(-1), M5): both gates read code through
+        # tools/cyr_scan.py (comments and strings blanked, declarations
+        # matched anywhere on a line, every `fn` / `public` token
+        # accounted for). Its self-test runs first, and a bundle with a
+        # same-line `public fn` planted must FAIL — the shape the old
+        # line-anchored regex let through.
+        #
+        # 1.1.2 (P(-1) re-verification): each demonstrated bypass of the
+        # first cut is planted below and must fail FOR ITS OWN REASON — an
+        # export after an attribute on its line (`#must_use public fn`,
+        # `#assert ..; public fn`), `pub` (the lexer's `public`) on a fn, a
+        # var and a #derive(accessors) struct, and an export re-signed with
+        # a generic parameter type (two commas, one parameter).
+        #
+        # 1.1.2 (final pass): a fn hidden from cyr_scan by a quote in a
+        # `#io("fd") ..` / `#note: ..` comment or an object-like `#define
+        # NAME "`, by a lone `'` in a false #ifdef, or by an include line's
+        # `#assert .. "` tail, passed this gate, the boundary gate and the
+        # security scan while a consumer compiled and called it; and a
+        # `#derive(Serialize)` enum exported `_cy_enum_name_eq` with no `fn`
+        # token in the bundle. Each is planted below and must fail for its
+        # own reason: the hidden fns are now NEW PUBLIC EXPORTs, and the
+        # bundle may hold no #derive, enum or #define, and nothing cycc
+        # reads two ways (a `'''` char literal, a string open at the end of
+        # the file).
         run: |
+          set -euo pipefail
+          python3 tools/cyr_scan.py --self-test
           python3 tools/surface_check.py . tools/public_surface.txt
+          plant() {   # $1 what, $2 the log line that must explain the failure; stdin: the edit
+            rm -rf build/planted && mkdir -p build/planted/dist
+            cp dist/samvada.cyr build/planted/dist/samvada.cyr
+            python3 -c 'import sys; p = sys.argv[1]; s = open(p).read(); exec(sys.stdin.read()); open(p, "w").write(s)' \
+              build/planted/dist/samvada.cyr
+            cmp -s dist/samvada.cyr build/planted/dist/samvada.cyr && { echo "FAIL: planting '$1' changed nothing"; exit 1; }
+            if python3 tools/surface_check.py build/planted tools/public_surface.txt > build/planted.log 2>&1; then
+              cat build/planted.log
+              echo "FAIL: $1 passed the surface gate"; exit 1
+            fi
+            grep -qE "$2" build/planted.log || {
+              cat build/planted.log; echo "FAIL: $1 failed, but not for its own reason"; exit 1; }
+            echo "  ok  $1 is caught"
+          }
+          plant "a same-line public fn" 'NEW PUBLIC EXPORT.*planted_export' <<'PY'
+          s += "fn _planted_a() { return 0; } public fn planted_export() { return 0; }\n"
+          PY
+          plant "an export after #must_use on its line" 'NEW PUBLIC EXPORT.*planted_attr' <<'PY'
+          s += "#must_use public fn planted_attr() { return 0; }\n"
+          PY
+          plant "an export after #assert ..; on its line" 'NEW PUBLIC EXPORT.*planted_assert' <<'PY'
+          s += "#assert 1 == 1; public fn planted_assert() { return 0; }\n"
+          PY
+          plant "a pub fn" 'NEW PUBLIC EXPORT.*planted_pub' <<'PY'
+          s += "pub fn planted_pub() { return 0; }\n"
+          PY
+          plant "a pub var" 'UNPARSABLE BUNDLE.*`pub`/`public` tokens' <<'PY'
+          s += "pub var planted_var = 7;\n"
+          PY
+          plant "a #derive(accessors) pub struct" 'UNPARSABLE BUNDLE.*`pub`/`public` tokens' <<'PY'
+          s += "#derive(accessors)\npub struct Planted { a; b; }\n"
+          PY
+          plant "an export re-signed with a generic type" 'REMOVED OR RE-SIGNED PUBLIC EXPORT: samvada_session_take_device/2' <<'PY'
+          s = s.replace("public fn samvada_session_take_device(major, minor)",
+                        "public fn samvada_session_take_device(major: Result<i64, i64>)", 1)
+          PY
+          plant "an export after a #io(\"fd\") comment's quote" 'NEW PUBLIC EXPORT.*planted_attr_evil' <<'PY'
+          s += '#io("fd") note: reads one byte, see "\npublic fn planted_attr_evil() { return 0; }\n# ")\n'
+          PY
+          plant "an export after a #note comment's quote" 'NEW PUBLIC EXPORT.*planted_note' <<'PY'
+          s += '#note: the "\npublic fn planted_note() { return 0; }\n# "\n'
+          PY
+          plant "an export after an object-like #define's quote" 'BUNDLE DECLARES .*#define' <<'PY'
+          s += '#define SAMVADA_FFI_PLANT "\npublic fn planted_define() { return 0; }\n# "\n'
+          PY
+          plant "an export after a lone quote in a false #ifdef" 'NEW PUBLIC EXPORT.*planted_quote' <<'PY'
+          s += '#ifdef SAMVADA_NEVER_DEFINED\nx \' "\n#endif\npublic fn planted_quote() { return 0; }\n# "\n'
+          PY
+          plant "an export after an include line's #assert tail" 'NEW PUBLIC EXPORT.*planted_inc' <<'PY'
+          s += 'include "lib/alloc.cyr" #assert 1 == 1, "\npublic fn planted_inc() { return 0; }\n# "\n'
+          PY
+          plant "a #derive(Serialize) enum" 'BUNDLE DECLARES .*#derive' <<'PY'
+          s += "#derive(Serialize)\nenum PlantedKind { PK_A; PK_B; }\n"
+          PY
+          plant "an enum" 'BUNDLE DECLARES .*an enum' <<'PY'
+          s += "enum PlantedKind { PK_A; PK_B; }\n"
+          PY
+          plant "a char literal cycc reads two ways" "BUNDLE DECLARES .*read differently" <<'PY'
+          s += "fn _planted_q() { return '''; }\n"
+          PY
+          plant "a string open at the end of the bundle" 'BUNDLE DECLARES .*still open at the end' <<'PY'
+          s += 'var _planted_s = "\n'
+          PY
 
       - name: Verify a consumer cannot reach past the public surface
         # 1.1.1 (A-6). The bundle is private-by-default (src/visibility.cyr),
@@ -164,8 +255,69 @@ jobs:
         # to its file". Mutation-verified: without the marker the second
         # consumer compiles and this fails; an extra `public` fails the
         # manifest comparison. Neither program is run.
+        #
+        # 1.1.2 (P(-1) re-verification): a `#must_use public fn` on one line
+        # and a `pub var` are planted and must fail here too — the first
+        # compiled into consumers past both gates, the second made internal
+        # state consumer-writable.
+        #
+        # 1.1.2 (final pass): so is a public fn behind a `#io("fd") .. "`
+        # comment. cyr_scan read it as a string, so NEITHER consumer called
+        # it and this printed "all 233 internal fns are refused as private";
+        # now ok.cyr calls it (it compiles: cycc reads the fn as public) and
+        # the manifest comparison names it.
         run: |
+          set -euo pipefail
           python3 tools/boundary_check.py . tools/public_surface.txt
+          plant() {   # $1 the line appended to a copy of the bundle, $2 the log line that must explain the failure
+            rm -rf build/planted && mkdir -p build/planted/dist
+            ln -s "$PWD/lib" build/planted/lib
+            cp dist/samvada.cyr build/planted/dist/samvada.cyr
+            printf '%s\n' "$1" >> build/planted/dist/samvada.cyr
+            if python3 tools/boundary_check.py build/planted tools/public_surface.txt > build/planted.log 2>&1; then
+              cat build/planted.log; echo "FAIL: '$1' passed the boundary gate"; exit 1
+            fi
+            grep -qE "$2" build/planted.log || {
+              cat build/planted.log; echo "FAIL: '$1' failed, but not for its own reason"; exit 1; }
+            echo "  ok  '$1' is caught"
+          }
+          plant '#must_use public fn planted_attr() { return 0; }' "PUBLIC SET != MANIFEST: extra \['planted_attr'\]"
+          plant 'pub var planted_var = 7;' 'unparsable bundle: .*`pub`/`public` tokens'
+          plant $'#io("fd") note: reads one byte, see "\npublic fn planted_attr_evil() { return 0; }\n# ")' \
+                "PUBLIC SET != MANIFEST: extra \['planted_attr_evil'\]"
+          grep -q 'a consumer reaches all 9 public fns' build/planted.log || {
+            cat build/planted.log; echo "FAIL: the hidden export did not compile into ok.cyr"; exit 1; }
+          rm -rf build/planted
+
+      - name: Verify the bundle references no external symbol
+        # 1.1.2 (P(-1) re-verification). An `object;` build -- the consumer
+        # link (docs/guides/consumer-link.md) -- turns a call to an
+        # UNDEFINED Cyrius fn into an external symbol, so a bundle fn doing
+        # `return execve(p, a, e);` links libc's execve into every C-shim
+        # consumer; a standalone build only warns. The scan's spawn words
+        # catch that spelling; this catches every other libc fn, however it
+        # is spelled: the bundle, compiled as the consumer compiles it
+        # (its [deps].stdlib modules, then dist/samvada.cyr), must leave
+        # `nm -u` EMPTY. Positive control: one undefined call planted.
+        run: |
+          set -euo pipefail
+          mods=$(sed -nE '/^\[deps\]/,/^\[/ s/^stdlib = \[(.*)\]/\1/p' cyrius.cyml | grep -oE '"[A-Za-z0-9_]+"' | tr -d '"')
+          [ -n "$mods" ] || { echo "ERROR: no [deps].stdlib in cyrius.cyml — the extractor has rotted"; exit 1; }
+          bundle_obj() {   # $1 extra Cyrius text, $2 output object
+            { printf 'object;\n'; for m in $mods; do echo "include \"lib/$m.cyr\""; done
+              cat dist/samvada.cyr; printf '%s\n' "$1"; } | cycc > "$2"
+          }
+          bundle_obj "" build/bundle.o
+          undef=$(nm -u build/bundle.o | awk '{print $NF}')
+          if [ -n "$undef" ]; then
+            echo "FAIL: the bundle references symbols it does not define (a consumer link resolves them from libc):"
+            echo "$undef" | sed 's/^/  /'; exit 1
+          fi
+          echo "  ok  the bundle's object leaves nm -u empty"
+          bundle_obj 'fn _planted_spawn() { return execve(0, 0, 0); }' build/bundle_planted.o 2> build/bundle_planted.err
+          nm -u build/bundle_planted.o | awk '{print $NF}' | grep -qx execve || {
+            cat build/bundle_planted.err; echo "FAIL: the planted undefined execve did not show in nm -u"; exit 1; }
+          echo "  ok  a planted call to an undefined execve is caught"
 
       - name: Build
         run: |
@@ -202,7 +354,31 @@ jobs:
         # v5.6.28: bare `cyrius test` picks up [build].test AND
         # auto-discovers tests/*.tcyr — covers tests/samvada.tcyr
         # without us having to spell it out.
-        run: cyrius test
+        #
+        # 1.1.2 (P(-1) re-verification): the native error map is proven by
+        # EXECUTION. The check this replaces (C-shim job) regex-extracted the
+        # asserts from tests/dbus_session.tcyr's TEXT, so an assert inside a
+        # dead `#ifdef` — or an `if (0)`, or a fn nobody calls — counted as a
+        # tested row, and a wrong mapping shipped with every gate green. The
+        # test now reads tests/fixtures/sdbus_errno_map.tsv at run time,
+        # asserts every row and prints how many it checked; this step
+        # requires that line, exactly once, with the TSV's own row count
+        # (non-blank, non-comment lines). The C-shim job still proves the
+        # TSV is what this runner's libsystemd says. pipefail keeps a failed
+        # test run failing through the tee.
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          cyrius test 2>&1 | tee build/test.log
+          rows=$(grep -cvE '^[[:space:]]*(#|$)' tests/fixtures/sdbus_errno_map.tsv || true)
+          want="errno-map: $rows rows of tests/fixtures/sdbus_errno_map.tsv checked"
+          got=$(grep -F 'errno-map:' build/test.log || true)
+          if [ "$rows" -eq 0 ] || [ "$got" != "$want" ]; then
+            echo "FAIL: cyrius test must print this line exactly once: $want"
+            echo "      it printed: ${got:-<no errno-map line>}"
+            exit 1
+          fi
+          echo "  ok  $want"
 
       - name: Bench
         # Smoke-runs the bench harness — catches regressions in
@@ -271,16 +447,102 @@ jobs:
         # shim and links. Both compile modes are gated: the default
         # (library) mode consumers actually use, and the opt-in standalone
         # probe mode.
+        #
+        # 1.1.2 (P(-1) re-verification): each object's undefined symbols must
+        # all be on tools/shim_symbols.txt. The security scan reads the
+        # shim's text, and a fn pointer (`= execve;`), token pasting or a
+        # spawner missing from its word list each compiled to a `U <name>`
+        # it never saw; `nm -u` reads what the object will actually link.
+        # Positive control: an object that calls execve, directly and through
+        # a fn pointer, must be refused naming execve.
+        #
+        # 1.1.2 (final pass): `nm -u` cannot see a syscall INSTRUCTION — inline
+        # asm, or machine code in an executable section, adds no undefined
+        # symbol. The shim could `#include "../tests/fixtures/x.txt"` (a data
+        # file no scan lexes) holding one, and every gate passed (demonstrated:
+        # a driver linked against the object exec'd). The scan now allows only
+        # `<system.h>` includes; this is the compiled backstop: every
+        # executable section of each object is disassembled in full (`-D -j`,
+        # so code declared as a data object is decoded too — plain `-d` prints
+        # it as data) and must hold no syscall / sysenter / int 0x80 / svc: the
+        # shim reaches the kernel only through libc and libsystemd. Positive
+        # controls: the finding's shape (the shim + an included file holding an
+        # inline-asm syscall, which the symbol gate passes), `int $0x80`, and
+        # code bytes in an executable section.
         run: |
+          set -euo pipefail
           mkdir -p build
+          grep -vE '^[[:space:]]*(#|$)' tools/shim_symbols.txt | awk '{print $1}' | sort -u > build/syms_allowed.txt
+          [ -s build/syms_allowed.txt ] || { echo "ERROR: tools/shim_symbols.txt lists nothing"; exit 1; }
+          symbol_gate() {   # $1 an object: every symbol it leaves undefined must be allow-listed
+            nm -u "$1" | awk '{print $NF}' | sort -u > build/syms_used.txt
+            extra=$(comm -23 build/syms_used.txt build/syms_allowed.txt)
+            if [ -n "$extra" ]; then
+              echo "UNLISTED SYMBOL(S) in $1 (add a justified row to tools/shim_symbols.txt only if intended):"
+              echo "$extra" | sed 's/^/  /'
+              return 1
+            fi
+            echo "  ok  $1: $(wc -l < build/syms_used.txt) undefined symbols, all on tools/shim_symbols.txt"
+          }
+          insn_gate() {   # $1 an object: no instruction in it may enter the kernel
+            secs=$(objdump -h "$1" | awk '/^ *[0-9]+ /{ name = $2; getline; if ($0 ~ /CODE/) print name }')
+            [ -n "$secs" ] || { echo "ERROR: $1 has no executable section — the extractor has rotted"; return 1; }
+            for s in $secs; do objdump -D --no-show-raw-insn -j "$s" "$1"; done > build/insn.txt
+            n=$(grep -cE '^[[:space:]]*[0-9a-f]+:[[:space:]]' build/insn.txt || true)
+            [ "$n" -gt 0 ] || { echo "ERROR: objdump disassembled nothing in $1 — the extractor has rotted"; return 1; }
+            hits=$(grep -E '^[[:space:]]*[0-9a-f]+:[[:space:]]+(syscall|sysenter|svc|int[[:space:]]+\$?0x80)([[:space:]]|$)' build/insn.txt || true)
+            if [ -n "$hits" ]; then
+              echo "KERNEL ENTRY in $1 (the shim reaches the kernel only through libc and libsystemd):"
+              echo "$hits" | sed 's/^/  /'
+              return 1
+            fi
+            echo "  ok  $1: $n instructions in $(echo $secs | wc -w) executable section(s), none a syscall / sysenter / int 0x80 / svc"
+          }
           for mode in "" "-DSAMVADA_STANDALONE_MAIN"; do
+            obj=build/samvada_main${mode:+_standalone}.o
             echo "=== compiling with: ${mode:-<library mode>}"
             cc -Wall -Wextra -Werror -Wshadow -Wconversion -Wsign-conversion \
                -Wcast-qual -Wformat=2 $mode -c deps/samvada_main.c \
                $(pkg-config --cflags libsystemd) \
-               -o build/samvada_main.o
+               -o "$obj"
+            symbol_gate "$obj"
+            insn_gate "$obj"
           done
           echo "samvada_main.o: $(wc -c < build/samvada_main.o) bytes"
+          cat > build/planted_spawn.c <<'EOF'
+          #include <unistd.h>
+          int (*planted_ptr)(const char *, char *const *, char *const *) = execve;
+          int planted(char **a) { return execve("/x", a, a); }
+          EOF
+          cc -c build/planted_spawn.c -o build/planted_spawn.o
+          if symbol_gate build/planted_spawn.o > build/planted_spawn.log; then
+            cat build/planted_spawn.log; echo "FAIL: an object calling execve passed the symbol gate"; exit 1
+          fi
+          grep -qx '  execve' build/planted_spawn.log || {
+            cat build/planted_spawn.log; echo "FAIL: the planted object failed, but not naming execve"; exit 1; }
+          echo "  ok  the planted execve object is refused"
+          printf '%s\n' 'long samvada_planted_raw(long nr) { long r; __asm__ volatile ("syscall" : "=a"(r) : "a"(nr) : "rcx", "r11", "memory"); return r; }' \
+            > build/capture_notes.txt
+          { cat deps/samvada_main.c; echo '#include "capture_notes.txt"'; } > build/shim_planted.c
+          cc -Wall -Wextra -Werror -c build/shim_planted.c $(pkg-config --cflags libsystemd) -o build/shim_planted.o
+          symbol_gate build/shim_planted.o > /dev/null || {
+            echo "FAIL: the planted asm added an undefined symbol — the control no longer shows the symbol gate's blind spot"; exit 1; }
+          cat > build/planted_insn.c <<'EOF'
+          long planted_int80(long nr) { long r; __asm__ volatile ("int $0x80" : "=a"(r) : "a"(nr) : "memory"); return r; }
+          __attribute__((section(".text.planted"), used))
+          const unsigned char planted_code[] = { 0xb8, 0x3b, 0, 0, 0, 0x0f, 0x05, 0xc3 };   /* mov $59,%eax; syscall; ret */
+          EOF
+          cc -c build/planted_insn.c -o build/planted_insn.o
+          for planted in build/shim_planted.o build/planted_insn.o; do
+            if insn_gate "$planted" > build/planted_insn.log; then
+              cat build/planted_insn.log; echo "FAIL: $planted passed the instruction gate"; exit 1
+            fi
+            grep -q '^KERNEL ENTRY' build/planted_insn.log || {
+              cat build/planted_insn.log; echo "FAIL: $planted failed, but not as a kernel entry"; exit 1; }
+          done
+          grep -qE ':[[:space:]]+int[[:space:]]+\$0x80' build/planted_insn.log && grep -qE ':[[:space:]]+syscall' build/planted_insn.log || {
+            cat build/planted_insn.log; echo "FAIL: the planted int \$0x80 or the code bytes were not both seen"; exit 1; }
+          echo "  ok  a shim including an inline-asm syscall, an int \$0x80 and code bytes in .text are refused"
 
       - name: Verify the shim links UNDER a consumer-owned main()
         # 0.5.1 (audit CRIT-2). The old link test stubbed out main() entirely,
@@ -315,6 +577,124 @@ jobs:
           ./build/consumer-link-test
           echo "consumer-owned main() links against the shim"
 
+      - name: Verify every fn-table slot reaches the wrapper it names
+        # 1.1.2 (P(-1)). The step below checks the SLOT_* offsets agree
+        # with the Cyrius ones; nothing checked what the shim STORES at
+        # them, so two swapped lines in samvada_shim_init() passed every
+        # gate. tools/shim_slot_check.c includes the shim, stands in for
+        # libsystemd at link time (no -lsystemd: a new sd_bus_* call
+        # fails to link), and calls each slot to see what it does. Its
+        # positive control swaps two entries and must fail.
+        #
+        # 1.1.2 (P(-1) re-verification): it also checks what each wrapper
+        # SENDS — destination, path, interface, signature and the decoded
+        # arguments: TakeDevice / ReleaseDevice (226, 0) major first,
+        # TakeControl force = false, GetSessionByPID's pid, a dup that never
+        # lands on 0-2, and a failed dup that sends nothing more. The member
+        # alone let a shim sending TakeDevice(minor, major) or
+        # TakeControl(true) pass. Each check is proven able to fail: the
+        # slot check is rebuilt against sed-mutated copies of the shim, and
+        # every one must FAIL.
+        #
+        # 1.1.2 (final pass): the fake libsystemd never failed, so the shim's
+        # error contract was unpinned. All sixteen mutants after the first
+        # five below PASSED the previous check (each rebuilt and run against
+        # it): the reviewer's nine — a failed ReleaseDevice / ReleaseControl
+        # returning 0, active_out inverted, a pump cap of 1, a pump swallowing
+        # its error, a failed TakeDevice ignored, devnum_ok accepting
+        # everything, get_session_path without its ENOBUFS bound, a reply never
+        # unref'd — and seven more of the same kind. The fake's results are now
+        # settable per call; each must fail AT ITS OWN CHECK.
+        run: |
+          set -euo pipefail
+          cc -Wall -Wextra -Werror $(pkg-config --cflags libsystemd) \
+             tools/shim_slot_check.c -o build/shim_slot_check
+          ./build/shim_slot_check
+          cc -Wall -Wextra -Werror -DSHIM_CHECK_SELFTEST $(pkg-config --cflags libsystemd) \
+             tools/shim_slot_check.c -o build/shim_slot_check_swapped
+          if ./build/shim_slot_check_swapped > build/swapped.log; then
+            cat build/swapped.log
+            echo "FAIL: a swapped fn table passed the slot check"; exit 1
+          fi
+          echo "  ok  the swapped table is caught"
+          mutant() {   # $1 what, $2 the sed program, $3 the check that must FAIL
+            sed "$2" deps/samvada_main.c > build/shim_mutant.c
+            if cmp -s deps/samvada_main.c build/shim_mutant.c; then
+              echo "FAIL: the '$1' mutation changed nothing — its sed has rotted"; exit 1
+            fi
+            cc -Wall -Wextra -Werror -DSHIM_CHECK_SHIM="\"$PWD/build/shim_mutant.c\"" \
+               $(pkg-config --cflags libsystemd) tools/shim_slot_check.c -o build/shim_slot_check_mutant
+            if ./build/shim_slot_check_mutant > build/mutant.log; then
+              cat build/mutant.log; echo "FAIL: a shim with $1 passed the slot check"; exit 1
+            fi
+            grep -qF "FAIL  $3" build/mutant.log || {
+              cat build/mutant.log; echo "FAIL: '$1' failed, but not at its own check"; exit 1; }
+            echo "  ok  a shim with $1 is caught"
+          }
+          mutant "major and minor swapped" \
+                 's/(uint32_t)major, (uint32_t)minor/(uint32_t)minor, (uint32_t)major/g' \
+                 'slot 16 take_device      -> Session.TakeDevice(226, 0)'
+          mutant "TakeControl(force = true)" \
+                 's/"TakeControl", &err, NULL, "b", 0)/"TakeControl", \&err, NULL, "b", 1)/' \
+                 'slot 72 take_control'
+          mutant "ReleaseDevice sent to the Manager interface" \
+                 '/^sb_release_device/,/^}/ s/LOGIND_IF_S/LOGIND_IF_M/' \
+                 'slot 24 release_device'
+          mutant "a wrong destination" \
+                 's/^#define LOGIND_DEST .*/#define LOGIND_DEST  "org.example.Evil"/' \
+                 'slot  8 get_session_path'
+          mutant "a dup floor of 0" \
+                 's/F_DUPFD_CLOEXEC, 3)/F_DUPFD_CLOEXEC, 0)/' \
+                 'slot 16 take_device      -> the fd duplicated close-on-exec, never onto 0-2'
+          mutant "a failed open_system_bus ignored" \
+                 '/sd_bus_open_system(&bus);/,/if (r < 0) {/ s/if (r < 0) {/if (0) {/' \
+                 'slot  0 open_system_bus, sd_bus_open_system fails -> its errno, nothing stored'
+          mutant "get_session_path without its ENOBUFS bound" \
+                 's/if (n + 1 > (size_t)out_buf_len) {/if (0) {/' \
+                 'slot  8 get_session_path, a path one byte too long -> -ENOBUFS, nothing written'
+          mutant "get_session_path never dropping its reply" \
+                 '/memcpy(dst, path, n);/,/return 0;/ s/sd_bus_message_unref(reply);/(void)reply;/' \
+                 'slot  8 get_session_path -> the reply dropped and the error freed'
+          mutant "a failed TakeDevice ignored" \
+                 '/"TakeDevice", &err, &reply, "uu",/,/if (r < 0) {/ s/if (r < 0) {/if (0) {/' \
+                 'slot 16 take_device, TakeDevice fails -> its errno, nothing read'
+          mutant "active_out = !inactive" \
+                 's/= (int32_t)inactive;/= (int32_t)!inactive;/' \
+                 "slot 16 take_device      -> active_out carries logind's inactive flag"
+          mutant "devnum_ok accepting everything" \
+                 '/^devnum_ok/,/^}/ s/return (v >= 0) && (v <= (int64_t)UINT32_MAX);/(void)v; return 1;/' \
+                 'slot 16 take_device, a device number outside uint32 -> -EINVAL, nothing sent'
+          mutant "devnum_ok without its upper bound" \
+                 '/^devnum_ok/,/^}/ s/return (v >= 0) && (v <= (int64_t)UINT32_MAX);/return (v >= 0);/' \
+                 'slot 16 take_device, a device number outside uint32 -> -EINVAL, nothing sent'
+          mutant "take_device never dropping its reply" \
+                 '/int dup_errno = /,/if (dup_fd < 0) {/ s/sd_bus_message_unref(reply);/(void)reply;/' \
+                 'slot 16 take_device      -> the reply dropped and the error freed'
+          mutant "a failed ReleaseDevice returning 0" \
+                 '/^sb_release_device/,/^}/ s/return (r < 0) ? (long)r : 0;/return (r < 0) ? 0 : 0;/' \
+                 'slot 24 release_device, ReleaseDevice fails -> its errno'
+          mutant "a pump cap of 1" \
+                 's/^#define SAMVADA_PUMP_MAX_EVENTS 256$/#define SAMVADA_PUMP_MAX_EVENTS 1/' \
+                 'slot 32 pump_signals, a flood -> capped at 256 events per call'
+          mutant "an uncapped pump" \
+                 's/while (drained < SAMVADA_PUMP_MAX_EVENTS) {/while (drained >= 0) {/' \
+                 'slot 32 pump_signals, a flood -> capped at 256 events per call'
+          mutant "a pump that swallows its error" \
+                 's/if (r < 0)  { return (long)r; }/if (r < 0)  { break; }/' \
+                 'slot 32 pump_signals, sd_bus_process fails -> its errno'
+          mutant "a failed match ignored" \
+                 '/sd_bus_match_signal(bus, &slot,/,/if (r < 0) {/ s/if (r < 0) {/if (0) {/' \
+                 'slot 48 subscribe, sd_bus_match_signal fails -> its errno'
+          mutant "unsubscribe accepting a non-slot" \
+                 's/if (slot_ <= 0) {/if (0) {/' \
+                 'slot 56 unsubscribe, not a slot (<= 0) -> -EINVAL, nothing dropped'
+          mutant "a failed TakeControl returning 0" \
+                 '/^sb_take_control/,/^}/ s/return (r < 0) ? (long)r : 0;/return (r < 0) ? 0 : 0;/' \
+                 'slot 72 take_control, TakeControl fails -> its errno'
+          mutant "a failed ReleaseControl returning 0" \
+                 '/^sb_release_control/,/^}/ s/return (r < 0) ? (long)r : 0;/return (r < 0) ? 0 : 0;/' \
+                 'slot 80 release_control, ReleaseControl fails -> its errno'
+
       - name: Verify the dbus golden corpus decodes
         # 0.7.1 (roadmap N2). These bytes are the reference the native
         # marshaller is built against, and they were captured while the
@@ -322,8 +702,17 @@ jobs:
         # cutover and the reference goes with it. Gate them so a corrupted
         # or truncated fixture fails here rather than silently becoming
         # "what the protocol looks like".
+        #
+        # 1.1.2 (final pass): the label is tied to the name — a row is
+        # **SYNTHETIC** exactly when its file name says SYNTHETIC. Before, any
+        # row could carry either label, so a synthetic capture labelled REAL
+        # (or the reverse) passed. Positive control: a MANIFEST copy with one
+        # REAL and the SYNTHETIC row's labels swapped must fail, naming both.
+        # The decode output goes to build/, not a fixed path in /tmp.
         run: |
-          python3 tools/dbus_decode.py tests/fixtures/dbus/*.bin > /tmp/decode.txt
+          set -euo pipefail
+          mkdir -p build
+          python3 tools/dbus_decode.py tests/fixtures/dbus/*.bin > build/decode.txt
           echo "decoded $(ls tests/fixtures/dbus/*.bin | wc -l) fixtures"
           # Every fixture must be REAL unless its name says otherwise, and
           # exactly one is allowed to be synthetic (the TakeDevice reply,
@@ -332,17 +721,76 @@ jobs:
           [ "$syn" -eq 1 ] || { echo "expected exactly 1 SYNTHETIC fixture, found $syn"; exit 1; }
           grep -q 'Exit criterion NOT met' tests/fixtures/dbus/MANIFEST.md || {
             echo "MANIFEST must keep stating the unmet second-host criterion"; exit 1; }
+          # 1.1.2 (P(-1)): the bytes are the MANIFEST's. Decoding proves a
+          # fixture is well-formed, not that it is the capture — a fixture
+          # edited to agree with a bug decodes fine. Every .bin must have a
+          # row, and its size and sha256 prefix must match it.
+          #
+          # What this does NOT prove (1.1.2 re-verification): that any test
+          # reads these bytes. None does — tests/dbus_frame.tcyr and the
+          # codec/auth tests embed their corpus as store8 literals, so a
+          # literal edited to agree with a bug passes this step untouched.
+          # It pins the reference capture against silent edits, and the
+          # MANIFEST against the files; it says nothing about the tests.
+          cat > build/fixture_check.py <<'PY'
+          import glob, hashlib, os, re, sys
+          manifest, d = sys.argv[1], sys.argv[2]
+          m = open(manifest).read()
+          rows = re.findall(r'^\| `([^`]+\.bin)` \| (\d+) \| \*\*(REAL|SYNTHETIC)\*\* \| `([0-9a-f]{16})` \|$', m, re.M)
+          files = sorted(os.path.basename(p) for p in glob.glob(os.path.join(d, "*.bin")))
+          bad = 0
+          if not rows:
+              print("ERROR: parsed no MANIFEST rows — the extractor regex has rotted"); sys.exit(1)
+          for f in sorted(set(files) - {r[0] for r in rows}):
+              print(f"UNLISTED fixture: {f}"); bad = 1
+          for name, size, label, h in rows:
+              want = "SYNTHETIC" if "SYNTHETIC" in name else "REAL"
+              if label != want:
+                  print(f"MISLABELLED fixture: {name} is **{label}** in the MANIFEST, its name says {want}"); bad = 1
+              try:
+                  b = open(os.path.join(d, name), "rb").read()
+              except OSError:
+                  print(f"MISSING fixture: {name}"); bad = 1; continue
+              got = hashlib.sha256(b).hexdigest()[:16]
+              if len(b) != int(size) or got != h:
+                  print(f"CHANGED fixture: {name}: {len(b)} bytes sha256 {got}, MANIFEST {size} {h}"); bad = 1
+          print(f"  ok {len(rows)} fixtures match the MANIFEST" if not bad else "fixtures do not match")
+          sys.exit(bad)
+          PY
+          python3 build/fixture_check.py tests/fixtures/dbus/MANIFEST.md tests/fixtures/dbus
+          python3 - tests/fixtures/dbus/MANIFEST.md build/MANIFEST.planted.md <<'PY'
+          import re, sys
+          s = open(sys.argv[1]).read()
+          s, a = re.subn(r'^(\| `[^`]*SYNTHETIC[^`]*\.bin` \| \d+ \| )\*\*SYNTHETIC\*\*', r'\1**REAL**', s, count=1, flags=re.M)
+          s, b = re.subn(r'^(\| `(?![^`]*SYNTHETIC)[^`]+\.bin` \| \d+ \| )\*\*REAL\*\*', r'\1**SYNTHETIC**', s, count=1, flags=re.M)
+          if a != 1 or b != 1:
+              print("FAIL: the label-swap plant found no row to swap — its regex has rotted"); sys.exit(1)
+          open(sys.argv[2], "w").write(s)
+          PY
+          if python3 build/fixture_check.py build/MANIFEST.planted.md tests/fixtures/dbus > build/fixture_planted.log; then
+            cat build/fixture_planted.log; echo "FAIL: a MANIFEST with swapped REAL/SYNTHETIC labels passed"; exit 1
+          fi
+          [ "$(grep -c '^MISLABELLED fixture: ' build/fixture_planted.log)" -eq 2 ] || {
+            cat build/fixture_planted.log; echo "FAIL: the swapped labels failed, but not as two MISLABELLED rows"; exit 1; }
+          echo "  ok  swapped REAL / SYNTHETIC labels are caught"
 
       - name: Verify the native error map is sd-bus's
         # 1.1.1 (A-4). The native backend must return the errno the C
         # shim's sd-bus would. Until 1.1.1 its map held eight names and
         # disagreed with libsystemd on the errors a logind restart or a bus
         # disconnect produce. tests/fixtures/sdbus_errno_map.tsv is the
-        # ground truth, and this closes the chain mechanically:
-        #   1. the runner's libsystemd prints the fixture back unchanged;
-        #   2. the rows tests/dbus_session.tcyr asserts ARE the fixture's
-        #      rows (the test job then proves the code matches them).
+        # ground truth, and the chain is closed in two places:
+        #   1. here: the runner's libsystemd prints the fixture back
+        #      unchanged;
+        #   2. Build & Test's Test step: the test reads the TSV at run time,
+        #      asserts every row against the code, and must print that it
+        #      checked all of them.
+        # 1.1.2 (P(-1) re-verification): step 2 used to live here as a regex
+        # over tests/dbus_session.tcyr's text, which counted an assert inside
+        # a dead `#ifdef` as a tested row — a wrong mapping passed it, the
+        # tests, fmt and lint. Text cannot say what runs; the run can.
         run: |
+          set -euo pipefail
           mkdir -p build
           cc -Wall -Wextra -Werror tools/sdbus_errno_probe.c \
              $(pkg-config --cflags --libs libsystemd) -o build/sdbus_errno_probe
@@ -352,24 +800,7 @@ jobs:
             echo "FAIL: this libsystemd maps a D-Bus error name differently from the fixture"
             exit 1
           fi
-          python3 - <<'PY'
-          import re, sys
-          fx = [l.rstrip("\n").split("\t") for l in open("tests/fixtures/sdbus_errno_map.tsv")
-                if l.strip() and not l.startswith("#")]
-          fx = [(n, int(e)) for n, e in fx]
-          t = open("tests/dbus_session.tcyr").read()
-          # A fixture row is asserted with its own name as the message;
-          # the group's extra edge cases use prose, so they are not rows.
-          rows = [(n, int(e)) for n, e in re.findall(r'assert_eq\(t_err\(p, "([^"]*)"\), (-?[0-9]+),\s*"\1"\);', t)]
-          if not fx or not rows:
-              print("ERROR: parsed nothing — the extractor regex has rotted"); sys.exit(1)
-          if rows != fx:
-              print(f"MISMATCH: test asserts {len(rows)} rows, fixture has {len(fx)}")
-              for a, b in zip(rows, fx):
-                  if a != b: print("  test", a, "fixture", b)
-              sys.exit(1)
-          print(f"  ok {len(fx)} rows: libsystemd == fixture == tests/dbus_session.tcyr")
-          PY
+          echo "  ok  $(grep -cvE '^[[:space:]]*(#|$)' tests/fixtures/sdbus_errno_map.tsv) rows: libsystemd == fixture"
 
       - name: Verify slot offsets agree between C and Cyrius
         # 0.5.1 (audit LOW-15): ADR-0002 and public-api.md both claim the
@@ -409,7 +840,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Scan for dangerous patterns
-        # Matches code lines only — rejects patterns inside # comments.
+        # Matches code only — a pattern inside a comment is not a finding.
         #
         # 0.5.1 (audit MED-10): the pre-0.5.1 deny list could not fire.
         # It grepped `syscall( *59`, `syscall( *57` and `sys_system` — but
@@ -422,31 +853,38 @@ jobs:
         # under grep -E (the patterns are ERE and silently fail under BRE).
         # Scan scope widened from src/ to src/ tests/ deps/ — the C shim is
         # shipped as a release artifact and was previously scanned by nothing.
+        #
+        # 1.1.2 (P(-1)): the patterns moved to tools/security_scan.py, which
+        # reads code through tools/cyr_scan.py instead of dropping every
+        # line that starts with `#` or `*`, and matches the spellings the
+        # grep missed (SYS_execve / __NR_execve, execvpe, posix_spawnp,
+        # clone, hex syscall numbers and buffer sizes, &sys_execve). Each
+        # demonstrated bypass is a positive control in its --self-test,
+        # which runs first.
+        #
+        # 1.1.2 (P(-1) re-verification): the reviewer walked past that cut
+        # too (attribute lines, octal / `_` / char-literal syscall numbers,
+        # asm, function-like #define bodies, splices, C23 digit separators,
+        # fn pointers, escaped and joined paths, symlinks, unscanned file
+        # types). The scan now ALLOW-LISTS syscall numbers instead of
+        # recognising spellings, refuses what it cannot read, and its
+        # self-test plants every one of them; tools/shim_symbols.txt (C-shim
+        # job) and the bundle's empty `nm -u` (Build & Test) judge the
+        # compiled objects, whatever the spelling.
+        #
+        # 1.1.2 (final pass): the scan reads `#` exactly as cycc does, refuses
+        # every Cyrius `#define`, every C include but `<system.h>`, every
+        # syscall number it does not allow-list (POSITIVE now: what samvada
+        # uses) and the executable-memory primitives, and judges cyrius.cyml
+        # too: [deps].stdlib must equal tools/stdlib_allowed.txt, the stdlib
+        # modules that fork, exec or load code are refused by name, and no
+        # other table may pull code into a build. Every demonstrated bypass is
+        # a control in --self-test (snippets, and throwaway trees for the
+        # manifest, the C include and the #define).
         run: |
           FAIL=0
-          scan() {
-            local label="$1"; shift
-            local pat="$1"; shift
-            local hits
-            hits=$(grep -rEn "$pat" src/ tests/ deps/ 2>/dev/null | awk -F: '
-              { line=$3; for(i=4;i<=NF;i++) line=line":"$i;
-                sub(/^[[:space:]]+/,"",line);
-                if (substr(line,1,1) != "#" && substr(line,1,2) != "/*" && substr(line,1,1) != "*") print $1":"$2":"line }')
-            if [ -n "$hits" ]; then
-              echo "FAIL: $label"
-              echo "$hits"
-              FAIL=1
-            fi
-          }
-          # samvada is a dbus client — no business spawning, exec'ing,
-          # or writing to system paths.
-          scan "process spawn helpers" '\b(sys_execve|sys_execveat|sys_fork|sys_vfork|sys_clone3?|sys_system|sys_posix_spawn)[[:space:]]*\('
-          scan "spawn syscall consts"  '\bSYS_(EXECVE|EXECVEAT|FORK|VFORK|CLONE3?)\b'
-          scan "raw spawn syscalls"    'syscall\([[:space:]]*(56|57|58|59|220|221|322|435)[[:space:],)]'
-          scan "C spawn calls"         '\b(system|popen|execv|execvp|execve|execl|execlp|fork|vfork|posix_spawn)[[:space:]]*\('
-          scan "writes to /etc"        '"/etc/'
-          scan "writes to /bin"        '"/bin/'
-          scan "writes to /sbin"       '"/sbin/'
+          python3 tools/security_scan.py --self-test
+          python3 tools/security_scan.py . || FAIL=1
           # 1.1.0: no native-aarch64 region in samvada's own code. ELF-aarch64
           # builds rewrite x86 syscall numbers through a compat chain that
           # matches a NUMBER, so a native number written there is one cyrius
@@ -455,10 +893,12 @@ jobs:
           # Spell calls through the stdlib's sys_* / SYS_* names, or the x86
           # number. A region is the taken side of the three openers below, or
           # the #else/#elif of any arch conditional. Its own grep, because
-          # scan() drops '#'-led lines as comments.
+          # to the Cyrius lexer a directive is a comment.
           arch_hits=$(grep -rnE '^[[:space:]]*#(ifdef[[:space:]]+CYRIUS_ARCH_AARCH64|ifndef[[:space:]]+CYRIUS_ARCH_X86|ifplat[[:space:]]+aarch64)' src/ tests/ || true)
           for f in $(grep -rlE '^[[:space:]]*#(ifn?def[[:space:]]+CYRIUS_ARCH_|ifplat)' src/ tests/ || true); do
-            e=$(grep -nE '^[[:space:]]*#(else|elif)' "$f" | sed "s|^|$f:|")
+            # `|| true`: a file with no #else is the clean case, and under
+            # pipefail grep's 1 would end the step there.
+            e=$(grep -nE '^[[:space:]]*#(else|elif)' "$f" | sed "s|^|$f:|" || true)
             if [ -n "$e" ]; then arch_hits="$arch_hits $e"; fi
           done
           if [ -n "$arch_hits" ]; then
@@ -466,13 +906,6 @@ jobs:
             echo "$arch_hits"
             FAIL=1
           fi
-          # Unbounded stack buffers (>=64KB — force heap review).
-          awk -F: '
-            /var [A-Za-z_][A-Za-z0-9_]*\[[0-9]+\]/ {
-              match($0, /\[[0-9]+\]/); s=substr($0,RSTART+1,RLENGTH-2); n=s+0;
-              if (n >= 65536) print FILENAME":"NR": large buffer ("n" bytes): "$0
-            }' src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr | tee /tmp/bigbuf.txt
-          [ -s /tmp/bigbuf.txt ] && FAIL=1
           echo "security scan complete (fail: $FAIL)"
           exit $FAIL
 
