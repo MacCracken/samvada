@@ -52,9 +52,12 @@ tidiness of a native-only tree.
 - [ ] `tools/differential/` retired or re-pointed (decide which —
       CI never runs it; since 1.1.2 `tools/shim_slot_check.c` gates
       the shim's wrapper *wiring*, and goes with the shim).
-- [ ] The `LIBSYSTEMD` backend kind retired from
-      `samvada_ffi_kind`'s whitelist, or kept as a reserved value.
+- [ ] The `LIBSYSTEMD` backend kind retired from `samvada_init`'s
+      backend-kind whitelist, or kept as a reserved value.
       **ADR-0002's append-after-kind invariant holds either way.**
+- [ ] `tests/samvada_live.bcyr` re-pointed at the native backend or
+      retired: `samvada_live_bench_run` benches only a
+      `kind = LIBSYSTEMD` table, so without the shim it can only SKIP.
 
 ---
 
@@ -104,6 +107,13 @@ immovable.
   Probably qemu's ancillary-data emulation (1.1.1 saw the same cause in
   two asserts); settle it on real aarch64 hardware before calling the
   truncated-set refusal aarch64-proven.
+- [ ] **The EINTR retries are untested** (P1-5). Since 1.1.2 EINTR is
+  retried on the call path, in the wait and in the handshake, under the
+  deadline, but no test reaches those branches: the stdlib cannot install
+  a signal handler, the suites spawn no second process, and the
+  re-verification's 60 SIGSTOP/SIGCONT cycles never got there, since
+  `poll` restarts transparently (`docs/audit/2026-10-29-p1-audit.md`
+  § Still open).
 
 **Standing rule for audit work: every item closes with evidence,
 never with "the code was reviewed".** AUDIT-4 survived five releases

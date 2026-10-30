@@ -1,16 +1,17 @@
-# dbus marshalling — wire format reference (v0.x scope)
+# dbus marshalling — wire format reference (the slice samvada touches)
 
 This page documents the bytes that flow across the dbus socket
-when samvada's v0.x C shim calls into logind. It is *not* a
+when samvada calls into logind, through either backend — the
+libsystemd C shim, or the native Cyrius one (`src/dbus_*.cyr`,
+in the consumer bundle since the 0.11.0 cutover). It is *not* a
 general dbus tutorial — it is the slice of the spec the v1.1.2
-fn-table actually exercises, written so the v1.0 pure-Cyrius
-marshaller has a concrete target to replace the libsystemd
-calls against.
+fn-table actually exercises, written as the target the native
+marshaller was built against.
 
 For the canonical spec see
 [D-Bus Specification §Type system](https://dbus.freedesktop.org/doc/dbus-specification.html#type-system)
-and §Message format. This file extracts only the parts samvada
-v0.x calls touch.
+and §Message format. This file extracts only the parts samvada's
+calls touch.
 
 Every member name, signature and argument direction below was
 **verified against a live `systemd-logind`** (systemd 261) with
@@ -20,11 +21,14 @@ for the exact commands and the raw output.
 
 ## What samvada v1.1.2 sends
 
-Five method calls, one acknowledgement it is *obliged* to send
-but does not yet, and two signals it does not yet receive. Every
-byte below is constructed by `sd_bus_call_method` /
-`sd_bus_match_signal` under the hood; we list them so the
-pure-Cyrius replacement knows what to emit.
+Five logind method calls (plus the bus's `Hello`, see
+§[SASL EXTERNAL auth](#sasl-external-auth-connect-path)), one
+acknowledgement it does not send, and two signals it does not
+surface — both by decision since 0.6.0, not as a gap (ADR-0004
+§2–3). Under the C shim every byte below is constructed by
+`sd_bus_call_method`; under the native backend
+(`samvada_native_init`) by `src/dbus_marshal.cyr`, driven from
+`src/dbus_session.cyr`.
 
 | Call | Path | Interface | Member | Sig in | Sig out | Wired in 0.5.1 |
 |---|---|---|---|---|---|---|
@@ -94,8 +98,10 @@ Three ordering constraints are load-bearing:
    delivered at all.
 2. **`TakeControl` before `TakeDevice`** — see the next section.
    This is the constraint samvada 0.2.0–0.5.0 violated.
-3. **`PauseDeviceComplete` before logind's pause timeout** —
-   see §[PauseDevice / ResumeDevice](#pausedevice--resumedevice--the-signals-samvada-does-not-yet-receive).
+3. **`PauseDeviceComplete` after a `pause`-type `PauseDevice`** — the
+   man page's pause timeout does not exist in systemd v261's source,
+   and on a seat with VTs `pause` is never sent (ADR-0004 findings
+   3–4) — see §[PauseDevice / ResumeDevice](#pausedevice--resumedevice--the-signals-samvada-does-not-yet-receive).
 
 `samvada_init()` (`src/samvada.cyr`) does open bus →
 `GetSessionByPID`, each step aborting init on a negative rc, and takes
@@ -120,9 +126,10 @@ that connection's unique name, not to the pid, not to the
 session, and not to the process. A second connection from the
 same process is not in control, and neither is a `fork`ed child
 that opens its own bus. This is why samvada issues `TakeControl`
-on the same `sd_bus*` it later calls `TakeDevice` on, inside
-`samvada_init()` (`src/samvada.cyr`, immediately after the
-session path resolves).
+on the same connection it later calls `TakeDevice` on, inside
+`samvada_session_take_device()` (`src/samvada.cyr`), immediately
+before `TakeDevice` whenever no device is held — not in
+`samvada_init()`, since 0.6.0 (ADR-0004).
 
 Without it, **every** `TakeDevice` fails:
 
@@ -146,9 +153,12 @@ both:
   which is exactly the value samvada returns for its own
   null-table and bad-kind rejections. A consumer branching on
   the magnitude cannot tell "you passed me a bad table" from
-  "you never took control". The pure-Cyrius marshaller reads
-  ERROR_NAME (**header field 4**) off the wire directly and should
-  surface the *name*, not just a squashed errno.
+  "you never took control". The native backend reads ERROR_NAME
+  (**header field 4**) off the wire directly, but maps it through
+  sd-bus's own name→errno table (`dbus_session_map_error`, pinned to
+  `tests/fixtures/sdbus_errno_map.tsv`) so both backends return the
+  same errno: natively too, `NotInControl` is `-22`, and the name is
+  not surfaced.
 
 **The `force` argument.** `b force` selects whether to steal
 control from an existing controller. samvada sends `false` (`0`)
@@ -172,9 +182,11 @@ ABI change, not a wire change.
 `TakeControl` itself is also uid-gated — the caller's effective
 uid must be the session's user or root — so a `NotInControl`
 downstream can additionally mean "the `TakeControl` reply was an
-error nobody checked". `samvada_init()` checks it: a negative rc
-from slot +72 aborts init, calls `samvada_release()` and returns
-the sd-bus errno unchanged.
+error nobody checked". `samvada_session_take_device()` checks it
+(`src/samvada.cyr`, since 0.6.0 — ADR-0004): a negative rc from
+slot +72 fails the take before any `TakeDevice` is sent and returns
+the sd-bus errno unchanged; a `-110` timeout records control as
+possibly held, so a `ReleaseControl` is still owed.
 
 The body is one four-byte word:
 
@@ -197,9 +209,12 @@ Two things follow from `org.freedesktop.login1(5)`:
   duplicate.
 - "Closing the D-Bus connection implicitly releases control as
   well", so the explicit call is an optimisation rather than an
-  obligation. `samvada_release()` calls it through slot +80 and
-  deliberately **ignores the return value** before closing the
-  bus, because the close would have released control anyway.
+  obligation. `samvada_session_release_device()` sends it through
+  slot +80 when the last held device is released (and a failed take
+  with nothing held hands control straight back); `samvada_release()`
+  sends it only if control is still held — not to a controller
+  logind did not answer last time — and **ignores the return value**
+  before closing the bus, because the close releases control anyway.
 
 **Backward compatibility.** Slots +72 / +80 were appended after
 `kind` at +64 per ADR-0002, so a pre-0.5.1 fn-table is still
@@ -219,14 +234,15 @@ fields:
 | 1 | PATH | object_path | yes | `/org/freedesktop/login1` or session path |
 | 2 | INTERFACE | string | yes | `org.freedesktop.login1.{Manager,Session}` |
 | 3 | MEMBER | string | yes | `GetSessionByPID` / `TakeControl` / `TakeDevice` / `ReleaseDevice` / `ReleaseControl` |
-| 6 | DESTINATION | string | yes | always `org.freedesktop.login1` |
+| 6 | DESTINATION | string | yes | `org.freedesktop.login1` on every logind call; `org.freedesktop.DBus` on the native backend's own `Hello` (PATH `/org/freedesktop/DBus`, INTERFACE `org.freedesktop.DBus`, MEMBER `Hello`, no SIGNATURE — `_dbs_hello`) |
 | 7 | SENDER | string | filled by bus | unique name like `:1.42` — this is the identity `TakeControl` binds the controller claim to |
 | 8 | SIGNATURE | signature | when args | `u`, `uu`, `b` — **absent entirely** on `ReleaseControl`, which has no body |
 | 9 | UNIX_FDS | uint32 | when fds attached | on the `TakeDevice` reply, and on the `ResumeDevice` signal (`uuh`) if it is ever delivered |
 
 Field codes **4 (ERROR_NAME)** and **5 (REPLY_SERIAL)** appear on
-replies; samvada's pure-Cyrius marshaller will need to read
-them but doesn't construct them. ERROR_NAME in particular is not
+replies; samvada's native backend reads them (`dbus_session_call`:
+REPLY_SERIAL to match its reply, ERROR_NAME to map the error) but
+doesn't construct them. ERROR_NAME in particular is not
 optional to parse: §[Session control](#session-control--takecontrol--releasecontrol)
 shows two distinct logind failures that squash to errno values
 samvada already uses for its own local rejections, so the name
@@ -260,9 +276,10 @@ itself is aligned to 8 (struct alignment for `(yv)` entries).
 ## TakeDevice reply walk-through
 
 This is the one call where every wire-format trick shows up at
-once — fd passing, multi-type read, padding. The pure-Cyrius
-marshaller's first end-to-end test should be reproducing this
-exactly.
+once — fd passing, multi-type read, padding. The native backend's
+tests send it over a socketpair with real descriptors attached
+(`tests/dbus_session.tcyr`, "native: take_device honours the
+reply's index, count and signature").
 
 Wire bytes (logical, pre-endian-swap; sd-bus writes little-endian
 in practice):
@@ -298,8 +315,9 @@ Three traps the pure-Cyrius reader must handle:
 
 1. **The fd is not in the message body** — body[0..4] is an
    *index* into the SCM_RIGHTS array on the unix socket, not a
-   raw fd value. The sd-bus reader does the lookup; ours will
-   too.
+   raw fd value. The sd-bus reader does the lookup; ours does too
+   (`dbus_native_take_device` claims the descriptor the `h` names,
+   `dbus_frame_claim_fd(idx)`).
 2. **`b` is uint32 on the wire even though it's 1 byte
    semantically** — 4-byte alignment, 4 bytes of storage,
    value strictly 0 or 1.
@@ -317,23 +335,28 @@ org.freedesktop.login1.Session.ResumeDevice(u major, u minor, h fd)    ; signal
 org.freedesktop.login1.Session.PauseDeviceComplete(u major, u minor) -> ()
 ```
 
-**State the gap first, because the rest of this section is
-aspirational.** As of 0.5.1 samvada delivers neither signal.
+**State the property first, because the rest of this section is
+aspirational.** samvada delivers neither signal — since 0.6.0 a
+decision, not a gap
+([ADR-0004](../adr/0004-session-control-lifecycle-and-signal-visibility.md) §2).
 Slot +48 (`sb_subscribe_pause_resume`) and slot +56
 (`sb_unsubscribe`) are populated by the C shim in
 `deps/samvada_main.c`, but **no Cyrius code dispatches either
 one** — `grep samvada_slot_subscribe_pause_resume src/` finds
 only the offset declaration in `src/samvada_ffi.cyr`, never a
 call — and there is no public API through which a consumer could
-install a handler. `samvada_pump_signals()` therefore runs
-`sd_bus_process` against a connection with no registered
-callback: it drains and discards. `PauseDeviceComplete` is not
-wired at all, on either side of the FFI boundary. Any statement
-elsewhere that samvada "handles pause/resume" describes the
-shim's surface area, not a working path.
+install a handler. Under the C shim `samvada_pump_signals()`
+therefore runs `sd_bus_process` against a connection with no
+registered callback: it drains and discards. The native backend's
+pump (`dbus_native_pump_signals`) does the same by hand — up to 256
+messages and 1024 non-blocking reads per call — and closes any
+descriptor a signal carried as it advances past it.
+`PauseDeviceComplete` is not wired at all, on either side of the
+FFI boundary. Any statement elsewhere that samvada "handles
+pause/resume" describes the shim's surface area, not a working
+path.
 
-What the wire actually does, for the marshaller that closes the
-gap:
+What the wire actually does, should that decision be revisited:
 
 **Delivery.** `org.freedesktop.login1(5)`: "The active session
 controller *exclusively* gets `PauseDevice()` and
@@ -369,12 +392,15 @@ switch is held; the man page notes logind "is free to send a
 forced `PauseDevice()` if you do not respond in a timely
 manner", and that "forced signals (or after an internal timeout)
 are automatically completed by `systemd-logind` asynchronously".
-So a client that never acknowledges does not deadlock the
-machine, but it does stall every VT switch for the length of
-that timeout and then gets its device yanked mid-frame instead
-of at a point of its choosing. A compositor that ignores
-`PauseDevice` is a compositor that makes VT switching feel
-broken.
+That is the man page's account, and
+[ADR-0004](../adr/0004-session-control-lifecycle-and-signal-visibility.md)
+found it wrong against systemd v261's source: there is no
+acknowledgement timeout (`struct Seat` carries no timer), on a seat
+with VTs `PauseDevice("pause")` is never emitted — the controller
+receives `force`, which needs no reply — and `session_leave_vt()`
+acknowledges the switch unconditionally (findings 3–4). A
+compositor that ignores `PauseDevice` is a compositor that makes
+VT switching feel broken.
 
 Like `TakeControl`, `PauseDeviceComplete` is gated on control —
 verified live, a connection holding control but no device gets
@@ -400,7 +426,7 @@ master delegated. dbus carries it as `SCM_RIGHTS` ancillary data
 on the unix socket (see `unix(7)` and dbus spec §Sending Unix
 File Descriptors).
 
-samvada's v0.x path receives the fd via libsystemd's
+samvada's C-shim path receives the fd via libsystemd's
 `sd_bus_message_read("...h...")` which pops the fd from the
 internal aux array. `sb_take_device` then duplicates it before
 unref'ing the message — without that, the fd's lifetime ends
@@ -430,8 +456,12 @@ The native backend's receive (`src/dbus_sys.cyr`,
    three-descriptor message truncated — which closed the bus (P1-2).
 2. After `recvmsg`, walk `CMSG_FIRSTHDR / CMSG_NXTHDR` over every
    cmsg (`SO_PASSCRED` puts `SCM_CREDENTIALS` first), and copy each
-   `SCM_RIGHTS` int[] out of `CMSG_DATA`. `MSG_CTRUNC` keeps the bytes
-   and marks the message's descriptor set incomplete.
+   `SCM_RIGHTS` int[] out of `CMSG_DATA`; an `SCM_PIDFD` descriptor
+   (Linux 6.5, sent only under `SO_PASSPIDFD`, which samvada never
+   sets) is closed at once. `MSG_CTRUNC` keeps the bytes and marks the
+   message's descriptor set incomplete. A descriptor that arrived on
+   0..2 is moved above stdio (`F_DUPFD_CLOEXEC`, minimum 3) before it
+   is queued.
 3. **Every read is bounded to the message at the head of the
    buffer** — the rest of its 16-byte header, then the rest of the
    message. The kernel detaches an skb's descriptors when the skb's
@@ -444,7 +474,14 @@ The native backend's receive (`src/dbus_sys.cyr`,
    which a message samvada could not parse made zero (P1-1).
 4. Index by the `h` field in the message body: `TakeDevice` hands
    out the descriptor its reply's `h` names, and only if the reply is
-   `(hb)` and its `UNIX_FDS` matches what arrived.
+   `(hb)`, its `UNIX_FDS` (absent = 0) matches what arrived, the set
+   is complete (no `MSG_CTRUNC`), and — by `F_GETFL` and `statx` — the
+   descriptor is a character device whose rdev is the `(major, minor)`
+   asked for, open read-write (`dbus_session_fd_is_device`, 1.1.2).
+   Anything else is `-EBADF` (`-9`) and nothing is handed out. Only the
+   first 8 of a message's descriptors are queued
+   (`dbus_frame_fdq_cap`); the rest are closed on arrival but still
+   counted, so an `h` of 8 or more is refused.
 
 If the reader closes its receive socket before consuming the
 fd-bearing cmsg, the kernel closes the fd.
@@ -506,14 +543,16 @@ controller claim to.
 `<hex(uid)>` is the ASCII-encoded uid, hex-encoded again — uid
 1000 sends `31303030` (the ASCII of "1000"), not `0x3E8`.
 
-## What samvada v0.x does NOT touch
+## What samvada does NOT touch
 
-Documented here so the v1.0 marshaller knows what it can
-*defer* even after the C shim retires:
+Documented here so it is clear what the native marshaller
+deliberately *defers*, even after the C shim retires (scheduled for
+v1.2.0). The first four are on the roadmap's wishlist, gated on a
+second AGNOS consumer:
 
 - **Properties.Get/Set/GetAll** — `org.freedesktop.DBus.Properties`
-  isn't in the v0.x slot table. v0.3+ may add it; v1.0 minimum
-  is whatever v0.x needed.
+  isn't in the slot table; it is on the roadmap's wishlist, deferred
+  past 1.0 and gated on a second AGNOS consumer.
 - **Object introspection** — `org.freedesktop.DBus.Introspectable.Introspect`
   returns XML; samvada hard-codes paths instead.
 - **Session bus** — only the system bus is connected. Per-user
@@ -524,8 +563,8 @@ Documented here so the v1.0 marshaller knows what it can
   `ReleaseDevice`, `ReleaseControl`), plus one wildcard signal
   match that nothing installs. A pure-Cyrius
   `dbus_call_method(dst, path, iface, member, in_sig, ...,
-  out_sig, ...)` is nice-to-have but not required for the v1.0
-  ship.
+  out_sig, ...)` is nice-to-have; 1.0 shipped without it, and it is
+  on the roadmap's wishlist.
 - **The rest of the Session interface** — `Activate`, `Lock` /
   `Unlock`, `SetType` / `SetClass` / `SetDisplay` / `SetTTY`,
   `SetBrightness`, `Kill`, `Terminate` are all present on the
@@ -535,9 +574,10 @@ Documented here so the v1.0 marshaller knows what it can
   future minor that adds any of them inherits the ordering
   constraint rather than introducing a new one.
 
-Explicitly **in** scope but still missing, so it does not get
-filed under "deferred" by accident: `PauseDeviceComplete`, and
-any dispatch path for the two signals. See
+Deliberately **not** provided, by decision rather than omission
+(ADR-0004 §2–3): `PauseDeviceComplete`, and any dispatch path for
+the two signals. ADR-0004 §"When this is revisited" lists what
+reopens it. See
 §[PauseDevice / ResumeDevice](#pausedevice--resumedevice--the-signals-samvada-does-not-yet-receive).
 
 ## Verification against logind
@@ -566,7 +606,7 @@ these: `GetSessionByPID` returns the escaped path as an `o` and
 samvada copies the bytes verbatim into `_samvada_sess`, then
 hands the same buffer to every later call. Any future code that
 builds a session path from a session *name* would have to
-implement the escaping; nothing in v0.x does, and nothing should.
+implement the escaping; nothing in samvada does, and nothing should.
 
 The rows this document depends on, verbatim (whitespace
 compressed; the columns are name, type, in-signature, result,
@@ -607,9 +647,9 @@ hardware gate, not a marshalling defect: the probing session had
 no seat (`loginctl list-sessions` showed `SEAT` empty), and
 `TakeDevice` "only works on devices that are attached to the
 seat of the given session". A seated end-to-end run is still
-unverified and remains a v1.0 gate — nothing in this document
-should be read as claiming the full path has been exercised
-against real DRM hardware.
+unverified, and is the CG lane that now gates v1.2.0 (roadmap) —
+nothing in this document should be read as claiming the full path
+has been exercised against real DRM hardware.
 
 The two success rows above carry one detail worth writing into
 the marshaller's contract: **`sd_bus_call_method` returns a
@@ -617,9 +657,9 @@ positive `1` on success, not `0`.** Passing that through unchanged
 is what made `samvada_session_release_device` return `1` against
 a documented `0 | -err` contract before 0.5.1; both
 `sb_release_device` (C) and `samvada_session_release_device`
-(Cyrius) now normalise any non-negative rc to `0`. A pure-Cyrius
-marshaller that owns the whole path has no libsystemd convention
-to launder and should simply return `0`.
+(Cyrius) now normalise any non-negative rc to `0`. The native
+backend, which owns the whole path, has no libsystemd convention to
+launder and simply returns `0` (`dbus_session_call`).
 
 ## References
 
@@ -637,8 +677,15 @@ to launder and should simply return `0`.
 - `deps/samvada_main.c` — the wrappers named throughout
   (`sb_take_control`, `sb_release_control`, `sb_take_device`, …)
   and the slot offsets they are installed at.
-- `src/samvada.cyr` — the Cyrius side: `samvada_init()` owns the
-  `GetSessionByPID` → `TakeControl` half of the order,
-  `samvada_release()` owns `ReleaseControl` → close.
+- `src/samvada.cyr` — the public layer: `samvada_init()` owns open →
+  `GetSessionByPID`; `samvada_session_take_device()` sends
+  `TakeControl` before the first held device;
+  `samvada_session_release_device()` sends `ReleaseControl` after the
+  last one, and `samvada_release()` owns `ReleaseControl` (if control
+  is still held) → close (ADR-0004).
+- `src/dbus_session.cyr`, with `src/dbus_sys.cyr`, `dbus_frame.cyr`,
+  `dbus_socket.cyr`, `dbus_auth.cyr`, `dbus_marshal.cyr` and
+  `dbus_unmarshal.cyr` — the native backend: it builds every call
+  samvada sends (and `Hello`) and reads the replies, in Cyrius.
 - `src/samvada_ffi.cyr` — the slot table, including the +72/+80
   append that carries session control.

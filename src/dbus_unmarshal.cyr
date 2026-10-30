@@ -41,9 +41,11 @@
 # framer only ever yields a message once `avail >= total` — so the
 # header lengths are already consistent with the bytes present. But
 # "unreachable because the caller happens to validate first" is the
-# exact shape of CRIT-1 and CRIT-2, and this module is exported in
-# the consumer bundle. So the limit is now explicit and enforced
-# here rather than assumed of the caller.
+# exact shape of CRIT-1 and CRIT-2, and this module shipped
+# consumer-reachable in the bundle (private to Cyrius consumers since
+# 1.1.1, src/visibility.cyr; an `object;` build still exports it to C).
+# So the limit is now explicit and enforced here rather than assumed
+# of the caller.
 var _dbu_limit = 0;      # total on-wire length of the current message
 
 # Declare the message's true extent. Every caller that has a framed
@@ -52,8 +54,10 @@ var _dbu_limit = 0;      # total on-wire length of the current message
 # and _dbu_limit defaults to 0 — so the decoder's DEFAULT state had NO
 # bounds at all, and a wire-supplied 0xFFFFFFF0 length was handed back
 # to the caller verbatim. That is AUDIT-1 again, re-openable by any
-# path that forgets to set a limit, and this module is exported in the
-# consumer bundle where callers we do not control reach it.
+# path that forgets to set a limit, and this module ships in the consumer
+# bundle, where C code linked against an `object;` build — callers we do
+# not control — can still reach it (Cyrius consumers cannot since 1.1.1,
+# src/visibility.cyr).
 #
 # An unset or nonsensical limit now means EVERYTHING is malformed,
 # rather than everything being permitted. A bounds check whose default

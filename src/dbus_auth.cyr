@@ -21,11 +21,11 @@
 # same handshake yields 43 bytes without NEGOTIATE_UNIX_FD and 52
 # via the hex-uid form. Never size a read or a state machine off it.
 #
-# This module borrows dbus_frame.cyr's buffer through
-# tail/space/commit rather than owning one. alloc() never frees, and
-# a private buffer would either copy or lose the residual — the
-# server is free to pipeline, so binary message bytes can arrive in
-# the same read as AGREE_UNIX_FD.
+# This module reads dbus_frame.cyr's buffer through base/have/consume
+# (dbus_session_sasl fills it through tail/space/commit) rather than
+# owning one. alloc() never frees, and a private buffer would either
+# copy or lose the residual — the server is free to pipeline, so
+# binary message bytes can arrive in the same read as AGREE_UNIX_FD.
 
 fn dbus_auth_ok()        { return 0; }
 fn dbus_auth_need_more() { return -1100; }

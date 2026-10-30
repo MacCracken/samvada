@@ -1,8 +1,9 @@
 # samvada — the frozen public API surface. One "name/arity" per line,
 # plus an ffi-leak rule column.
 #
-# This file is the mechanical form of two CLAUDE.md invariants that
-# were enforced by review only until 1.0.1:
+# This file is the mechanical form of two invariants that were
+# enforced by review only until 1.0.1 (the first a v1.0 criterion of
+# the pre-1.0 roadmap, the second a CLAUDE.md rule):
 #
 #   * "Public API frozen — every exported symbol documented + tested"
 #   * "Do not expose FFI types in public function signatures"

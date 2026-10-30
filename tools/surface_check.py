@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Freeze samvada's public API surface mechanically.
 
-CLAUDE.md states two invariants that were, until 1.0.1, enforced by
-REVIEW ONLY:
+Two invariants (the first a v1.0 criterion of the pre-1.0 roadmap, the
+second a CLAUDE.md rule) were, until 1.0.1, enforced by REVIEW ONLY:
 
   * "Public API frozen — every exported symbol documented + tested"
   * "Do not expose FFI types in public function signatures"
@@ -24,8 +24,8 @@ and this gate checks two things about it: that set equals the manifest,
 and the bundle really opens with its `private` marker, before any
 top-level declaration. That is stricter than any toolchain needs — what
 breaks is a marker after a top-level STATEMENT — but it is valid on all
-of them, and consumers may pin as low as 6.6.5. Until 1.1.1 Cyrius-level
-visibility was unused, every one of the bundle's 204 fns was reachable,
+of them, and consumers may pin as low as 6.6.13. Until 1.1.1 Cyrius-level
+visibility was unused, every one of the bundle's 201 fns was reachable,
 and this gate approximated "public" as `samvada_*` minus the FFI plumbing.
 tools/boundary_check.py proves the boundary by compiling against it.
 

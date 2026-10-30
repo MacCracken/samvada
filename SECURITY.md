@@ -19,13 +19,14 @@ This policy covers samvada's own source — `src/*.cyr`,
 produces them (`.github/workflows/`), since a consumer fetching
 a tag trusts both.
 
-samvada wraps `libsystemd`'s `sd_bus_*` API in v0.x; vulnerabilities
-in libsystemd itself, in the dbus broker, in logind, or in the
-underlying kernel session-management primitives should be reported
-upstream (systemd / your distro). If an upstream bug specifically
-affects samvada users — for example, a libsystemd misuse only
-exposed by samvada's wrapper — flag it here and we will harden
-the wrapper, document the workaround, or both.
+samvada speaks dbus natively by default since 1.0, and its C-shim
+fallback (retiring at 1.2.0) wraps `libsystemd`'s `sd_bus_*` API;
+vulnerabilities in libsystemd itself, in the dbus broker, in
+logind, or in the underlying kernel session-management primitives
+should be reported upstream (systemd / your distro). If an
+upstream bug specifically affects samvada users — for example, a
+libsystemd misuse only exposed by samvada's wrapper — flag it here
+and we will harden the wrapper, document the workaround, or both.
 
 ## Supported Versions
 
@@ -34,6 +35,7 @@ the wrapper, document the workaround, or both.
 | 1.1.x   | **Yes** — current release line, receives security fixes; take 1.1.2 or later (P1-1, HIGH) |
 | 1.0.x   | No — superseded by 1.1.x; the 1.1.2 fixes are not backported         |
 | 0.11.x  | No — superseded by 1.0.0                                             |
+| 0.6.x–0.10.x | No — superseded                                                 |
 | 0.5.x   | No — the C-shim era; superseded                                      |
 | 0.4.x   | No — superseded by 0.5.1; upgrade, there is no backport path         |
 | 0.3.x   | No                                                                   |
@@ -98,7 +100,7 @@ trusts vs. validates:
 | **Loss of the connection** | **a state, reported as sd-bus reports it** (1.1.1) | The call that sees the drop — EOF, a stream cut mid-message, or a disconnect errno on send or receive — returns `-ECONNRESET`; every later call `-ENOTCONN` without touching the socket; `samvada_pump_signals()` `-ECONNRESET`. Until 1.1.1 the pump returned 0 events forever after the bus went away, so a consumer could not tell a quiet bus from a gone one |
 | Error names in an `ERROR` reply | **mapped exactly as sd-bus maps them** (1.1.1) | `dbus_session_map_error` reproduces libsystemd's table for `org.freedesktop.DBus.Error.*`, `org.freedesktop.login1.*` and `System.Error.<ERRNO>`; `tests/fixtures/sdbus_errno_map.tsv` is libsystemd's own output, re-checked against the runner's libsystemd in CI. Until 1.1.1 it held eight names, two with the wrong errno |
 | FDs received via `SCM_RIGHTS` | re-duplicated `CLOEXEC` before the message is unref'd (shim); received `MSG_CMSG_CLOEXEC` (native); **every consumed message closes its own** | see the fd-passing design principle below. Since 1.1.2 "its own" is decided by stream position, not by parsing the message (P1-1); the receive reserves room for 253 descriptors, so no message truncates the control data and closes the bus (P1-2); no received descriptor is left on 0..2; and `take_device` hands out a descriptor only if the kernel says it **is** the device asked for — a character device whose rdev is `(major, minor)` (`statx`) |
-| logind's `PauseDevice` / `ResumeDevice` signals | **not surfaced, by decision** | samvada does not deliver session signals in the 0.x line — ratified in [ADR-0004](docs/adr/0004-session-control-lifecycle-and-signal-visibility.md), not an unfixed gap. logind emits them only to the session *controller*, which samvada now is only while it holds a device. See "Known Limitations" for what a consumer must plan around |
+| logind's `PauseDevice` / `ResumeDevice` signals | **not surfaced, by decision** | samvada does not deliver session signals — ratified in [ADR-0004](docs/adr/0004-session-control-lifecycle-and-signal-visibility.md), not an unfixed gap. logind emits them only to the session *controller*, which samvada now is only while it holds a device. See "Known Limitations" for what a consumer must plan around |
 | logind session control (`TakeControl`) | **acquired only while a device is held** | `TakeControl` runs logind's `session_prepare_vt()`: on a session with `vtnr >= 1` it sets `KDSKBMODE=K_OFF` and `KDSETMODE=KD_GRAPHICS`, i.e. **it disables the keyboard and blanks the console**. 0.5.1 took control at init and so muted the console before any device was requested; 0.6.0 scopes it to device ownership (ADR-0004). Treat `TakeControl` as a privileged, user-visible action, not bookkeeping |
 
 ## Design Principles
@@ -158,7 +160,8 @@ trusts vs. validates:
   single call captive — measured at 0.77 s under an
   unprivileged local flood. The public
   `samvada_pump_signals()` signature is frozen and takes no
-  arguments, so the cap lives in the C wrapper; a residual
+  arguments, so the cap lives in each backend's pump (the C
+  wrapper, and `dbus_native_pump_signals` natively); a residual
   queue drains on the consumer's next tick.
 - **Init fails closed.** `samvada_init` refuses re-entry
   without an intervening release (`-EBUSY`), and calls
@@ -178,10 +181,13 @@ trusts vs. validates:
 - **The release supply chain is pinned.** The toolchain
   installer is fetched from a pinned commit SHA and
   checksum-verified before it executes, rather than piped into
-  a shell from a mutable branch. Workflow permissions default
-  to `contents: read`, with `contents: write` granted only to
-  the job that publishes; every `actions/checkout` runs with
-  `persist-credentials: false` so no job leaves a
+  a shell from a mutable branch; since 1.0.1 the toolchain tarball
+  itself is checked against `CYRIUS_TARBALL_SUM`, pinned in both
+  workflows, and every action is pinned by commit SHA
+  (`.github/dependabot.yml` proposes the bumps). Workflow
+  permissions default to `contents: read`, with `contents: write`
+  granted only to the job that publishes; every `actions/checkout`
+  runs with `persist-credentials: false` so no job leaves a
   `GITHUB_TOKEN` on disk for a third-party script to read.
 
 ## Known Limitations
@@ -254,6 +260,7 @@ defence is so a deployment can judge whether it holds.
   signatures" and the public set since 1.0.1, and
   `tools/boundary_check.py` gates reachability since 1.1.1.
 
+### Standing since 0.5.1
 
 Named here because a security document that only lists what is
 defended is misleading about what is wired.
@@ -262,11 +269,12 @@ defended is misleading about what is wired.
   shim populates slot `+48` (`sb_subscribe_pause_resume`) and
   slot `+56` (`sb_unsubscribe`), but **no samvada code path
   dispatches either**, and no public fn installs a match rule —
-  the exported surface in `dist/samvada.cyr` carries the two
-  slot-offset constants and nothing that calls through them.
+  `dist/samvada.cyr` carries the two slot-offset constants —
+  private since 1.1.1 — and nothing that calls through them.
   `samvada_pump_signals()` therefore services the connection
-  (it drives `sd_bus_process`) but can never run a pause/resume
-  callback, because none was ever registered — the callback ABI
+  (the shim's pump drives `sd_bus_process`; the native pump, the
+  default, reads each message and discards it) but can never run
+  a pause/resume callback, because none was ever registered — the callback ABI
   is sound and has never executed. Since 1.1.1 a Cyrius consumer
   cannot reach slot `+48` at all (`samvada_ffi_get_slot` is private
   to the bundle); only C code linked against an `object;` build can
@@ -284,8 +292,8 @@ defended is misleading about what is wired.
   check), but the remaining path then hits an
   environment-specific `AccessDenied` on a seatless session.
   The full seated path is untested. Treat every runtime claim
-  about `TakeDevice` success as unproven until the M1 closeout
-  gate clears.
+  about `TakeDevice` success as unproven until the roadmap's CG
+  lane (CG-2) clears.
 - **samvada is single-threaded and has no locking.** Module
   scope state (`_samvada_table`, `_samvada_bus`,
   `_samvada_sess`, `_samvada_outs`) is unguarded, and the
@@ -298,8 +306,8 @@ defended is misleading about what is wired.
 - **The pump cap bounds a call, not a peer.** 256 events per
   call stops one call being held captive; it does not
   rate-limit a peer that sustains a flood, which still consumes
-  the pump budget on every tick. Rate-limiting is a v1.0 design
-  item.
+  the pump budget on every tick. Rate-limiting is not
+  implemented and is not on the roadmap.
 - **Input validation is in the core and in each backend.** Since
   1.1.2 the public layer range-checks `major` / `minor` before
   `TakeControl` or any dispatch (`_samvada_devnum_ok`, take and
@@ -313,7 +321,7 @@ defended is misleading about what is wired.
 |------------|----------------------------------------|---------|--------|
 | 2026-10-29 | P(-1) pass — wire path, session layer, CI gates, CVE review; adversarially re-verified | 1.1.2 | [`docs/audit/2026-10-29-p1-audit.md`](docs/audit/2026-10-29-p1-audit.md), and [`CHANGELOG.md`](CHANGELOG.md) 1.1.2 |
 | 2026-10-29 | A-lane close-out — A-1, A-2, A-4, A-6 | 1.1.1 | [`docs/audit/2026-10-29-audit.md`](docs/audit/2026-10-29-audit.md), and [`CHANGELOG.md`](CHANGELOG.md) 1.1.1 |
-| 2026-09-10 | A-lane completion — the dimensions 1.0.0 did not cover | 1.0.1 | [`docs/audit/2026-09-09-native-audit.md`](docs/audit/2026-09-09-native-audit.md) §A lane, and [`CHANGELOG.md`](CHANGELOG.md) |
+| 2026-09-10 | A-lane completion — the dimensions 1.0.0 did not cover | 1.0.1 | [`docs/audit/2026-09-09-native-audit.md`](docs/audit/2026-09-09-native-audit.md) § Outstanding — NOT audited before 1.0.0 (the A lane's scope), and [`CHANGELOG.md`](CHANGELOG.md) 1.0.1 |
 | 2026-09-09 | Pre-1.0 audit of the native marshaller + reply forgery | 1.0.0 | [`docs/audit/2026-09-09-native-audit.md`](docs/audit/2026-09-09-native-audit.md) |
 | 2026-09-09 | P(-1) hardening review + security audit | 0.5.1  | [`docs/audit/2026-09-09-audit.md`](docs/audit/2026-09-09-audit.md) |
 | 2026-05-01 | Hardening review                       | 0.2.2   | [`docs/audit/2026-05-01-hardening-review.md`](docs/audit/2026-05-01-hardening-review.md) |
@@ -419,7 +427,9 @@ that matter:
   stated under "Known Limitations".
 - **The native dbus marshaller.** This pass audits the
   **C-shim surface**, which v1.0 retires. Replacing it with
-  hand-rolled byte parsing (Path A in `roadmap.md` §M3)
+  hand-rolled byte parsing (Path A of `roadmap.md` §M3 as it
+  stood at 0.5.0 — A.1 in
+  `docs/proposals/0001-v1-dbus-backend-pivot.md`)
   substantially *enlarges* the audit surface — samvada would
   be parsing untrusted wire bytes itself rather than
   delegating to libsystemd's validated parser — and **must get

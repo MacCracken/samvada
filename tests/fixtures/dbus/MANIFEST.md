@@ -8,8 +8,9 @@ AF_UNIX relay, by pointing a libsystemd client at it via
 **Why this exists, and why now.** These bytes are the reference the native
 Cyrius marshaller (N3/N4) is built and tested against. They have to be
 captured **while the libsystemd C shim still exists**, because the shim is
-deleted at the v1.0 cutover (roadmap N7) and the reference implementation
-goes with it.
+to be deleted — deferred from the v1.0 cutover (N7), now scheduled for
+v1.2.0 (roadmap, "Next: v1.2.0 — retire the C shim") — and the reference
+implementation goes with it.
 
 ## Provenance
 
@@ -73,7 +74,9 @@ evidence rather than belief.
 1. **SASL is ONE pipelined write.** The client sends 48 bytes in a single
    write: `\0AUTH EXTERNAL\r\nDATA\r\nNEGOTIATE_UNIX_FD\r\nBEGIN\r\n`,
    with an *empty-credential* `DATA` step — not the
-   `AUTH EXTERNAL <hex(uid)>` ping-pong `dbus-marshalling.md` documents.
+   `AUTH EXTERNAL <hex(uid)>` ping-pong `dbus-marshalling.md` documented
+   until 0.7.1 (it now leads with the pipelined form and keeps the
+   ping-pong as the valid alternative).
    Both forms are legal; only one is what the reference client emits.
 2. **The server answers all three SASL lines in ONE 58-byte read.** A
    reader written one-read-per-line hangs against a real bus.
@@ -132,18 +135,20 @@ have those ranges masked.
 
 ## Exit criterion NOT met
 
-The roadmap requires a second capture **on a different host / systemd
-version**, to prove the corpus is not over-fitted to one machine. Only one
-host is available here, so this is **outstanding**. What was done instead
-is the same-host repeat above, which establishes which bytes are volatile
-but cannot establish which are host-specific. Field ordering and the flags
-byte are the likeliest to differ elsewhere, since finding 5 shows they are
-implementation choices rather than spec requirements.
+N2's exit criterion (CHANGELOG 0.7.1) calls for a second capture **on a
+different host / systemd version**, to prove the corpus is not over-fitted
+to one machine. Only one host is available here, so this is
+**outstanding**. What was done instead is the same-host repeat above, which
+establishes which bytes are volatile but cannot establish which are
+host-specific. Field ordering and the flags byte are the likeliest to
+differ elsewhere, since finding 5 shows they are implementation choices
+rather than spec requirements.
 
 Until a second host is available, treat the corpus as a **regression
 fixture for samvada's own encoder** rather than as a conformance oracle.
 The conformance oracle is the bus itself: send the bytes and check the
-reaction (roadmap N4).
+reaction (N4, CHANGELOG 0.9.0: `Hello` byte-identical to libsystemd's and
+accepted by the bus).
 
 ## Reproducing
 

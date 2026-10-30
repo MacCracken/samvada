@@ -50,8 +50,8 @@ modules = ["dist/samvada.cyr"]
 samvada's tags are **unprefixed** — `1.1.2`, not `v1.1.2`. Every
 tag pushed to the repo is bare.
 
-> **Do not pin below 1.0.1**, and there are two independent
-> reasons, either of which is disqualifying.
+> **Do not pin below 1.1.2**, and there are three independent
+> reasons, any of which is disqualifying.
 >
 > **Below 0.5.1**, `samvada_session_take_device()` could not
 > succeed in **any** environment — samvada never sent logind's
@@ -135,8 +135,10 @@ consumer never handles one. Do not call `samvada_init()` or
 
 ### Prerequisites (native)
 
-The Cyrius toolchain. That is the whole list. No C compiler, no
-`pkg-config`, no `libsystemd`, no `cycc`, no `objcopy`.
+The Cyrius toolchain, **6.6.13 or later**: the bundle compiles under
+your manifest's pin and calls the stdlib's `fd_wait_ready`, first in
+6.6.13 (see "Upgrading from 1.1.1 to 1.1.2"). That is the whole list.
+No C compiler, no `pkg-config`, no `libsystemd`, no `cycc`, no `objcopy`.
 
 ---
 
@@ -154,9 +156,10 @@ unless you are deliberately linking the reference backend.
 - A C compiler. (`objcopy` is needed **only** if you pin cyrius
   below 6.6.2 — see step 3.)
 - `pkg-config` with `libsystemd.pc` discoverable.
-- The Cyrius toolchain: both `cyrius` **and** `cycc`, which the
-  installer drops side by side in `~/.cyrius/bin`. Step 2
-  invokes `cycc` directly.
+- The Cyrius toolchain, **6.6.13 or later** (the bundle calls the
+  stdlib's `fd_wait_ready`; see "Upgrading from 1.1.1 to 1.1.2"):
+  both `cyrius` **and** `cycc`, which the installer drops side by
+  side in `~/.cyrius/bin`. Step 2 invokes `cycc` directly.
 
 ```sh
 pkg-config --modversion libsystemd      # 245+ recommended
@@ -273,9 +276,10 @@ Check the result before moving on — `file build/app.o` must say
 
 ### 3. Symbol localization — NO LONGER NEEDED on cyrius ≥ 6.6.2
 
-**Skip this step** if you are on the pinned toolchain. It is kept
-here because a consumer on an older cyrius still needs it, and
-because the failure it prevents is otherwise impossible to
+**Skip this step.** No cyrius that can build the 1.1.2 bundle needs
+it: the bundle needs 6.6.13 or later ("Upgrading from 1.1.1 to
+1.1.2"), and every cyrius from 6.6.2 on hides these names. It is kept
+here because the failure it prevents is otherwise impossible to
 diagnose.
 
 Through cyrius **6.6.1**, an `object;` build exported
@@ -320,7 +324,7 @@ Cyrius-only name with no libc counterpart, so localizing it does
 nothing.
 
 Filed upstream as
-`cyrius/docs/development/issues/2026-09-09-stdlib-exports-libc-names-with-incompatible-abi.md`
+`cyrius/docs/development/issues/archived/2026-09-09-stdlib-exports-libc-names-with-incompatible-abi.md`
 and fixed in 6.6.2.
 
 ### 4. Compile your `main()`, which calls `samvada_shim_init()`
@@ -414,7 +418,7 @@ reaches the shell as `256 + rc`:
 
 ```sh
 $ ./build/samvada-probe; echo "exit=$?"
-exit=0                       # bus + session + TakeControl all OK
+exit=0                       # bus + session OK (init takes no control)
 
 $ DBUS_SYSTEM_BUS_ADDRESS=unix:path=/nonexistent ./build/samvada-probe
 $ echo "exit=$?"
@@ -430,8 +434,9 @@ recipe unbuildable.
 
 There are **two** gates here and they are not the same gate.
 `samvada_shim_init()` needs a reachable system bus and a logind
-session that `GetSessionByPID` can find for the calling process,
-and then takes session control. All three succeed from an
+session that `GetSessionByPID` can find for the calling process;
+since 0.6.0 it takes no session control (the first `take_device`
+does — step 4). Bus, session and `TakeControl` all succeed from an
 ordinary ssh login on a `pam_systemd` host — measured 2026-09-09:
 `GetSessionByPID` → `/org/freedesktop/login1/session/_32`
 (logind's escaped spelling of session `2`), `TakeControl` → `0`.
@@ -471,7 +476,11 @@ init itself failed and nothing after it ran:
 | `-22` | `-EINVAL` — the table's `kind` word is neither `1` nor `2`; you are not linking the shim you think you are |
 | `-16` | `-EBUSY` — `samvada_shim_init()` called twice with no `samvada_release()` between |
 
-**`-22` from `take_device`** means something else, and it is the
+**`-22` from `take_device`** means something else. samvada itself
+returns it, without a round trip, when it is not initialised, when a
+device number is outside `0 ≤ v ≤ UINT32_MAX`, and (since 1.1.2) for
+a device you already hold — what logind's `DeviceIsTaken` would
+answer, which sd-bus also maps to `-22`. It is also the
 pre-0.5.1 failure: sd-bus maps logind's `NotInControl` onto
 `-EINVAL` (measured — call `TakeDevice` without `TakeControl` and
 sd-bus returns `-22` with
@@ -501,7 +510,8 @@ not after. Message-level detail in
 ## What is NOT wired
 
 **`PauseDevice` and `ResumeDevice` never reach you.** Do not
-design a v0.x consumer around them.
+design a consumer around them: no release through 1.1.2 delivers
+them, on either backend.
 
 The C shim populates slot +48 (`sb_subscribe_pause_resume`) and
 slot +56 (`sb_unsubscribe`), and both wrappers work — but **no
@@ -527,8 +537,8 @@ for the conditions under which any of it is
 built.
 
 The practical consequence for a compositor: logind revokes
-DRM-master on VT switch, and v0.x samvada gives you no
-notification that it happened. Your fd simply goes quiet.
+DRM-master on VT switch, and samvada (through 1.1.2, either backend)
+gives you no notification that it happened. Your fd simply goes quiet.
 
 Two more things worth stating plainly:
 
@@ -565,10 +575,10 @@ Two more things worth stating plainly:
    shim then dispatches into your version and samvada is never
    initialised. Delete it; give your entry point any other name
    and call it from `main()`.
-3. **Re-vendor the shim** from the 0.5.1 checkout. A 0.5.0 shim
-   against a 0.5.1 bundle leaves slot +72 null, and
-   `samvada_init` returns `-38` (`-ENOSYS`) rather than walking
-   into a guaranteed `NotInControl`.
+3. **Re-vendor the shim** from the checkout you re-pin to (1.1.2,
+   item 7). A 0.5.0 shim against a 0.5.1-or-later bundle leaves slot
+   +72 null, and `samvada_init` returns `-38` (`-ENOSYS`) rather
+   than walking into a guaranteed `NotInControl`.
 4. **You can drop the `objcopy` step** if you also move to
    cyrius ≥ 6.6.2, which hides the colliding libc names at the
    source (step 3). On an older cyrius it is still required, and
@@ -645,7 +655,32 @@ What a consumer may notice at run time (CHANGELOG 1.1.2 § Breaking):
 `samvada_init` reports why the SASL exchange failed (`-104`, `-110`,
 `-71`, the errno) where it said `-13`; `samvada_pump_signals` returns
 receive errors where it said 0; and the C shim opens a private
-connection rather than the thread's default bus.
+connection rather than the thread's default bus. The shim also never
+hands out the device fd on descriptor 0, 1 or 2 (CHANGELOG 1.1.2
+§ Fixed). Those two shim changes reach you only if you **re-vendor
+`deps/samvada_main.c`** from the 1.1.2 checkout (or the release's
+`samvada-1.1.2-shim.c`): a vendored 1.1.1 copy still opens the
+default bus and can land the fd on stdio.
+
+## Upgrading from 1.1.0 to 1.1.1
+
+The eight public signatures, the FFI layout and the C shim are
+unchanged. What can reach you (CHANGELOG 1.1.1 § Breaking):
+
+1. **The bundle is private-by-default.** Only the eight public fns
+   can be named; calling any other bundle fn (`samvada_ffi_alloc`, any
+   `dbus_*`) is a compile error, `'…' is private to its file`. Use the
+   public API.
+2. **The native backend's errors map as sd-bus's do** — logind absent
+   (`ServiceUnknown`) is `-113`, not `-2`; `NoReply` / `Timeout` are
+   `-110`; `DeviceIsTaken` is `-22` (the full table is in the
+   CHANGELOG). A consumer that branched on `-2` for "logind is not
+   there" must branch on `-113`.
+3. **A dead connection is reported.** The call that sees the drop
+   returns `-104`, every later call `-107`, and the pump `-104`:
+   `samvada_release()`, then re-init.
+4. **A message declaring 128 MiB or more is refused**, `-105`.
+5. **Re-pin to `1.1.2`**, not 1.1.1 (see above).
 
 ## Upgrading from 1.0.2 to 1.1.0
 
@@ -715,9 +750,9 @@ The 2026-09-09 audit found this guide documented a build that
 - The `objcopy` localization step was missing entirely, and on
   cyrius ≤ 6.6.1 the link succeeds without it and the program
   then hangs (or fails with `-107`, depending on the build).
-  Filed upstream and **fixed in cyrius 6.6.2**, which samvada
-  now pins — so on the pinned toolchain the step is no longer
-  needed at all.
+  Filed upstream and **fixed in cyrius 6.6.2**; samvada has
+  pinned 6.6.2 or later since 0.5.2 — so on the pinned toolchain
+  the step is no longer needed at all.
 - It told you to define `samvada_main` yourself, colliding with
   the bundle's and replacing it.
 - It pointed at `lib/samvada/deps/samvada_main.c`, a path

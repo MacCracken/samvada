@@ -7,16 +7,15 @@ repository = "https://github.com/MacCracken/samvada"
 language = "cyrius"
 cyrius = "6.7.18"
 
-# v0.x ships a smoke entry point only; the API surface (lib.cyr +
-# samvada.cyr) gets populated when the C shim lands in v0.2.0.
+# `cyrius build` builds the standalone smoke binary (src/main.cyr);
+# what consumers use is the `[lib]` bundle below, not this entry.
 [build]
 entry = "src/main.cyr"
 test = "src/test.cyr"
 output = "samvada"
 
-# `[lib]` feeds `cyrius distlib` — module order matters when
-# samvada grows real modules. v0.1.0 has only a placeholder fn so
-# the bundle is intentionally trivial.
+# `[lib]` feeds `cyrius distlib`, which concatenates these modules,
+# in this order, into dist/samvada.cyr.
 # N6 cutover (0.11.0): the native dbus modules ship in the bundle.
 # Until 0.10.0 they were built and tested but deliberately excluded,
 # so `dist/samvada.cyr`'s exported set stayed frozen at 26 fns while

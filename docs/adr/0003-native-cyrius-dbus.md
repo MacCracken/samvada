@@ -1,6 +1,10 @@
 # 0003 — Native Cyrius dbus is the v1.0 path
 
-**Status**: Accepted
+**Status**: Accepted — amended in the event: the C shim was not
+deleted at the 1.0.0 tag (Decision, item 3). 1.0.0 deferred that
+because the CG lane never cleared (CHANGELOG 1.0.0), and it is now the
+[roadmap](../development/roadmap.md)'s "Next" item, still gated on
+the CG lane.
 **Date**: 2026-09-09
 **Decides**: [ADR-0001](0001-c-shim-then-pivot.md) §Decision — the
 deferred choice between Path A.1 and Path A.2

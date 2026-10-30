@@ -1,11 +1,16 @@
 # @internal — samvada include chain
-# lib.cyr — single source of truth for what `cyrius distlib`
-# bundles into `dist/samvada.cyr`. Order matters when modules
+# lib.cyr — the FFI layout and the public layer
+# (samvada_ffi.cyr, samvada.cyr), for src/main.cyr, the
+# benches, tools/rxbench.cyr and the tests. It is NOT what
+# `cyrius distlib` bundles: dist/samvada.cyr is built from
+# cyrius.cyml `[lib] modules` (visibility, samvada_ffi, the
+# seven dbus_* modules, samvada). Order matters when modules
 # reference each other.
 #
-# v0.1.0: only samvada.cyr. v0.2.0+: add C-shim FFI bindings
-# (samvada_ffi.cyr), logind helpers (samvada_logind.cyr), and
-# whatever submodules the protocol implementation needs.
+# The native protocol modules (src/dbus_*.cyr) are not
+# included here: they are listed in cyrius.cyml `[lib]`, and
+# the tests and tools/rxbench.cyr include the ones they need
+# directly (after this file, where they include it too).
 
 include "src/samvada_ffi.cyr"
 include "src/samvada.cyr"

@@ -90,7 +90,8 @@ jobs:
         # ever set it, so every published binary carried its dead code —
         # including unreachable exec/fork/socket stdlib bodies (audit LOW-16).
         # DCE genuinely eliminates as of cyrius 6.5.72; measured 80,904 ->
-        # 15,368 bytes on this binary.
+        # 15,368 bytes on this binary at 0.5.1, 115,136 -> 20,928 at 1.1.2
+        # (docs/benchmarks.md Run 10).
         env:
           CYRIUS_DCE: "1"
         run: |
@@ -110,8 +111,9 @@ jobs:
         # release ASSETS. Those are only one thing if the regenerated dist/
         # equals what the tag committed — which is what lets a consumer check
         # a first resolve against SHA256SUMS (docs/guides/consumer-link.md).
-        # Until 1.1.1 nothing compared them; the CI gate's freshness check
-        # runs on a push, not on the tagged tree this job builds.
+        # Until 1.1.1 this job did not compare them. The CI gate (ci.yml via
+        # workflow_call, on this same tag) runs the freshness check on its own
+        # runner; this step checks the dist/ this job regenerates and archives.
         run: |
           if ! git diff --quiet HEAD -- dist/; then
             echo "ERROR: cyrius distlib on the tagged tree differs from the tag's dist/"
@@ -119,6 +121,19 @@ jobs:
             exit 1
           fi
           echo "dist/ is byte-identical to the tag's"
+
+      - name: Verify docs/development/state.md describes this tag
+        # CLAUDE.md once credited this to a release post-hook that never
+        # existed, and none could work: this workflow writes nothing back to
+        # the repo, and a commit made after the tag leaves the tag's own
+        # state.md stale. So tools/state_sync.py regenerates the snapshot's
+        # derived facts BEFORE the tag, as distlib does the bundle, and this
+        # refuses a tag whose snapshot disagrees with its own tree, or whose
+        # hand-written sections are acknowledged for another version
+        # (`<!-- state-sync:narrative X.Y.Z -->`). ci.yml only warns.
+        run: |
+          python3 tools/state_sync.py --self-test
+          python3 tools/state_sync.py --check
 
       - name: Clean toolchain artifacts
         run: rm -f cyrius-*.tar.gz

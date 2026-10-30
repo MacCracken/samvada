@@ -4,6 +4,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`tools/state_sync.py` — the state.md hook CLAUDE.md described but
+  nobody had built.** It regenerates the facts in
+  `docs/development/state.md` that can be read off the tree — version
+  and release date, the toolchain pin, CI runners and pinned actions,
+  public and internal fn counts, the FFI table, the stdlib leaves, the
+  errno-map, fixture and bench-baseline counts, and every suite's
+  asserts, by running each suite on its own — into marked blocks, and
+  the hand-typed copies of those numbers left the prose of `state.md`,
+  `README.md` and `CONTRIBUTING.md`. The hand-written prose carries a
+  `narrative` marker that only a person sets: the snapshot reads stale
+  until someone acknowledges the prose for the new version (the tool
+  cannot check that it was rewritten, only that someone said so).
+  `release.yml` refuses a stale snapshot; `ci.yml` warns on one (it is
+  refreshed per release, not per push) and fails if the tool errors.
+  Both run its self-test first, which a mutation pass (18 single-point
+  mutants) could not get past, and ci.yml plants a stale row that must
+  be reported. It runs before the tag, as
+  `cyrius distlib` does: `release.yml` writes nothing back, and a
+  commit after the tag would leave the tag's own `state.md` stale.
+
+### Changed
+
+- **Documentation sweep after 1.1.2.** Every living doc was checked
+  against the code, tools and CI, and each finding against the code
+  again before it was applied: stale descriptions of the CI and
+  release workflows, the consumer-link recipe, the error catalogue,
+  the wire-format notes, the Cyrius language conventions in
+  `CLAUDE.md` (cyrius 6.7.18 accepts comparisons in call arguments,
+  negative literals and block-scoped `var`s), file headers in `src/`
+  and `tools/`, and the ADR and proposal status lines. Comments only
+  in code; `dist/samvada.cyr` is regenerated to match. The released
+  1.1.2 entry below is corrected in one place: its EINTR retries
+  (P1-5) are the one repair with no test.
+
 ## [1.1.2] — 2026-10-29
 
 **A deep P(-1) pass, and one HIGH.** Four independent reviews of the
@@ -11,10 +47,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 review — found that **any local user could choose the descriptor
 `TakeDevice` returned**, three ways for a bus peer to fail a call or
 close the bus, gates that could be walked past, and a public layer whose
-bookkeeping could revoke a live device. Every repair is pinned by the
-finding's own proof of concept and mutation-tested, and the repaired
-tree was re-verified twice — five fresh reviewers and two refuting
-skeptics, then a final three-lens pass and a skeptic over the merged tree
+bookkeeping could revoke a live device. Every repair but the EINTR
+retries (P1-5, untested) is pinned by the finding's own proof of
+concept and mutation-tested, and the repaired tree was re-verified
+twice — five fresh reviewers and two refuting skeptics, then a final
+three-lens pass and a skeptic over the merged tree
 (`docs/audit/2026-10-29-p1-audit.md` § Re-verification, § Final pass). Same toolchain (cyrius 6.7.18);
 the FFI layout (11 slots / 88 bytes, `kind` at +64) and the eight public
 signatures unchanged. 1152 asserts (was 873 — 1.1.1's headline 879 counted

@@ -6,4 +6,7 @@ Not decisions (those live in [`../adr/`](../adr/)) and not guides (those live in
 
 ## Items
 
-_Empty. Add a numbered entry (`001-kebab-case-title.md`) the first time the code has a non-obvious invariant a reader can't derive. Do not write entries for decisions — those are ADRs._
+- [`public-api.md`](public-api.md) — the public contract: each of the eight fns, its preconditions, every error code and the test that pins it.
+- [`dbus-marshalling.md`](dbus-marshalling.md) — the slice of the D-Bus wire format samvada's calls exercise.
+
+Neither is numbered. Add new entries as `NNN-kebab-case-title.md`; do not write entries for decisions — those are ADRs.

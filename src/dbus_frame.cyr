@@ -8,10 +8,12 @@
 # exchange is `NameAcquired`. Conversely a stream socket may split
 # anywhere, so a partial tail must survive into the next read.
 #
-# This module owns THE receive buffer. dbus_auth.cyr borrows it
-# through tail/space/commit rather than keeping its own: alloc()
-# never frees, and a separate auth buffer would either copy or lose
-# the residual left when the server pipelines its SASL reply.
+# This module owns THE receive buffer. The SASL exchange borrows it
+# rather than keeping its own — dbus_session_sasl fills it through
+# tail/space/commit, and dbus_auth.cyr reads it through
+# base/have/consume: alloc() never frees, and a separate auth buffer
+# would either copy or lose the residual left when the server
+# pipelines its SASL reply.
 #
 # NOT REENTRANT. State is file-scope, matching dbus_sys.cyr and for
 # the same reason: `var buf[N]` inside a fn is STATIC in Cyrius, so
@@ -35,7 +37,7 @@ fn dbus_frame_off_flds()  { return 12; }
 fn dbus_frame_endian_le() { return 108; }
 fn dbus_frame_endian_be() { return 66; }
 
-# The buffer. 8192 is 34x the largest delivery the corpus contains
+# The buffer. 8192 is 29x the largest delivery the corpus contains
 # (282 bytes) and a page multiple. It is NOT a protocol limit — the
 # spec allows 128 MiB — so an over-cap message is DRAINED, not
 # treated as fatal (see dbus_frame_next). D-Bus can do that because
@@ -93,10 +95,11 @@ fn dbus_frame_fdq_cap() { return 8; }
 # ---- status codes ----
 # Deliberately OUTSIDE the errno band. samvada's convention is that
 # negatives are sd-bus errnos, and dbus_sys.cyr already spends -22
-# and -71. If a protocol fault shared that range, "the bus sent a
-# malformed header" would be indistinguishable from "recvmsg
-# failed", which is exactly the ambiguity the 0.5.1 audit found
-# around -22.
+# and -12, and passes recvmsg's own errnos through (its -71 for a
+# truncated receive went in 1.1.2). If a protocol fault shared that
+# range, "the bus sent a malformed header" would be
+# indistinguishable from "recvmsg failed", which is exactly the
+# ambiguity the 0.5.1 audit found around -22.
 fn dbus_frame_need_more() { return -1000; }
 fn dbus_frame_eof()       { return -1001; }   # orderly close, nothing pending
 fn dbus_frame_truncated() { return -1002; }   # EOF mid-message

@@ -1,8 +1,11 @@
-# @public — samvada API surface (stable across v0.x)
+# @public — samvada API surface (frozen: tools/public_surface.txt)
 # samvada.cyr — entry point for the dbus / logind subset.
 #
 # Consumer-facing surface:
+#   samvada_native_init()                      -> 0|err
+#     (native; src/dbus_session.cyr)
 #   samvada_init(fn_table_ptr)                 -> 0|err
+#     (C-shim entry, via samvada_main)
 #   samvada_session_take_device(major, minor)  -> fd | -err
 #   samvada_session_release_device(major, minor) -> 0|err
 #   samvada_pump_signals()                     -> events_drained|negative_err
@@ -11,7 +14,7 @@
 #
 # `samvada_main(table)` is the C-shim entry point. It calls
 # `samvada_init(table)` and then returns immediately — consumers
-# (mabda's _backend_native_surface_configure_logind) drive the
+# (mabda's gpu_surface_configure_native_logind) drive the
 # rest from their own code paths. The "consume samvada" half of
 # the contract is invoked synchronously below the public API.
 #
@@ -275,9 +278,12 @@ fn _samvada_drop_control(closing) {
 }
 
 # Ask logind for DRM-master delegation on /dev/dri/card<N>. Returns
-# the dup'd unix_fd on success, or a negative sd-bus errno on
-# failure. The fd's lifetime is the caller's; close() it (or pass
-# it to ReleaseDevice + close) on teardown.
+# the unix_fd on success (the C shim's duplicate, or the descriptor
+# the native reply carried), or a negative sd-bus errno on failure.
+# The caller owns the descriptor and close()s it, but its DRM-master
+# rights end at samvada_release() (ReleaseControl revokes every
+# device): stop drawing, samvada_release(), then close(). To give
+# back one device: samvada_session_release_device(), then close().
 public fn samvada_session_take_device(major, minor) {
     if (_samvada_have_table() == 0) { return -22; }
     if (_samvada_bus == 0)          { return -107; }
@@ -360,7 +366,8 @@ public fn samvada_session_take_device(major, minor) {
 }
 
 # Tell logind we're done with the device. Pairs with TakeDevice
-# at teardown (and on PauseDevice if the consumer chooses to drop).
+# at teardown. (PauseDevice is not delivered — ADR-0004 — so no
+# consumer can call this in response to one.)
 #
 # The device leaves samvada's table WHATEVER logind answers (1.1.2): the
 # consumer has said it is done with it. Until then a release that failed
@@ -439,11 +446,12 @@ public fn samvada_release() {
     return 0;
 }
 
-# C-shim entry point. The libsystemd shim's `main()` calls into
-# this with the fn-table pointer. We init samvada and return —
-# the consumer drives all subsequent calls. Smoke build (no shim)
-# never reaches this; `src/main.cyr` keeps its own pure-Cyrius
-# entry for `cyrius build`.
+# C-shim entry point. The libsystemd shim's `samvada_shim_init()`
+# (deps/samvada_main.c) calls into this with the fn-table pointer;
+# the shim defines `main()` only under -DSAMVADA_STANDALONE_MAIN.
+# We init samvada and return — the consumer drives all subsequent
+# calls. Smoke build (no shim) never reaches this; `src/main.cyr`
+# keeps its own pure-Cyrius entry for `cyrius build`.
 public fn samvada_main(table) {
     var r = samvada_init(table);
     return r;

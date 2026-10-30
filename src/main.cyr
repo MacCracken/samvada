@@ -3,15 +3,18 @@
 #
 # This is the `cyrius build src/main.cyr` path — a no-shim,
 # no-libsystemd binary used to verify the bundle compiles cleanly
-# end-to-end. Real consumers DON'T go through this entry: they
-# link `deps/samvada_main.c` (which provides its own `main()`)
-# and that calls into `samvada_main(table)` defined in
-# src/samvada.cyr.
+# end-to-end. Real consumers DON'T go through this entry: they own
+# main(), and either call samvada_native_init() (no shim) or link
+# deps/samvada_main.c and call its samvada_shim_init(), which
+# calls samvada_main(table) defined in src/samvada.cyr. The shim
+# defines a main() of its own only under
+# -DSAMVADA_STANDALONE_MAIN.
 #
-# The lib bundle (`dist/samvada.cyr`) only includes
-# samvada_ffi.cyr + samvada.cyr; main.cyr is intentionally
-# excluded so consumer projects don't pick up our `main()` and
-# collide with the C shim's.
+# The lib bundle (`dist/samvada.cyr`) is cyrius.cyml
+# `[lib] modules`: visibility, samvada_ffi, the seven dbus_*
+# modules and samvada; main.cyr is intentionally excluded so
+# consumer projects don't pick up our `main()` and collide with
+# their own.
 
 include "src/lib.cyr"
 

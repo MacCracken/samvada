@@ -11,9 +11,11 @@
  *
  * Build (consumer-side; samvada itself doesn't link libsystemd):
  *   cc -c deps/samvada_main.c $(pkg-config --cflags libsystemd) -o samvada_main.o
- *   # ... compile your own Cyrius object, which defines main() ...
- *   cc samvada_main.o your_app.o $(pkg-config --libs libsystemd) -o your_app
- * Your main() calls samvada_shim_init() once during startup. For a
+ *   # ... your Cyrius code as an `object;` build (it defines no main()),
+ *   # and your own C main() in launch.o ...
+ *   cc samvada_main.o your_app.o launch.o $(pkg-config --libs libsystemd) -o your_app
+ * Your main() calls _cyrius_init(), alloc_init(), then samvada_shim_init()
+ * once during startup (docs/guides/consumer-link.md steps 2-5). For a
  * standalone probe binary instead, add -DSAMVADA_STANDALONE_MAIN and this
  * file supplies main() itself.
  *
@@ -60,8 +62,10 @@ extern long samvada_main(int64_t fn_table_ptr);
 /*
  * Negative return values are dbus / errno error codes (libsystemd
  * convention: -errno). 0 means success. Cyrius callers branch on
- * `< 0` for the err path and never inspect the magnitude beyond
- * logging it.
+ * `< 0` for the err path; the public layer also reads a few magnitudes
+ * (-110 timed out; -104 / -107 the bus gone; -22 from ReleaseControl,
+ * NotInControl) to decide what to send next, and consumers may branch
+ * on any errno, so every one is passed through unchanged.
  */
 
 /*
@@ -223,9 +227,12 @@ sb_take_device(int64_t bus_, int64_t sess_cstr, int64_t major, int64_t minor,
     sd_bus_error_free(&err);
     if (dup_fd < 0) {
         /* logind GRANTED the device and we cannot hand it out. Giving it
-         * back is the CALLER's job: from 1.1.2 the Cyrius public layer sends
-         * ReleaseDevice after a failed take for both backends, so the shim
-         * sending one here too released the device twice. dup_errno was
+         * back is the CALLER's job: from 1.1.2 the Cyrius public layer puts
+         * logind back in step after a failed take, for both backends --
+         * ReleaseControl when nothing else is held (logind releases every
+         * device with it), ReleaseDevice otherwise (unless the bus failed or
+         * timed out). An interim 1.1.2 fix that had the shim release it here
+         * too sent ReleaseDevice twice and was removed. dup_errno was
          * captured before the cleanup calls could touch errno; a failed
          * fcntl that left errno 0 still fails, as -EBADF. */
         return (dup_errno > 0) ? -dup_errno : -EBADF;
@@ -338,11 +345,12 @@ sb_close_bus(int64_t bus_)
  * Cyrius callers will typically register a thin shim that captures
  * (major, minor, kind) and queues the event for their own loop.
  *
- * NOTE: this single C wrapper installs *one* match (PauseDevice).
- * For ResumeDevice the Cyrius caller invokes us a second time with
- * a different callback; each call returns its own slot to unsubscribe
- * independently. Two slots > one C function juggling two callbacks
- * keeps the fncall arg count <=6.
+ * NOTE: the match names no member (NULL: any signal the session object
+ * emits on org.freedesktop.login1.Session), so one match receives
+ * PauseDevice and ResumeDevice alike and the callback filters by member.
+ * Each call returns its own slot to unsubscribe independently. No Cyrius
+ * code dispatches this slot yet (ADR-0004; consumer-link.md "What is NOT
+ * wired").
  *
  * Returns the sd_bus_slot* (cast to long, always positive) on
  * success, or a negative errno on failure.

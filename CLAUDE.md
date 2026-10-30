@@ -30,11 +30,12 @@
 Own the dbus IPC layer for AGNOS Cyrius applications. v0.x scope
 is the minimum-viable logind subset (`TakeDevice` /
 `ReleaseDevice` / `PauseDevice` / `ResumeDevice`) needed by
-mabda's Phase D surface present path; v1.0 retires the
-libsystemd C shim alongside mabda's wgpu-native retirement,
-replaced by a pure-Cyrius dbus marshaller or removed entirely
-if AGNOS standardizes on a different session-management
-primitive.
+mabda's Phase D surface present path. Since v1.0 a pure-Cyrius
+dbus marshaller is the default backend (ADR-0003); the libsystemd
+C shim remains only as a fallback until the roadmap retires it, and
+removing samvada's dbus layer (A.2, which ADR-0003 retains) stays
+the contingency if AGNOS standardizes on a different
+session-management primitive.
 
 ## Current State
 
@@ -42,7 +43,7 @@ primitive.
 > current version, source layout, test counts, in-flight slots,
 > consumers, dep gaps. Refreshed every release.
 >
-> Roadmap to v1.0 (milestones, gates, criteria):
+> Roadmap — what is left (the next release, its gate, open items):
 > [`docs/development/roadmap.md`](docs/development/roadmap.md).
 
 This file (`CLAUDE.md`) is durable rules.
@@ -63,7 +64,7 @@ cyrius test                                 # auto-discovers tests/*.tcyr
 cyrius distlib                              # regenerate dist/samvada.cyr
 cyrius lint src/*.cyr                       # static checks
 cyrius vet src/main.cyr                     # dep audit (file arg required)
-CYRIUS_DCE=1 cyrius build ...               # release build (CI default)
+CYRIUS_DCE=1 cyrius build ...               # release build (release.yml sets it; ci.yml's build does not)
 
 # Consumer build (with C shim + libsystemd) — see docs/guides/consumer-link.md
 # for the verified recipe. Three things that are NOT obvious:
@@ -80,10 +81,11 @@ cc -c deps/samvada_main.c \
    $(pkg-config --cflags libsystemd) \
    -o build/samvada_main.o
 { printf 'object;\n'; \
-  for m in syscalls string fmt alloc io vec str assert tagged fnptr; do \
+  for m in syscalls string fmt alloc io vec str assert tagged fnptr samvada; do \
       echo "include \"lib/$m.cyr\""; done; \
   cat src/app.cyr; } | cycc > build/app.o
-cc build/samvada_main.o build/app.o build/main.o \
+cc -c src/launch.c -o build/launch.o        # your main(), consumer-link.md step 4
+cc build/samvada_main.o build/app.o build/launch.o \
    $(pkg-config --libs libsystemd) \
    -o build/myapp
 ```
@@ -94,7 +96,7 @@ cc build/samvada_main.o build/app.o build/main.o \
 - Test after every change, not after the feature is "done"
 - ONE change at a time — never bundle unrelated changes
 - Research before implementation — check vidya field notes / sibling repos for existing patterns
-- Build with `cyrius build`, never raw `cat file | cc5` — the manifest auto-resolves deps and prepends includes. **One exception**: emitting a relocatable `.o` for the consumer link, which has no `cyrius build` equivalent (there is no `--emit-object` flag) and requires the `object;` directive piped through `cycc` (plus `objcopy -L` symbol localization on a cyrius pin below 6.6.2). That path is documented in `docs/guides/consumer-link.md` and nowhere else
+- Build with `cyrius build`, never raw `cat file | cycc` — the manifest auto-resolves deps and prepends includes. **One exception**: emitting a relocatable `.o` for the consumer link, which has no `cyrius build` equivalent (there is no `--emit-object` flag) and requires the `object;` directive piped through `cycc` (plus `objcopy -L` symbol localization on a cyrius pin below 6.6.2). That path is documented in `docs/guides/consumer-link.md` and nowhere else
 - Source files only need project includes — stdlib auto-resolves from `cyrius.cyml`
 - Every buffer declaration is a contract: `var buf[N]` = N **bytes**, not N entries
 - **Append-after-kind invariant** — `samvada_slot_kind` stays at offset 64 forever; new slots append after the existing tail so v0 callers reading a v(N+1) table never misread a fnptr as the kind word
@@ -121,7 +123,7 @@ cc build/samvada_main.o build/app.o build/main.o \
 - Do not hardcode toolchain versions in CI YAML — `cyrius = "X.Y.Z"` in `cyrius.cyml` is the source of truth
 - Do not reorder slots in `src/samvada_ffi.cyr` ahead of `samvada_slot_kind` — the C shim hard-codes offsets and the test pin freezes them
 - Do not expose FFI types in public function signatures — consumers must never see a fn-table pointer as a parameter (samvada handles it internally)
-- Do not link libsystemd from samvada itself — it lives at the consumer's edge so the v1.0 retirement is a clean swap
+- Do not link libsystemd from samvada itself — it lives at the consumer's edge so the shim's retirement is a clean swap
 
 ## Process
 
@@ -143,7 +145,7 @@ cc build/samvada_main.o build/app.o build/main.o \
 3. **Test + benchmark additions** for new code
 4. **Internal review** — performance, memory, correctness, edge cases
 5. **Security check** — any new C wrapper, any new external input path, any new fd path
-6. **Documentation** — update CHANGELOG, `docs/development/state.md`, any ADR the change earned
+6. **Documentation** — update CHANGELOG, `docs/development/state.md` (`python3 tools/state_sync.py` regenerates its derived facts), any ADR the change earned
 7. **Version sync** — `VERSION`, `cyrius.cyml`, CHANGELOG header
 8. **Return to step 1**
 
@@ -160,9 +162,9 @@ Per [first-party-standards § Security Hardening](https://github.com/MacCracken/
 7. **Known CVE review** — check libsystemd / dbus broker / logind CVEs against current versions
 8. **Document findings** — `docs/audit/YYYY-MM-DD-audit.md`
 
-The first audit pass is gated to v1.0 — see `SECURITY.md`
-"Audit History" for the rationale (C-shim era is pre-audit
-because the surface is intentionally transitional).
+Security audits have run since 0.5.1 (a hardening review at 0.2.2) — see `SECURITY.md`
+"Audit History", which supersedes the earlier rule that gated the
+first pass to v1.0.
 
 ### Closeout Pass (before every minor/major bump)
 
@@ -170,7 +172,7 @@ Run as the last patch of the current minor (e.g. `0.2.5` before
 `0.3.0`).
 
 1. **Full test suite** — `cyrius test` zero failures
-2. **Benchmark baseline** — `cyrius bench tests/samvada.bcyr` (4 CPU baselines wired in v0.2.1: ffi_alloc, ffi_get_slot, init_reject_null, release_idempotent). Append a row to [`docs/benchmarks.md`](docs/benchmarks.md) on each release; live-bus rows (handshake, signal pump) join when the live-bus harness lands at the v1.0 gate.
+2. **Benchmark baseline** — `cyrius bench tests/samvada.bcyr` (4 CPU baselines wired in v0.2.1: ffi_alloc, ffi_get_slot, init_reject_null, release_idempotent). Append a row to [`docs/benchmarks.md`](docs/benchmarks.md) on each release; the live-bus rows (handshake, signal pump) have been filled since 0.11.0 / 1.0.0 (the `TakeDevice` row waits on a seated session), and receive-path changes are measured with `tools/rxbench.cyr`.
 3. **Dead code audit** — remove unused fns; record remaining floor in CHANGELOG
 4. **Refactor pass** — consolidate the minor's additions where parallel paths accreted
 5. **Code review pass** — walk diffs end-to-end for missed guards, ABI leaks, off-by-ones, silently-ignored errors
@@ -196,24 +198,24 @@ Run as the last patch of the current minor (e.g. `0.2.5` before
 
 ## Cyrius Conventions
 
-- All struct fields are 8 bytes (`i64`), accessed via `load64` / `store64` with offset (Cyrius has no struct types — offset-table-on-heap is canonical)
+- All struct fields are 8 bytes (`i64`), accessed via `load64` / `store64` with offset (Cyrius has struct types now; samvada uses none — offset-table-on-heap is canonical here)
 - Heap allocation via `alloc()` for long-lived data (FFI tables, scratch buffers); `alloc_init()` must run before any `alloc()`
-- Enum-style constants via fns (`samvada_slot_*()` returning literals) — don't consume `gvar_toks` slots (4,096 initialized globals limit per compilation unit)
+- Enum-style constants via fns (`samvada_slot_*()` returning literals) — the bundle may hold no `enum`: its members would land in the consumer's scope, which `private` does not cover (`tools/surface_check.py` refuses one)
 - `var buf[N]` allocates N **bytes**, not entries — and inside fns it's STATIC data, not stack (consecutive calls share + clobber); use `alloc(N)` for per-call scratch
 - `var X;` (uninitialized) is rejected — always `var X = 0;`
-- Top-level `var X = expr` is evaluated in source order; forward refs silently resolve to 0 (gotcha; fix slotted for cyrius 5.7.32)
-- `var name[N]` requires N to be an integer literal; identifier-as-size is rejected at parse
-- No comparisons in fn args (`==`, `!=`, `<`, `>` all rejected) — hoist to a `var`
+- Top-level `var X = expr` is evaluated in source order; a forward ref to a var whose initializer is not a constant silently reads 0 (gotcha; `cyrius lint` warns on a forward ref since cyrius 5.7.32, and CI fails on the warning)
+- `var name[N]` requires N to be a constant — an integer literal, a `const`, an enum constant, `sizeof` or a const fn call; a `var` as the size is rejected
+- Comparisons in fn args (`==`, `!=`, `<`, `>`) are accepted — the old restriction was found stale in cyrius 5.8.46
 - `>>` is **logical**, not arithmetic — sign-extend manually for negative values
-- `^` (xor) binds tighter than binary `-` — parenthesise mixed expressions
-- No mixed `&&` / `||` in one expression — nest `if` blocks instead
+- `^` (xor) and binary `-` share one precedence level, grouped left to right (`8 - 3 ^ 1` is 4, `5 ^ 3 - 1` is 5) — parenthesise mixed expressions
+- Mixed `&&` / `||` in one expression compiles with C precedence (`&&` binds tighter)
 - `match` is reserved — don't use as a variable name
-- `return;` without value is invalid — always `return 0;`
-- All `var` declarations are function-scoped — no block scoping
+- A bare `return;` compiles in a plain fn (it returns 0) but is refused in a `: bool` fn and in one returning a two-register struct or a vector — write `return 0;`
+- `var` declarations are block-scoped: one declared inside an `if` / loop body is undefined after it, and an inner same-named `var` shadows the outer
 - `break` in while loops with `var` declarations is unreliable — use flag + `continue`
-- No negative literals — write `(0 - N)` not `-N`
-- Max limits per compilation unit: 4,096 variables, 1,024 functions, 4,096 initialized globals
-- Counting rule: only a top-level `var NAME = <non-literal>;` (call / identifier / expression initializer) consumes an initialized-globals slot; a bare integer-literal init (`var x = 42;`) takes the static-init fast path and enum members are const-folded, so neither counts. See the cyrius guide's **Global Initializers** section (`docs/guides/cyrius-guide.md` in the cyrius repo)
+- Negative literals compile (`var a = -5;`, `f(-3)`, and the sources' own `return -22;`); the older `(0 - N)` spelling is equivalent
+- Per-unit variable and function limits are what `cyrius capacity` reports for the pinned toolchain (far above samvada's use); initialized globals have had no separate cap since cyrius 6.6.9
+- Initializer rule: a top-level `var` whose initializer folds to a nonzero integer constant (`var x = 42;`, `var m = 1 << 4;`) is baked into the image; every other one (a call or other non-constant expression, `= 0`, a string literal) is a deferred initializer, run once at startup in declaration order, with no cap on how many. See the cyrius guide's **Global Initializers** section (`docs/guides/cyrius-guide.md` in the cyrius repo)
 - Continuation lines inside a call get **2 spaces per open paren** (4 is also accepted) — `cyrfmt` enforces this from the 6.6.x line on, and a continuation wrapped at the statement indent is drift
 - `println(s)` is single-arg + newline; `print(s, len)` is two-arg explicit-length — there is **no** `print(s)` single-arg form
 - `print_num(n)` (string.cyr) and `fmt_int(n)` (fmt.cyr) print integers — interchangeable
@@ -226,11 +228,11 @@ Run as the last patch of the current minor (e.g. `0.2.5` before
 - **Version-verify gate**: release asserts `VERSION == git tag` (with optional `v` prefix stripped) before building. Mismatch fails the run.
 - **CI gate**: release runs `ci.yml` via `workflow_call` first; release work only proceeds if all CI jobs pass.
 - **Workflow layout**:
-  - `.github/workflows/ci.yml` — toolchain install (`curl -sfLO` fail-fast), `cyrius deps` (with `rm -rf lib && mkdir lib`), lint (warnings → failures), `fmt --check` (drift → failure), `vet`, `distlib` freshness, build, ELF magic verify, smoke run, `cyrius test`, separate jobs for C-shim compile-check (`-Wall -Wextra -Werror` + link-test against `-lsystemd`), security scan (raw execve / fork / sys_system / writes-to-{etc,bin,sbin} / large stack buffers), docs check (required files + version-in-CHANGELOG)
-  - `.github/workflows/release.yml` — version gate → CI gate → build → `distlib` regen → artifact bundle (src tarball + `dist/samvada.cyr` + smoke binary + C shim source + `SHA256SUMS`) → CHANGELOG-extracted release body
+  - `.github/workflows/ci.yml` — four jobs. **Build & Test**: toolchain install (installer script and toolchain tarball each checked against a SHA-256 pinned in the workflow), `cyrius deps` (with `rm -rf lib && mkdir lib`), lint (warnings → failures), `fmt --check` (drift → failure), `vet`, `distlib` freshness, the public-surface gate (`tools/surface_check.py`), the boundary gate (`tools/boundary_check.py`), the bundle's empty `nm -u`, build, ELF magic verify, smoke run (version triple == `VERSION`), `cyrius test` (plus the errno-map row count), the state-snapshot check (`tools/state_sync.py`: self-test, `--check` as a warning, then a planted stale row that must be reported), bench and the live-bench skip-path smoke. **C Shim Compile-Check**: strict-flag compile in library and standalone modes with the `tools/shim_symbols.txt` symbol gate and the no-syscall-instruction gate, the consumer-owned-`main()` link test against `-lsystemd`, `tools/shim_slot_check.c` and its mutants, the golden-corpus decode, the sd-bus errno map, the C-vs-Cyrius slot-offset cross-check. **Security Scan**: `tools/security_scan.py --self-test` then the scan (allow-listed syscalls, spawners, system paths, ≥64 KB static buffers, the frozen stdlib list) and the no-aarch64-region grep. **Documentation**: required files + version-in-CHANGELOG
+  - `.github/workflows/release.yml` — CI gate (`ci.yml` via `workflow_call`) → version gate → `CYRIUS_DCE=1` build → `cyrius test` → `distlib` regen, refused unless byte-identical to the tag's `dist/` → `tools/state_sync.py --check`, refused if `state.md` is stale → artifact bundle (src tarball + `samvada-<tag>.cyr` + `samvada-<tag>.deps` + smoke binary + C shim source + `SHA256SUMS`) → CHANGELOG-extracted release body
 - **Concurrency**: CI uses `cancel-in-progress: true` keyed on workflow + ref — only the latest push is tested.
 - **Prerelease gate**: 0.x tags ship as GitHub prereleases (surface gates aren't met yet — no live-bus e2e through a consumer).
-- **State sync**: release post-hook bumps `docs/development/state.md`. If the hook doesn't, fix the hook — don't hand-maintain state.
+- **State sync**: `tools/state_sync.py` is the hook. It regenerates the facts in `docs/development/state.md` that can be read off the tree (version, release date, pins, runners, actions, fn and slot counts, stdlib leaves, every suite's asserts) into `<!-- state-sync:begin/end NAME -->` blocks — never hand-edit inside one, except a suite's Covers cell in the tests table, which is hand-written, kept, and never carries a count. The prose around them is written by hand and acknowledged per release with `<!-- state-sync:narrative X.Y.Z -->`, which only a person sets. ci.yml warns on a stale snapshot; release.yml refuses one. It runs before the tag, not after: `release.yml` writes nothing back to the repo, and a commit after the tag would leave the tag's own state.md stale. If the tool can't derive a fact you need, teach it — don't hand-type a number it generates, here or in README / CONTRIBUTING
 
 ## Documentation
 
@@ -238,11 +240,11 @@ Per [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob
 
 - [`docs/adr/`](docs/adr/) — Architecture Decision Records (*why X over Y?*) — created when earned
 - [`docs/architecture/`](docs/architecture/) — non-obvious constraints (*what's true about the code?*) — `dbus-marshalling.md` documents the wire-format slice samvada touches
-- [`docs/guides/`](docs/guides/) — task-oriented how-tos — `consumer-link.md` for the two-stage build
-- [`docs/examples/`](docs/examples/) — runnable examples
+- [`docs/guides/`](docs/guides/) — task-oriented how-tos — `consumer-link.md` for consumer integration (the native one-dependency path, and the retiring C-shim two-stage build)
+- [`docs/examples/`](docs/examples/) — runnable examples (empty: holds only `.gitkeep`; the executed recipes live in `docs/guides/consumer-link.md`)
 - [`docs/development/state.md`](docs/development/state.md) — live state snapshot, refreshed every release
-- [`docs/development/roadmap.md`](docs/development/roadmap.md) — milestones through v1.0
-- [`docs/audit/`](docs/audit/) — security audit reports (`YYYY-MM-DD-audit.md`) — populated when the v1.0 audit pass runs
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) — what is left past the current release (forward-facing; shipped milestones are a one-line index)
+- [`docs/audit/`](docs/audit/) — security audit and hardening-review reports (`YYYY-MM-DD-*.md`), indexed in `SECURITY.md` "Audit History"
 
 New quirks land in `docs/architecture/` as numbered items
 (`NNN-kebab-case.md`). New decisions land in `docs/adr/` using
@@ -261,11 +263,11 @@ docs/ (minimum):
   guides/          - task-oriented how-tos
   examples/        - runnable examples
   development/
-    roadmap.md     - milestones through v1.0
-    state.md       - live state snapshot (volatile; release-hook-bumped)
+    roadmap.md     - what is left (forward-facing)
+    state.md       - live state snapshot (derived facts generated by tools/state_sync.py)
 
 docs/ (when earned):
-  audit/           - security audit reports (YYYY-MM-DD-audit.md)
+  audit/           - security audit and hardening-review reports (YYYY-MM-DD-*.md)
   benchmarks.md    - perf history (v1.0 gate)
   proposals/       - pre-ADR design drafts
   sources.md       - protocol / spec citations

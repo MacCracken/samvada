@@ -10,8 +10,8 @@ byte in both directions. Point any dbus client at it:
 Why a relay and not an sd_bus hook: this needs no C, no libsystemd, no
 linking, and no privileges. It works against *any* client, including the
 samvada C shim, which is the point — the corpus has to be captured while
-the shim still exists, because the reference implementation disappears at
-the v1.0 cutover (roadmap N7).
+the shim still exists, because the reference implementation disappears when
+the shim is deleted at 1.2.0 (deferred from the v1.0 cutover, roadmap N7).
 
 Each direction is written to its own `.bin` (raw, appendable) plus a `.txt`
 hexdump. Chunk boundaries are recorded because they are load-bearing: the

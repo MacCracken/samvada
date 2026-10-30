@@ -1,17 +1,16 @@
 # samvada — Benchmarks
 
 > Perf history for samvada's CPU bench harness
-> (`tests/samvada.bcyr`). One row per release.
+> (`tests/samvada.bcyr`). One column per release.
 >
-> This is a **seed** doc — the v1.0 gate criterion in
-> [`docs/development/roadmap.md`](development/roadmap.md) calls
-> for *handshake latency* and *signal pump throughput*. The
-> live-bus bench **harness scaffold** now exists
-> (`tests/samvada_live.bcyr`, added 0.4.0) but is HW-gated: it
-> SKIPs on any build without a libsystemd-backed table + a
-> running dbus/logind. The numbers themselves still need a
-> consumer C-shim build on real hardware. When those land, the
-> rows append below the current four.
+> The live-bus rows the v1.0 gate called for are in § Live-bus
+> rows: handshake latency and the idle signal-pump drain cost,
+> measured at 0.11.0 / 1.0.0. Still unmeasured: the `TakeDevice`
+> round-trip, which needs a seated session (the roadmap's CG
+> lane), and signal-pump throughput under a flood (no flood
+> generator exists). The HW-gated harness scaffold,
+> `tests/samvada_live.bcyr` (added 0.4.0), SKIPs on any build
+> without a libsystemd-backed table + a running dbus/logind.
 
 ## What's measured today
 
@@ -19,15 +18,16 @@ Four CPU-only paths exercised via `cyrius bench`:
 
 | Bench | What it pins | Why it matters |
 |---|---|---|
-| `ffi_alloc` | `samvada_ffi_alloc` — `alloc(72)` + 9 zero-fill `store64`s | Hot at consumer init; once-per-process but on the cold path |
+| `ffi_alloc` | `samvada_ffi_alloc` — `alloc(88)` + 11 zero-fill `store64`s | Hot at consumer init; once-per-process but on the cold path |
 | `ffi_get_slot` | `samvada_ffi_get_slot(table, off)` — null-guard + `load64` | Hot path — every public API call dispatches through it before `fncallN` |
 | `init_reject_null` | `samvada_init(0)` — `-EINVAL` early return | Misconfigured-FFI guard; pinned so a regression in early-exit ordering (e.g. doing alloc before validating table) shows up as an order-of-magnitude drift |
 | `release_idempotent` | `samvada_release()` on uninit'd state | Cheapest public fn; consumers hit it on every clean shutdown |
 
 These are **structural baselines**, not throughput numbers.
-None of them touch a real dbus socket; the live-bus paths
-(handshake, `TakeDevice`, signal pump) are HW-gated and are the
-v1.0 gate work.
+None of them touch a real dbus socket. The live-bus handshake and
+idle pump were measured at 0.11.0 / 1.0.0 (§ Live-bus rows); the
+`TakeDevice` round-trip needs a seated session and is still
+unmeasured.
 
 ## Method
 
@@ -40,8 +40,10 @@ total iterations with 1000 inner iterations per outer pass to
 amortize `clock_gettime` overhead. Numbers are wall-clock per
 iteration.
 
-The harness is in `lib/bench.cyr` (vendored from cyrius
-stdlib); see `tests/samvada.bcyr` for the four call sites.
+The harness is the cyrius stdlib's `bench` module
+(`include "lib/bench.cyr"`), resolved from the toolchain: `bench`
+is not in `[deps].stdlib`, so `cyrius deps` does not vendor it into
+`lib/`; see `tests/samvada.bcyr` for the four call sites.
 
 ## Variance & reproducibility
 
@@ -54,8 +56,8 @@ stdlib); see `tests/samvada.bcyr` for the four call sites.
   governor's parked the cores. Anything ±20% across runs on
   the same box is noise.
 - **Append-only.** Each release adds one column. Older columns
-  stay frozen — this file is the audit trail across the v0.x
-  line.
+  stay frozen — this file is the audit trail across releases
+  since 0.2.1.
 
 ## Run history
 
@@ -120,9 +122,10 @@ Notes:
   `release_idempotent` were identical to the nanosecond on all
   three; `ffi_alloc` read 28 / 28 / 29 ns, and the table records
   28.
-  The three −1 ns rows (`ffi_get_slot`, `init_reject_null`,
-  `release_idempotent`) sit at or inside this host's documented
-  jitter floor and should be read as *flat*, not as wins.
+  The three small negative rows (`ffi_get_slot` −2 ns,
+  `init_reject_null` and `release_idempotent` −1 ns) sit at or
+  inside this host's documented jitter floor and should be read as
+  *flat*, not as wins.
   `ffi_alloc` at **−55.6% (63 → 28 ns)** is outside it by a
   wide margin and is the one real result: it is the only benched
   path that does work beyond a load-and-branch (an `alloc(72)`
@@ -308,7 +311,9 @@ the roadmap's CG lane.
 
 ## When this doc graduates
 
-The v1.0 gate fills three items below:
+The v1.0 gate named three items. The handshake (1) and the pump's
+drain-call cost are measured (§ Live-bus rows, 0.11.0 / 1.0.0); the
+`TakeDevice` round-trip (2) and a true throughput figure (3) are not:
 
 1. **Live-bus handshake latency** — first `samvada_init`
    round-trip against a real `dbus-broker` /
@@ -322,16 +327,20 @@ The v1.0 gate fills three items below:
 The harness for all three is wired in `tests/samvada_live.bcyr`
 (0.4.0). It is HW-gated by design: `samvada_live_bench_run`
 checks the FFI table's `kind` and probes the bus, then SKIPs
-(exit 0) on any build that can't reach a real backend — so CI
-runs it as a compile + skip-path smoke. To capture real
-numbers, build the file's logic with the libsystemd C shim
-(`deps/samvada_main.c`) and have the shim entry call
-`samvada_live_bench_run(table)` with the live, `kind=LIBSYSTEMD`
-table, from a desktop session that holds the device. The
-signal-pump row additionally needs a synthetic `PauseDevice` /
-`ResumeDevice` flood generator for a true throughput figure;
-the scaffold measures the drain-call cost in the meantime.
+(exit 0) on anything but a `kind=LIBSYSTEMD` table with a reachable
+bus, native tables included — so CI runs it as a compile +
+skip-path smoke. To capture real numbers, build the file's logic
+with the libsystemd C shim (`deps/samvada_main.c`) and have the
+shim entry call `samvada_live_bench_run(table)` with the live,
+`kind=LIBSYSTEMD` table — but not from a seated session until the
+file is reworked: its take-device bench takes and drops session
+control on each of its 200 iterations (`TakeControl` mutes a seated
+VT), and the file's own WARNING says not to. The signal-pump row
+additionally needs a synthetic `PauseDevice` / `ResumeDevice` flood
+generator for a true throughput figure; the scaffold measures the
+drain-call cost in the meantime.
 
-When those runs land, this doc gets a new section with the run
-shape and the numbers. The CPU-baseline columns stay in their
-current place — they are the lower bound, not the headline.
+The runs that have landed are in § Live-bus rows, with their run
+shape; the two still open join that section. The CPU-baseline
+columns stay in their current place — they are the lower bound,
+not the headline.

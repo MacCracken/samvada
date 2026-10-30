@@ -141,13 +141,14 @@ jobs:
         # it reads dist/samvada.cyr, so it is only meaningful once that
         # bundle is known to match src/.
         #
-        # CLAUDE.md states two invariants that were, until 1.0.1,
-        # enforced by REVIEW ONLY — "public API frozen" and "do not
-        # expose FFI types in public function signatures". The A-6
-        # audit showed both were unenforced: a public fn returning the
-        # raw FFI fn-table, and another accepting one, passed lint,
-        # fmt, vet, distlib, build, smoke, the slot cross-check and
-        # every test assert. Review is what AUDIT-4 survived.
+        # Two invariants — "public API frozen" (a v1.0 criterion of the
+        # pre-1.0 roadmap) and CLAUDE.md's "do not expose FFI types in
+        # public function signatures" — were, until 1.0.1, enforced by
+        # REVIEW ONLY. The A-6 audit showed both were unenforced: a
+        # public fn returning the raw FFI fn-table, and another
+        # accepting one, passed lint, fmt, vet, distlib, build, smoke,
+        # the slot cross-check and every test assert. Review is what
+        # AUDIT-4 survived.
         #
         # Mutation-verified before wiring: a new export, a re-signed
         # export, a removed export, and a "clean" fn that gains a
@@ -380,12 +381,46 @@ jobs:
           fi
           echo "  ok  $want"
 
+      - name: Check the state snapshot (warns when stale)
+        # docs/development/state.md's derived facts (version, pins, runners,
+        # actions, fn and slot counts, every suite's asserts) are generated
+        # into marked blocks by tools/state_sync.py, which re-runs each suite
+        # to count it. The snapshot is refreshed per release, not per push,
+        # so a stale one (exit 1) is a WARNING here; release.yml refuses to
+        # release it. An error (exit 2: a suite failing, a fact unreadable, a
+        # block malformed) fails this step. The self-test runs first, and
+        # after the real check a planted stale row must be reported, or the
+        # check proves nothing. The plant is a row for a suite that does not
+        # exist, which any regeneration drops, so it is stale whatever the
+        # committed snapshot says.
+        run: |
+          set -uo pipefail
+          python3 tools/state_sync.py --self-test
+          rc=0; python3 tools/state_sync.py --check || rc=$?
+          if [ "$rc" -eq 1 ]; then
+            echo "::warning file=docs/development/state.md::state.md is stale; this step's STALE lines say what to do (release.yml refuses a stale snapshot)"
+          elif [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
+          mkdir -p build
+          cp docs/development/state.md build/state.md.orig
+          sed -i '/^<!-- state-sync:end tests -->$/i | `tests/zz_planted.tcyr` | 1 | planted |' docs/development/state.md
+          rc=0; python3 tools/state_sync.py --check > build/state_plant.log 2>&1 || rc=$?
+          cp build/state.md.orig docs/development/state.md
+          if [ "$rc" -ne 1 ] || ! grep -qF -- '-| `tests/zz_planted.tcyr` | 1 | planted |' build/state_plant.log; then
+            echo "FAIL: a planted stale row in state.md was not reported (rc $rc)"
+            cat build/state_plant.log
+            exit 1
+          fi
+          echo "  ok  a planted stale row is reported"
+
       - name: Bench
         # Smoke-runs the bench harness — catches regressions in
         # bench wiring or in the API surface the benches touch.
         # The numbers are noisy on shared CI runners; we don't
         # gate on them. Real perf history lives in
-        # docs/benchmarks.md (v1.0 gate, not yet earned).
+        # docs/benchmarks.md (its v1.0-gate live-bus rows were filled at
+        # 0.11.0 / 1.0.0; the TakeDevice row waits on a seat).
         run: cyrius bench tests/samvada.bcyr
 
       - name: Bench (live-bus scaffold, skip-path smoke)
@@ -698,10 +733,11 @@ jobs:
       - name: Verify the dbus golden corpus decodes
         # 0.7.1 (roadmap N2). These bytes are the reference the native
         # marshaller is built against, and they were captured while the
-        # libsystemd C shim still exists — the shim is deleted at the v1.0
-        # cutover and the reference goes with it. Gate them so a corrupted
-        # or truncated fixture fails here rather than silently becoming
-        # "what the protocol looks like".
+        # libsystemd C shim still exists — the shim is deleted at 1.2.0
+        # (deferred from the v1.0 cutover; roadmap "Next: v1.2.0") and the
+        # reference goes with it. Gate them so a corrupted or truncated
+        # fixture fails here rather than silently becoming "what the
+        # protocol looks like".
         #
         # 1.1.2 (final pass): the label is tied to the name — a row is
         # **SYNTHETIC** exactly when its file name says SYNTHETIC. Before, any

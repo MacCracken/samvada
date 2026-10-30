@@ -2,6 +2,10 @@
 
 **Status**: Accepted
 **Date**: 2026-04-30
+**Decided by**: [ADR-0003](0003-native-cyrius-dbus.md) (2026-09-09) —
+the deferred A.1 / A.2 choice: A.1. The C shim was not retired at v1.0
+as planned here; its deletion is on the
+[roadmap](../development/roadmap.md).
 
 ## Context
 
@@ -109,7 +113,8 @@ slot table is forward-compatible (see ADR-0002).
   same-day after recognizing the wgpu-native parallel made the
   C shim the obviously-better stop-gap. Recorded in
   `docs/development/roadmap.md` § Notes / decisions
-  (2026-04-30 entry).
+  (2026-04-30 entry) — a section the roadmap dropped at 1.1.2;
+  `git show 1.1.1:docs/development/roadmap.md` still has it.
 - **Vendoring libdbus instead of libsystemd** — rejected.
   libdbus is the older client library; modern AGNOS-target
   distros (systemd-based) ship `sd_bus` as the canonical
@@ -129,7 +134,9 @@ slot table is forward-compatible (see ADR-0002).
 ## References
 
 - [`docs/development/roadmap.md`](../development/roadmap.md) §M3
-  — pivot path detail.
+  — pivot path detail. (M3 left the roadmap on 2026-09-09, when the
+  pivot became the N lane under ADR-0003; the last revision with it is
+  `git show 26da7d2:docs/development/roadmap.md`.)
 - [`docs/architecture/dbus-marshalling.md`](../architecture/dbus-marshalling.md)
   — wire-format slice the v1.0 pure-Cyrius marshaller would
   re-implement.

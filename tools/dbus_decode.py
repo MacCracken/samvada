@@ -11,7 +11,8 @@ errors. Where the two disagree, the captured bytes win.
 Its second job is to make the one synthetic fixture trustworthy. A
 hand-assembled `TakeDevice` reply cannot be captured (no seated session),
 so it is judged by a decoder that has first been shown to decode all
-fourteen REAL messages correctly.
+thirteen REAL dbus messages (twelve REAL fixtures; the other two REAL
+fixtures are SASL text) correctly.
 
 SPDX-License-Identifier: GPL-3.0-only
 """

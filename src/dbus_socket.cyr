@@ -147,11 +147,14 @@ fn dbus_socket_set_send_timeout(fd, secs, usecs) {
       dbus_socket_so_sndtimeo(), tv, 16);
 }
 
-# The receive timeout is armed HERE, at connect, not at first call —
-# so it covers the SASL handshake too. Before this, a peer that
-# accepted the connection and then said nothing hung samvada
-# forever: the socket is blocking, nothing else called setsockopt,
-# and the reply loop's "64 spins" is a MESSAGE budget, not a clock.
+# The receive timeout is armed HERE, at connect, so it covers the SASL
+# handshake too. Since 1.1.2 it is the backstop, not the bound: the
+# handshake and every call end at a monotonic deadline
+# (dbus_session_sasl, dbus_session_call), and SO_RCVTIMEO matters only
+# when the clock has failed. Before it existed, a peer that accepted
+# the connection and then said nothing hung samvada forever: the socket
+# is blocking, nothing else called setsockopt, and the reply loop's
+# "64 spins" (removed in 1.1.2) was a MESSAGE budget, not a clock.
 # Inside a compositor that is an indefinite freeze.
 #
 # 25 seconds matches DBUS_DEFAULT_TIMEOUT and sd-bus's

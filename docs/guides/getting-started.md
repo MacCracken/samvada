@@ -10,14 +10,15 @@
 ```sh
 cyrius deps                                 # resolve stdlib
 cyrius build src/main.cyr build/samvada     # smoke build
-cyrius test                                 # [build].test + tests/*.tcyr (586 asserts)
+cyrius test                                 # [build].test + tests/*.tcyr (1152 asserts)
 ```
 
 ## Layout
 
 - `src/main.cyr` — standalone smoke entry. Top-level
   `var r = main(); syscall(SYS_EXIT, r);`.
-- `src/samvada.cyr` — the eight-fn public surface.
+- `src/samvada.cyr` — seven of the eight public fns
+  (`samvada_native_init` is in `src/dbus_session.cyr`).
 - `src/samvada_ffi.cyr` — fn-table layout (11 slots, 88 bytes).
 - `src/dbus_*.cyr` — the native dbus implementation. See
   [`state.md`](../development/state.md) for what each module owns.

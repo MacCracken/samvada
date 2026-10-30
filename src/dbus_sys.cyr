@@ -1,8 +1,9 @@
 # @internal — native-dbus low-level syscall + SCM_RIGHTS layer
 # dbus_sys.cyr — the first module of the native Cyrius dbus backend
-# (N1, ADR-0003). It does exactly one thing the C shim currently
-# does for us: receive a file descriptor over a unix socket via
-# `SCM_RIGHTS` ancillary data.
+# (N1, ADR-0003). It does exactly one thing: receive bytes from a unix
+# socket together with every file descriptor riding on them as
+# `SCM_RIGHTS` ancillary data — the job libsystemd does for the C
+# shim. Every native receive goes through dbus_sys_recv.
 #
 # Why this is first: proposal 0001 rates fd passing the only
 # Low-confidence module of the pivot, and the fallback is cheap
@@ -16,7 +17,8 @@
 #   cyrius-doom/src/platform/wayland/client.cyr:206-228 (send side)
 # Every layout constant below was then re-confirmed against glibc
 # headers on x86_64 (offsetof/sizeof/CMSG_*), and is pinned by
-# tests/samvada.tcyr so a silent ABI drift fails at CPU-test time.
+# tests/dbus_sys.tcyr (test_dbus_sys_layout) so a silent ABI drift
+# fails at CPU-test time.
 #
 # NOT REENTRANT, by construction. `var buf[N]` inside a fn is
 # STATIC data in Cyrius, not stack — consecutive calls share and
@@ -166,6 +168,7 @@ fn _dbus_rx_add(fd) {
 #
 #   returns  >= 0  descriptors collected (dbus_sys_rx_fd(0..n-1))
 #            -22   null buffer
+#            -12   the receive scratch could not be allocated
 fn dbus_sys_parse_rights(ctrl, ctrllen) {
     var rc = _dbus_sys_init();
     if (rc < 0) { return rc; }
@@ -221,7 +224,9 @@ fn dbus_sys_parse_rights(ctrl, ctrllen) {
 #
 #   returns  >= 0  bytes received; the descriptors are dbus_sys_rx_fd(0
 #                  .. dbus_sys_rx_count() - 1), and the caller owns them
-#            <  0  negative errno from recvmsg (no descriptors)
+#            -22   null buffer, or buflen <= 0
+#            -12   the receive scratch could not be allocated
+#            other < 0  negative errno from recvmsg (no descriptors)
 #
 # MSG_CTRUNC no longer discards the bytes (1.1.2). The bytes are real
 # and already consumed from the socket: dropping them desynchronised the

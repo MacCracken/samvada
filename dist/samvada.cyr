@@ -27,7 +27,8 @@ include "lib/fnptr.cyr"
 # so to a consumer this marker covers the whole bundle, and the
 # `public fn` marks on the eight frozen fns (src/samvada.cyr,
 # src/dbus_session.cyr) are the only way in. It leads the bundle, which
-# is valid on every toolchain a consumer may pin (the floor is 6.6.5).
+# is valid on every toolchain a consumer may pin (the floor is 6.6.13
+# since 1.1.2; it was 6.6.5).
 # Measured on 6.6.5, 6.7.5 and 6.7.18: a marker after top-level
 # DECLARATIONS is fine, but after a top-level statement 6.6.5 and 6.7.5
 # refuse it ("unexpected private") and 6.7.18 refuses every later
@@ -109,15 +110,19 @@ fn samvada_slot_take_control()           { return 72; }
 fn samvada_slot_release_control()        { return 80; }
 fn samvada_ffi_size()                    { return 88; }
 
-# Backend kinds. NULL = mock / unbound table (CPU tests). LIBSYSTEMD
-# is the v0.x C-shim. PURE_CYRIUS is the v1.0 retirement target.
+# Backend kinds. NULL = an unbound table (a fresh samvada_ffi_alloc);
+# samvada_init rejects it. LIBSYSTEMD is the C shim (deps/samvada_main.c,
+# the fallback until the roadmap deletes it), and the kind the CPU-test mock
+# table sets. PURE_CYRIUS is the native backend (dbus_native_populate,
+# reached via samvada_native_init).
 fn samvada_backend_kind_null()         { return 0; }
 fn samvada_backend_kind_libsystemd()   { return 1; }
 fn samvada_backend_kind_pure_cyrius()  { return 2; }
 
-# Allocate a zero-filled fn-table on the heap. Used by Cyrius-side
-# consumers (e.g. mock backends in tests). The C shim builds its
-# table on the C stack and never calls this.
+# Allocate a zero-filled fn-table on the heap. Used by
+# samvada_native_init (once) and the tests; a consumer cannot name
+# it since 1.1.1 (the bundle is private-by-default). The C shim keeps its
+# table in file-scope static storage and never calls this.
 fn samvada_ffi_alloc() {
     var t = alloc(samvada_ffi_size());
     if (t == 0) { return 0; }
@@ -137,8 +142,8 @@ fn samvada_ffi_get_slot(t, off) {
     return load64(t + off);
 }
 
-# Install a fnptr at `off`. Used by mock backends + C shim's Cyrius-
-# side bindings (when the table is built by Cyrius rather than C).
+# Install a fnptr at `off`. Used by dbus_native_populate (the native
+# backend's table) and the tests.
 fn samvada_ffi_set_slot(t, off, fp) {
     if (t == 0) { return 0; }
     store64(t + off, fp);
@@ -154,9 +159,10 @@ fn samvada_ffi_kind(t) {
 
 # @internal — native-dbus low-level syscall + SCM_RIGHTS layer
 # dbus_sys.cyr — the first module of the native Cyrius dbus backend
-# (N1, ADR-0003). It does exactly one thing the C shim currently
-# does for us: receive a file descriptor over a unix socket via
-# `SCM_RIGHTS` ancillary data.
+# (N1, ADR-0003). It does exactly one thing: receive bytes from a unix
+# socket together with every file descriptor riding on them as
+# `SCM_RIGHTS` ancillary data — the job libsystemd does for the C
+# shim. Every native receive goes through dbus_sys_recv.
 #
 # Why this is first: proposal 0001 rates fd passing the only
 # Low-confidence module of the pivot, and the fallback is cheap
@@ -170,7 +176,8 @@ fn samvada_ffi_kind(t) {
 #   cyrius-doom/src/platform/wayland/client.cyr:206-228 (send side)
 # Every layout constant below was then re-confirmed against glibc
 # headers on x86_64 (offsetof/sizeof/CMSG_*), and is pinned by
-# tests/samvada.tcyr so a silent ABI drift fails at CPU-test time.
+# tests/dbus_sys.tcyr (test_dbus_sys_layout) so a silent ABI drift
+# fails at CPU-test time.
 #
 # NOT REENTRANT, by construction. `var buf[N]` inside a fn is
 # STATIC data in Cyrius, not stack — consecutive calls share and
@@ -320,6 +327,7 @@ fn _dbus_rx_add(fd) {
 #
 #   returns  >= 0  descriptors collected (dbus_sys_rx_fd(0..n-1))
 #            -22   null buffer
+#            -12   the receive scratch could not be allocated
 fn dbus_sys_parse_rights(ctrl, ctrllen) {
     var rc = _dbus_sys_init();
     if (rc < 0) { return rc; }
@@ -375,7 +383,9 @@ fn dbus_sys_parse_rights(ctrl, ctrllen) {
 #
 #   returns  >= 0  bytes received; the descriptors are dbus_sys_rx_fd(0
 #                  .. dbus_sys_rx_count() - 1), and the caller owns them
-#            <  0  negative errno from recvmsg (no descriptors)
+#            -22   null buffer, or buflen <= 0
+#            -12   the receive scratch could not be allocated
+#            other < 0  negative errno from recvmsg (no descriptors)
 #
 # MSG_CTRUNC no longer discards the bytes (1.1.2). The bytes are real
 # and already consumed from the socket: dropping them desynchronised the
@@ -435,10 +445,12 @@ fn dbus_sys_recv(fd, buf, buflen, flags) {
 # exchange is `NameAcquired`. Conversely a stream socket may split
 # anywhere, so a partial tail must survive into the next read.
 #
-# This module owns THE receive buffer. dbus_auth.cyr borrows it
-# through tail/space/commit rather than keeping its own: alloc()
-# never frees, and a separate auth buffer would either copy or lose
-# the residual left when the server pipelines its SASL reply.
+# This module owns THE receive buffer. The SASL exchange borrows it
+# rather than keeping its own — dbus_session_sasl fills it through
+# tail/space/commit, and dbus_auth.cyr reads it through
+# base/have/consume: alloc() never frees, and a separate auth buffer
+# would either copy or lose the residual left when the server
+# pipelines its SASL reply.
 #
 # NOT REENTRANT. State is file-scope, matching dbus_sys.cyr and for
 # the same reason: `var buf[N]` inside a fn is STATIC in Cyrius, so
@@ -462,7 +474,7 @@ fn dbus_frame_off_flds()  { return 12; }
 fn dbus_frame_endian_le() { return 108; }
 fn dbus_frame_endian_be() { return 66; }
 
-# The buffer. 8192 is 34x the largest delivery the corpus contains
+# The buffer. 8192 is 29x the largest delivery the corpus contains
 # (282 bytes) and a page multiple. It is NOT a protocol limit — the
 # spec allows 128 MiB — so an over-cap message is DRAINED, not
 # treated as fatal (see dbus_frame_next). D-Bus can do that because
@@ -520,10 +532,11 @@ fn dbus_frame_fdq_cap() { return 8; }
 # ---- status codes ----
 # Deliberately OUTSIDE the errno band. samvada's convention is that
 # negatives are sd-bus errnos, and dbus_sys.cyr already spends -22
-# and -71. If a protocol fault shared that range, "the bus sent a
-# malformed header" would be indistinguishable from "recvmsg
-# failed", which is exactly the ambiguity the 0.5.1 audit found
-# around -22.
+# and -12, and passes recvmsg's own errnos through (its -71 for a
+# truncated receive went in 1.1.2). If a protocol fault shared that
+# range, "the bus sent a malformed header" would be
+# indistinguishable from "recvmsg failed", which is exactly the
+# ambiguity the 0.5.1 audit found around -22.
 fn dbus_frame_need_more() { return -1000; }
 fn dbus_frame_eof()       { return -1001; }   # orderly close, nothing pending
 fn dbus_frame_truncated() { return -1002; }   # EOF mid-message
@@ -1029,11 +1042,14 @@ fn dbus_socket_set_send_timeout(fd, secs, usecs) {
       dbus_socket_so_sndtimeo(), tv, 16);
 }
 
-# The receive timeout is armed HERE, at connect, not at first call —
-# so it covers the SASL handshake too. Before this, a peer that
-# accepted the connection and then said nothing hung samvada
-# forever: the socket is blocking, nothing else called setsockopt,
-# and the reply loop's "64 spins" is a MESSAGE budget, not a clock.
+# The receive timeout is armed HERE, at connect, so it covers the SASL
+# handshake too. Since 1.1.2 it is the backstop, not the bound: the
+# handshake and every call end at a monotonic deadline
+# (dbus_session_sasl, dbus_session_call), and SO_RCVTIMEO matters only
+# when the clock has failed. Before it existed, a peer that accepted
+# the connection and then said nothing hung samvada forever: the socket
+# is blocking, nothing else called setsockopt, and the reply loop's
+# "64 spins" (removed in 1.1.2) was a MESSAGE budget, not a clock.
 # Inside a compositor that is an indefinite freeze.
 #
 # 25 seconds matches DBUS_DEFAULT_TIMEOUT and sd-bus's
@@ -1108,11 +1124,11 @@ fn dbus_socket_connect(sa, addrlen) {
 # same handshake yields 43 bytes without NEGOTIATE_UNIX_FD and 52
 # via the hex-uid form. Never size a read or a state machine off it.
 #
-# This module borrows dbus_frame.cyr's buffer through
-# tail/space/commit rather than owning one. alloc() never frees, and
-# a private buffer would either copy or lose the residual — the
-# server is free to pipeline, so binary message bytes can arrive in
-# the same read as AGREE_UNIX_FD.
+# This module reads dbus_frame.cyr's buffer through base/have/consume
+# (dbus_session_sasl fills it through tail/space/commit) rather than
+# owning one. alloc() never frees, and a private buffer would either
+# copy or lose the residual — the server is free to pipeline, so
+# binary message bytes can arrive in the same read as AGREE_UNIX_FD.
 
 fn dbus_auth_ok()        { return 0; }
 fn dbus_auth_need_more() { return -1100; }
@@ -1313,8 +1329,10 @@ var _dbm_ready = 0;
 # dbus_session_call would have handed that straight to write_all,
 # putting adjacent heap on the wire.
 #
-# dbus_marshal_field_str and dbus_marshal_body_str are exported in
-# dist/samvada.cyr, so the length is not necessarily samvada's own.
+# dbus_marshal_field_str and dbus_marshal_body_str ship in
+# dist/samvada.cyr — private to Cyrius consumers since 1.1.1
+# (src/visibility.cyr), but still GLOBAL symbols in an `object;` build
+# that C code can call — so the length is not necessarily samvada's own.
 #
 # It POISONS rather than truncating, deliberately: a message that did
 # not fit must never go out as a shorter, still-parseable one.
@@ -1540,9 +1558,11 @@ fn dbus_marshal_len() { return _dbm_at; }
 # framer only ever yields a message once `avail >= total` — so the
 # header lengths are already consistent with the bytes present. But
 # "unreachable because the caller happens to validate first" is the
-# exact shape of CRIT-1 and CRIT-2, and this module is exported in
-# the consumer bundle. So the limit is now explicit and enforced
-# here rather than assumed of the caller.
+# exact shape of CRIT-1 and CRIT-2, and this module shipped
+# consumer-reachable in the bundle (private to Cyrius consumers since
+# 1.1.1, src/visibility.cyr; an `object;` build still exports it to C).
+# So the limit is now explicit and enforced here rather than assumed
+# of the caller.
 var _dbu_limit = 0;      # total on-wire length of the current message
 
 # Declare the message's true extent. Every caller that has a framed
@@ -1551,8 +1571,10 @@ var _dbu_limit = 0;      # total on-wire length of the current message
 # and _dbu_limit defaults to 0 — so the decoder's DEFAULT state had NO
 # bounds at all, and a wire-supplied 0xFFFFFFF0 length was handed back
 # to the caller verbatim. That is AUDIT-1 again, re-openable by any
-# path that forgets to set a limit, and this module is exported in the
-# consumer bundle where callers we do not control reach it.
+# path that forgets to set a limit, and this module ships in the consumer
+# bundle, where C code linked against an `object;` build — callers we do
+# not control — can still reach it (Cyrius consumers cannot since 1.1.1,
+# src/visibility.cyr).
 #
 # An unset or nonsensical limit now means EVERYTHING is malformed,
 # rather than everything being permitted. A bounds check whose default
@@ -1908,6 +1930,7 @@ fn dbus_unmarshal_next_fd_index() {
 #   fncall1(bus_slot, bus_out)
 #   fncall4(sp_slot,  bus, pid, buf, len)
 #   fncall2(tc_slot,  bus, sess)
+#   fncall2(rc_slot,  bus, sess)
 #   fncall6(td_slot,  bus, sess, major, minor, fd_out, active_out)
 #   fncall4(rd_slot,  bus, sess, major, minor)
 #   fncall1(pump_slot, bus)
@@ -1936,9 +1959,12 @@ fn dbus_unmarshal_next_fd_index() {
 # SESSION PATH ESCAPING — logind returns paths like
 # `/org/freedesktop/login1/session/_32`, where `_32` is the
 # hex-escaped ASCII of '2'. samvada passes the path through
-# OPAQUELY: it is only ever echoed back as a method target, never
-# parsed or compared, so no unescaping is needed. Anything that
-# starts comparing session ids must implement it first.
+# OPAQUELY: since 1.1.2 it is checked to be a valid object path
+# (dbus_unmarshal_path_ok — on the GetSessionByPID reply, and through
+# dbus_session_sess_ok by every call that sends it), but otherwise it
+# is only ever echoed back as a method target, never compared, so no
+# unescaping is needed. Anything that starts comparing session ids
+# must implement it first.
 
 fn dbus_session_max_serial() { return 4294967295; }
 
@@ -1972,7 +1998,7 @@ var _dbs_closed = 0;
 # every genuine reply. The broker rewrites SENDER to the sender's
 # UNIQUE id on every message it forwards (message_stitch_sender), so
 # a real logind reply arrives with SENDER=":1.5". Verified against
-# all four captured logind replies in tests/fixtures/dbus/: every
+# all five captured logind replies in tests/fixtures/dbus/ (03-07): every
 # one carries a unique name, never the well-known one. Only the bus
 # driver is special-cased, sending as "org.freedesktop.DBus".
 #
@@ -2384,10 +2410,10 @@ fn dbus_session_timeout_ms() { return _dbs_timeout_ms; }
 #
 # CORRECTION (A-6): an earlier version of this comment claimed it was
 # "not reachable from the public API". That is false and was worth
-# fixing rather than leaving. dist/samvada.cyr exports 198 functions
-# against a documented public surface of eight — `@internal` is a
-# comment with no mechanical meaning — so a consumer CAN call this
-# and set every subsequent call's budget to 0. It is in the same
+# fixing rather than leaving. dist/samvada.cyr then exported 198
+# functions against a documented public surface of eight — `@internal`
+# is a comment with no mechanical meaning — so a consumer could call
+# this and set every subsequent call's budget to 0. It is in the same
 # position as dbus_frame_close_fds and the whole dbus_unmarshal_*
 # surface, which is the premise AUDIT-1 already rests on. The real
 # contract is now stated in public-api.md instead of denied here.
@@ -2433,10 +2459,10 @@ fn dbus_session_eagain() { return -11; }
 # a scratch OUT-parameter whose value dies within a few statements;
 # none is live across another's use.
 #   +0,+8  dest_ok       — find_field out, str_at out
-#   +16    take_device   — find_field sig out, UNIX_FDS
+#   +16    take_device, _dbs_body_sig_is — find_field sig out, UNIX_FDS
 #   +24    reply loop    — find_field sig out
 #   +32    reply loop    — ERROR name ptr
-#   +40    take_device   — body signature ptr
+#   +40    take_device, _dbs_body_sig_is — body signature ptr
 #   +48    (free since 1.1.2: the receive no longer has an fd out-slot)
 #   +56    a reply body's string — Hello's unique name, GetSessionByPID's path
 var _dbs_scr = 0;
@@ -2502,8 +2528,9 @@ fn dbus_session_sess_ok(sess) {
 # The C shim gates both TakeDevice and ReleaseDevice on
 # devnum_ok(v) == (v >= 0 && v <= UINT32_MAX) BEFORE the 64->32
 # narrowing, added at 0.5.1 as audit MED-2 because the cast
-# truncated silently. CLAUDE.md says in as many words that a
-# PURE_CYRIUS backend must RE-SUPPLY that check.
+# truncated silently. A PURE_CYRIUS backend must RE-SUPPLY that
+# check: the shim's is not on its path (SECURITY.md records the
+# native check, dbus_session_devnum_ok, since 1.0.1).
 #
 # It did not. The native backend checked only `v < 0`, so a major of
 # 2^32 + 1 was marshalled by _dbm_u32 — which writes the low four
@@ -2876,11 +2903,14 @@ fn dbus_session_sasl_backstop() { return 4096; }
 # blob, then read server lines until AGREE_UNIX_FD.
 #
 #   returns 0              authenticated, fd passing agreed
-#           -13 (EACCES)   the server said REJECTED or ERROR
+#           -13 (EACCES)   the server said REJECTED or ERROR, or broke the
+#                          exchange (an OK without a 32-hex GUID, AGREE
+#                          before OK)
 #           -110           the deadline passed
 #           -104           the server closed the connection
 #           -71 (EPROTO)   the buffer filled with no complete exchange
-#           other < 0      the receive's errno
+#           -12 (ENOMEM)   the handshake scratch could not be allocated
+#           other < 0      the send's, the poll's or the receive's errno
 #
 # Bounded like the call path (1.1.2): one deadline, every wait a poll
 # for the time left, a non-blocking receive after it, EINTR retried
@@ -3376,11 +3406,14 @@ fn dbus_native_populate(t) {
 
 # --- samvada.cyr ---
 
-# @public — samvada API surface (stable across v0.x)
+# @public — samvada API surface (frozen: tools/public_surface.txt)
 # samvada.cyr — entry point for the dbus / logind subset.
 #
 # Consumer-facing surface:
+#   samvada_native_init()                      -> 0|err
+#     (native; src/dbus_session.cyr)
 #   samvada_init(fn_table_ptr)                 -> 0|err
+#     (C-shim entry, via samvada_main)
 #   samvada_session_take_device(major, minor)  -> fd | -err
 #   samvada_session_release_device(major, minor) -> 0|err
 #   samvada_pump_signals()                     -> events_drained|negative_err
@@ -3389,7 +3422,7 @@ fn dbus_native_populate(t) {
 #
 # `samvada_main(table)` is the C-shim entry point. It calls
 # `samvada_init(table)` and then returns immediately — consumers
-# (mabda's _backend_native_surface_configure_logind) drive the
+# (mabda's gpu_surface_configure_native_logind) drive the
 # rest from their own code paths. The "consume samvada" half of
 # the contract is invoked synchronously below the public API.
 #
@@ -3653,9 +3686,12 @@ fn _samvada_drop_control(closing) {
 }
 
 # Ask logind for DRM-master delegation on /dev/dri/card<N>. Returns
-# the dup'd unix_fd on success, or a negative sd-bus errno on
-# failure. The fd's lifetime is the caller's; close() it (or pass
-# it to ReleaseDevice + close) on teardown.
+# the unix_fd on success (the C shim's duplicate, or the descriptor
+# the native reply carried), or a negative sd-bus errno on failure.
+# The caller owns the descriptor and close()s it, but its DRM-master
+# rights end at samvada_release() (ReleaseControl revokes every
+# device): stop drawing, samvada_release(), then close(). To give
+# back one device: samvada_session_release_device(), then close().
 public fn samvada_session_take_device(major, minor) {
     if (_samvada_have_table() == 0) { return -22; }
     if (_samvada_bus == 0)          { return -107; }
@@ -3738,7 +3774,8 @@ public fn samvada_session_take_device(major, minor) {
 }
 
 # Tell logind we're done with the device. Pairs with TakeDevice
-# at teardown (and on PauseDevice if the consumer chooses to drop).
+# at teardown. (PauseDevice is not delivered — ADR-0004 — so no
+# consumer can call this in response to one.)
 #
 # The device leaves samvada's table WHATEVER logind answers (1.1.2): the
 # consumer has said it is done with it. Until then a release that failed
@@ -3817,11 +3854,12 @@ public fn samvada_release() {
     return 0;
 }
 
-# C-shim entry point. The libsystemd shim's `main()` calls into
-# this with the fn-table pointer. We init samvada and return —
-# the consumer drives all subsequent calls. Smoke build (no shim)
-# never reaches this; `src/main.cyr` keeps its own pure-Cyrius
-# entry for `cyrius build`.
+# C-shim entry point. The libsystemd shim's `samvada_shim_init()`
+# (deps/samvada_main.c) calls into this with the fn-table pointer;
+# the shim defines `main()` only under -DSAMVADA_STANDALONE_MAIN.
+# We init samvada and return — the consumer drives all subsequent
+# calls. Smoke build (no shim) never reaches this; `src/main.cyr`
+# keeps its own pure-Cyrius entry for `cyrius build`.
 public fn samvada_main(table) {
     var r = samvada_init(table);
     return r;

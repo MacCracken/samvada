@@ -23,3 +23,5 @@ Decisions about samvada — what we chose, the context, and the consequences we 
 |---|---|---|
 | [0001](0001-c-shim-then-pivot.md) | C-shim-then-pivot for v0.x dbus integration | Accepted |
 | [0002](0002-append-after-kind-ffi-invariant.md) | Append-after-kind FFI table invariant | Accepted |
+| [0003](0003-native-cyrius-dbus.md) | Native Cyrius dbus is the v1.0 path | Accepted |
+| [0004](0004-session-control-lifecycle-and-signal-visibility.md) | Session-control lifecycle, and no signal delivery in 0.x | Accepted |

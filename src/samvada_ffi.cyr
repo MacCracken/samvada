@@ -61,15 +61,19 @@ fn samvada_slot_take_control()           { return 72; }
 fn samvada_slot_release_control()        { return 80; }
 fn samvada_ffi_size()                    { return 88; }
 
-# Backend kinds. NULL = mock / unbound table (CPU tests). LIBSYSTEMD
-# is the v0.x C-shim. PURE_CYRIUS is the v1.0 retirement target.
+# Backend kinds. NULL = an unbound table (a fresh samvada_ffi_alloc);
+# samvada_init rejects it. LIBSYSTEMD is the C shim (deps/samvada_main.c,
+# the fallback until the roadmap deletes it), and the kind the CPU-test mock
+# table sets. PURE_CYRIUS is the native backend (dbus_native_populate,
+# reached via samvada_native_init).
 fn samvada_backend_kind_null()         { return 0; }
 fn samvada_backend_kind_libsystemd()   { return 1; }
 fn samvada_backend_kind_pure_cyrius()  { return 2; }
 
-# Allocate a zero-filled fn-table on the heap. Used by Cyrius-side
-# consumers (e.g. mock backends in tests). The C shim builds its
-# table on the C stack and never calls this.
+# Allocate a zero-filled fn-table on the heap. Used by
+# samvada_native_init (once) and the tests; a consumer cannot name
+# it since 1.1.1 (the bundle is private-by-default). The C shim keeps its
+# table in file-scope static storage and never calls this.
 fn samvada_ffi_alloc() {
     var t = alloc(samvada_ffi_size());
     if (t == 0) { return 0; }
@@ -89,8 +93,8 @@ fn samvada_ffi_get_slot(t, off) {
     return load64(t + off);
 }
 
-# Install a fnptr at `off`. Used by mock backends + C shim's Cyrius-
-# side bindings (when the table is built by Cyrius rather than C).
+# Install a fnptr at `off`. Used by dbus_native_populate (the native
+# backend's table) and the tests.
 fn samvada_ffi_set_slot(t, off, fp) {
     if (t == 0) { return 0; }
     store64(t + off, fp);

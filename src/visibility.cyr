@@ -14,7 +14,8 @@
 # so to a consumer this marker covers the whole bundle, and the
 # `public fn` marks on the eight frozen fns (src/samvada.cyr,
 # src/dbus_session.cyr) are the only way in. It leads the bundle, which
-# is valid on every toolchain a consumer may pin (the floor is 6.6.5).
+# is valid on every toolchain a consumer may pin (the floor is 6.6.13
+# since 1.1.2; it was 6.6.5).
 # Measured on 6.6.5, 6.7.5 and 6.7.18: a marker after top-level
 # DECLARATIONS is fine, but after a top-level statement 6.6.5 and 6.7.5
 # refuse it ("unexpected private") and 6.7.18 refuses every later

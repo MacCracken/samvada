@@ -53,8 +53,10 @@ var _dbm_ready = 0;
 # dbus_session_call would have handed that straight to write_all,
 # putting adjacent heap on the wire.
 #
-# dbus_marshal_field_str and dbus_marshal_body_str are exported in
-# dist/samvada.cyr, so the length is not necessarily samvada's own.
+# dbus_marshal_field_str and dbus_marshal_body_str ship in
+# dist/samvada.cyr — private to Cyrius consumers since 1.1.1
+# (src/visibility.cyr), but still GLOBAL symbols in an `object;` build
+# that C code can call — so the length is not necessarily samvada's own.
 #
 # It POISONS rather than truncating, deliberately: a message that did
 # not fit must never go out as a shorter, still-parseable one.

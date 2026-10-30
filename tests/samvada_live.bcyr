@@ -44,15 +44,17 @@ var _live_minor = 0;
 # Each is invoked many times by bench_run; keep the body to the
 # single round-trip we want to measure.
 
-# WARNING (0.5.1): this bench calls samvada_init + samvada_release per
-# iteration, and as of 0.5.1 init issues TakeControl while release issues
-# ReleaseControl. Run live, this becomes a TakeControl/ReleaseControl storm
-# against logind — and because logind revokes every device taken via
-# TakeDevice when session control is released, a live run would also revoke
-# any DRM master the host session holds. It is HW-gated and therefore inert
-# today, but DO NOT point this at a seated session without first reworking
-# the handshake bench to hold control once and measure only the bus
-# round-trip. Tracked on the roadmap (N-lane, live-bus harness rework).
+# WARNING: since 0.6.0 init takes no session control. The first
+# samvada_session_take_device takes it, and releasing the last held device
+# hands it back (1.1.2), so the take-device bench below issues TakeControl,
+# TakeDevice, ReleaseDevice and ReleaseControl on every iteration. Run live,
+# that is a TakeControl/ReleaseControl storm against logind — and because
+# logind revokes every device taken via TakeDevice when session control is
+# released, a live run would also revoke any DRM master the host session
+# holds. It is HW-gated (and SKIPs unless the table is the libsystemd shim),
+# so it is inert today, but DO NOT point it at a seated session without
+# first reworking it to hold control once. Tracked on the roadmap
+# (tests/samvada_live.bcyr re-pointed at the native backend or retired).
 fn _bench_live_handshake() {
     # Full connect + session-lookup + teardown each iteration.
     # init re-uses the bump-allocated scratch after release, so the

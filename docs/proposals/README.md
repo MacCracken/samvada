@@ -13,4 +13,4 @@ ADRs.
 
 | # | Title | Status |
 |---|---|---|
-| [0001](0001-v1-dbus-backend-pivot.md) | v1.0 dbus backend pivot — pure-Cyrius marshaller vs removal | Open (decision deferred to mabda v4.0 design) |
+| [0001](0001-v1-dbus-backend-pivot.md) | v1.0 dbus backend pivot — pure-Cyrius marshaller vs removal | Accepted — ratified by [ADR-0003](../adr/0003-native-cyrius-dbus.md) (2026-09-09) |

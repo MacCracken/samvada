@@ -246,5 +246,5 @@ ADR-0001's structural bets hold under both exits:
 - [`dbus-marshalling.md`](../architecture/dbus-marshalling.md) — the wire-format slice A.1 re-implements
 - [`public-api.md`](../architecture/public-api.md) — the frozen surface both paths preserve/retire
 - [`sources.md`](../sources.md) — protocol citations [S-1..S-16]
-- [`roadmap.md` §M3](../development/roadmap.md) — the pivot milestone
+- [`roadmap.md` §M3](../development/roadmap.md) — the pivot milestone (M3 left the roadmap on 2026-09-09, when the pivot became the N lane under ADR-0003; `git show 26da7d2:docs/development/roadmap.md` has it)
 - [`tests/samvada_live.bcyr`](../../tests/samvada_live.bcyr) — the live-bus harness both backends share

@@ -5,19 +5,54 @@
 > in [`CHANGELOG.md`](../../CHANGELOG.md), what is left lives in
 > [`roadmap.md`](roadmap.md), and durable rules live in
 > `CLAUDE.md`.
+>
+> What sits between `state-sync` markers is **generated** by
+> `tools/state_sync.py` from the tree; an edit there is overwritten,
+> except the tests table's Covers column, which is written by hand,
+> kept, and never carries a count. Everything else is written by
+> hand, and the `narrative` marker
+> below says which release it was last rewritten for — the tool
+> reports the file stale until it matches `VERSION`.
+
+<!-- state-sync:narrative 1.1.2 -->
+
+## At a glance
+
+<!-- state-sync:begin glance -->
+| | |
+|---|---|
+| **Version** | 1.1.2, released 2026-10-29 (`VERSION`, `CHANGELOG.md`) |
+| **Toolchain pin** | cyrius `6.7.18` (`cyrius.cyml [package].cyrius`) |
+| **CI runners** | `ubuntu-26.04` — every job in `ci.yml`, `release.yml` |
+| **Pinned actions** | `actions/checkout` v7.0.1 · `actions/download-artifact` v8.0.2 · `actions/upload-artifact` v7.0.2 · `softprops/action-gh-release` v3.0.3 (by commit SHA) |
+| **Public surface** | 8 `public fn`s in `dist/samvada.cyr` (`tools/public_surface.txt`) |
+| **Internal fns** | 234, every one private to the bundle (`tools/boundary_check.py`) |
+| **FFI table** | 11 slots, 88 bytes; `kind` at `+64` (`src/samvada_ffi.cyr`) |
+| **`[lib] modules`** | 10, `src/visibility.cyr` first |
+| **stdlib leaves** | 10 declared (`cyrius.cyml [deps]`): string, fmt, alloc, io, vec, str, syscalls, assert, tagged, fnptr; the bundle needs 4 (`dist/samvada.deps`): alloc, syscalls, string, fnptr |
+| **Tests** | 1152 asserts in 6 suites, none failing (§ Tests) |
+| **sd-bus errno map** | 186 rows (`tests/fixtures/sdbus_errno_map.tsv`) |
+| **Wire fixtures** | 15 captures, 14 REAL and 1 SYNTHETIC (`tests/fixtures/dbus/MANIFEST.md`) |
+| **CPU bench baselines** | 4 (`tests/samvada.bcyr`) |
+<!-- state-sync:end glance -->
 
 ## Version
 
-**1.1.2** — 2026-10-29. A deep P(-1) pass: one HIGH — any local user
-could choose the descriptor `TakeDevice` returned — five MEDIUM, and an
-adversarial re-verification of the repairs (`docs/audit/2026-10-29-p1-audit.md`).
-Descriptors are attributed by stream position, with every read bounded
-to one message; `take_device` checks the descriptor is the device asked
-for; calls are bounded by their deadline alone, send and receive; the
-public layer holds devices by number; every CI gate was rebuilt on a
-comment-aware lexer and proven able to fail. Same toolchain as 1.1.0
-(cyrius 6.7.18); consumers need cyrius **≥ 6.6.13** (was 6.6.5: the
-bundle now calls `fd_wait_ready` and `sys_statx`).
+<!-- state-sync:begin version -->
+**1.1.2** — released 2026-10-29, on cyrius `6.7.18`.
+<!-- state-sync:end version -->
+
+A deep P(-1) pass: one HIGH — any local user could choose the descriptor
+`TakeDevice` returned — five MEDIUM, and an adversarial re-verification
+of the repairs (`docs/audit/2026-10-29-p1-audit.md`). Descriptors are
+attributed by stream position, with every read bounded to one message;
+`take_device` checks the descriptor is the device asked for; calls are
+bounded by their deadline alone, send and receive; the public layer
+holds devices by number; the surface, boundary and security-scan gates
+were rebuilt on a comment-aware lexer, and every bypass the reviewers
+demonstrated is a planted violation that must fail. Same toolchain as
+1.1.0; consumers need cyrius **≥ 6.6.13** (was 6.6.5: the bundle now
+calls `fd_wait_ready` and `sys_statx`).
 
 samvada speaks dbus natively in Cyrius over a raw unix socket.
 `samvada_native_init()` gives a consumer a working bus connection
@@ -25,7 +60,8 @@ with **no libsystemd, no C shim, no `pkg-config`, nothing to
 link**. The libsystemd shim is retained as a fallback and as the
 differential reference; its deletion is scheduled for 1.2.0.
 
-Four audit passes have shipped — the pre-1.0 pass over the native
+Six audit passes have shipped (`SECURITY.md` § Audit History), four of
+them over the native backend — the pre-1.0 pass over the native
 marshaller (1.0.0), the A-lane completion (1.0.1), its close-out
 (1.1.1, `docs/audit/2026-10-29-audit.md`) and the 1.1.2 P(-1) pass
 (`docs/audit/2026-10-29-p1-audit.md`), which found a HIGH the first
@@ -36,21 +72,20 @@ the roadmap.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.7.18` (`cyrius.cyml [package].cyrius` — the
-  single source of truth; no version is hardcoded in CI YAML).
+- **Cyrius pin**: `cyrius.cyml [package].cyrius` is the single
+  source of truth (§ At a glance has the version); no version is
+  hardcoded in CI YAML.
 - CI additionally pins the **toolchain tarball's sha256**
   (`CYRIUS_TARBALL_SUM`) and the installer script's commit +
   sha256 — at 1.1.0 the installer is the one at cyrius's `6.7.18`
   tag. A version bump without a sum bump fails loudly, which is
   intended.
-- **CI runners**: every job in `ci.yml` and `release.yml` runs on
-  `ubuntu-26.04`, named explicitly — `ubuntu-latest` still meant
+- **CI runners**: every job names its runner explicitly (§ At a
+  glance has it) — `ubuntu-latest` still meant
   24.04 at 1.1.0, and GitHub listed 26.04 as a **public preview**
   (`actions/runner-images#14226`). `ubuntu-24.04` is the fallback.
-- **Actions**, all by commit SHA (dependabot ages them):
-  `actions/checkout` v7.0.1, `actions/upload-artifact` v7.0.2,
-  `actions/download-artifact` v8.0.2,
-  `softprops/action-gh-release` v3.0.3.
+- **Actions** are pinned by commit SHA, and dependabot ages them;
+  § At a glance lists each one's version.
 - CLI shape notes for this pin:
   - `cyrius vet` requires an explicit source file
     (`cyrius vet src/main.cyr`); the bare form errors.
@@ -90,12 +125,12 @@ Public surface — eight `public fn`s (`src/samvada.cyr`, plus
 **mechanically** by `tools/surface_check.py` in CI. They are the
 **only** fns a consumer can name: the bundle is private-by-default
 (`src/visibility.cyr`, first in `[lib] modules`), and
-`tools/boundary_check.py` proves all 234 others are refused:
+`tools/boundary_check.py` proves every other fn is refused:
 
 - `samvada_native_init()` → `0 | -err`. **The supported entry
   point for the native backend.** Hides the FFI table entirely.
   The table is allocated once and reused across init/release.
-- `samvada_version()` → packed u32 (1.1.2).
+- `samvada_version()` → `VERSION`, packed `(major << 16) | (minor << 8) | patch`.
 - `samvada_session_take_device(major, minor)` → `fd | -err`.
   Acquires session control on first use (ADR-0004) and hands it
   back if the take fails. Device numbers are range-checked
@@ -161,7 +196,8 @@ consumer bundle:
 
 Plumbing:
 
-- `src/samvada_ffi.cyr` — fn-table layout, **11 slots / 88 bytes**.
+- `src/samvada_ffi.cyr` — fn-table layout (§ At a glance has the
+  slot count and size).
   `kind` is at `+64` and stays there forever (ADR-0002);
   `take_control` `+72` and `release_control` `+80` were appended
   after it. CI cross-checks the C `#define`s against the Cyrius
@@ -175,41 +211,49 @@ Plumbing:
 
 ## Tests
 
-**1152 asserts**, in six suites; `cyrius test` reports seven files
-(`src/test.cyr`, the `[build].test` entry, asserts nothing — the
-"6"/"7" printed after the suites is the file count, which 1.1.1's table
-misread as asserts). Every repair in the 1.0.0, 1.0.1, 1.1.1 and 1.1.2
-audits is mutation-tested.
+<!-- state-sync:begin tests -->
+**1152 asserts**, in 6 suites, none failing.
 
 | File | Asserts | Covers |
 |---|---|---|
 | `tests/samvada.tcyr` | 238 | public API, the pure-Cyrius mock backend, FFI layout invariants; the held-device table and the control lifecycle |
-| `tests/dbus_session.tcyr` | 512 | logind layer, reply provenance, descriptor attribution (the H1 proofs of concept), the `rdev` check, timeouts and the send deadline, devnum bounds, hostile SASL, the handshake and Hello over a socketpair; the sd-bus error table (186 rows, and the fixture file read at run time); disconnect, logind restart, Pause/Resume orderings; zero heap per call; sustained fd traffic |
+| `tests/dbus_session.tcyr` | 512 | logind layer, reply provenance, descriptor attribution (the H1 proofs of concept), the `rdev` check, timeouts and the send deadline, devnum bounds, hostile SASL, the handshake and Hello over a socketpair; the sd-bus error table (every row of the fixture file, read at run time); disconnect, logind restart, Pause/Resume orderings; zero heap per call; sustained fd traffic |
 | `tests/dbus_frame.tcyr` | 135 | framing, the receive buffer, the head message's descriptors; bounded reads never cross a message; linear compaction, over-cap floods, the 128 MiB cap |
 | `tests/dbus_codec.tcyr` | 105 | marshal/unmarshal, overflow poisoning, fail-closed bounds, the field walk, whole-array validation, object paths |
 | `tests/dbus_sys.tcyr` | 91 | `SCM_RIGHTS`, every cmsg walked, 253-descriptor room, `MSG_CTRUNC` keeping the bytes, descriptor-leak counting |
 | `tests/dbus_auth.tcyr` | 71 | SASL handshake, the `OK` GUID, the send path |
+<!-- state-sync:end tests -->
+
+`cyrius test` with no operand also runs `src/test.cyr`, the
+`[build].test` entry, which asserts nothing; the `N passed` line it
+prints last counts files, not asserts (1.1.1's table misread it).
+Every repair in the 1.0.0, 1.0.1, 1.1.1 and 1.1.2 audits is
+mutation-tested but one: 1.1.2's EINTR retries (P1-5) have no test
+(`docs/audit/2026-10-29-p1-audit.md` § Still open).
 
 On aarch64 (`qemu-aarch64` user mode) every suite passes but for five
 asserts that need `MSG_CTRUNC`, which qemu-user never delivers to the
 guest (roadmap).
 
-- `tests/fixtures/dbus/` — 15 files of **real captured wire
-  traffic** (14 real, 1 synthetic, labelled in `MANIFEST.md`).
-- `tests/samvada.bcyr` — 4 CPU baselines. History in
+- `tests/fixtures/dbus/` — **real captured wire traffic**, and the
+  synthetic captures, each labelled REAL or SYNTHETIC in
+  `MANIFEST.md`.
+- `tests/samvada.bcyr` — the CPU baselines. History in
   [`../benchmarks.md`](../benchmarks.md).
-- `tests/samvada_live.bcyr` — live-bus bench scaffold. HW-gated;
-  SKIPs without a seated session.
+- `tests/samvada_live.bcyr` — live-bus bench scaffold. HW-gated: it
+  benches only a `kind = LIBSYSTEMD` table on which `samvada_init`
+  succeeds and SKIPs otherwise, so every standalone and CI build SKIPs.
 - `tests/samvada.fcyr` — fuzz stub.
 
 ## Tools
 
 - `tools/cyr_scan.py` — the comment-, string- and directive-aware
-  lexer every gate reads code through (1.1.2): declarations matched
-  anywhere on a line, `pub`/`public` both, every `fn` and `public` token
-  accounted for. `--self-test` runs first in CI.
+  lexer the surface, boundary and security-scan gates read code
+  through (1.1.2): declarations matched anywhere on a line,
+  `pub`/`public` both, every `fn` and `public` token accounted for.
+  `--self-test` runs first in CI.
 - `tools/surface_check.py` + `tools/public_surface.txt` — freezes
-  the 8-fn public surface and requires the bundle's `private` marker;
+  the public surface and requires the bundle's `private` marker;
   **a CI gate**, run right after the distlib freshness check, with a
   planted violation per demonstrated bypass that must fail.
 - `tools/boundary_check.py` — compiles consumers against the bundle:
@@ -223,6 +267,11 @@ guest (roadmap).
   holds `cyrius.cyml` to, each module with its reason.
 - `tools/rxbench.cyr` — the receive-path microbench (benchmarks Run 10);
   not a gate.
+- `tools/state_sync.py` — regenerates this file's `state-sync`
+  blocks from the tree (it runs every suite to count asserts) and,
+  with `--check`, reports them stale. ci.yml warns on a stale
+  snapshot; release.yml refuses to release one. `--self-test` runs
+  first in both.
 - `tools/shim_slot_check.c` — links the C shim against a fake
   libsystemd and calls every slot, checking what each sends: member,
   destination, interface, path and arguments (1.1.2). **A CI gate**,
@@ -235,7 +284,10 @@ guest (roadmap).
   errno; produced `tests/fixtures/sdbus_errno_map.tsv`, and CI's
   c-shim job re-runs it against the runner's libsystemd.
 - `tools/dbus_tap.py` — `AF_UNIX` relay for capturing traffic.
-- `tools/dbus_decode.py` — spec decoder for captured bytes.
+- `tools/dbus_decode.py` — spec decoder for captured bytes. CI's c-shim
+  job decodes every `tests/fixtures/dbus/*.bin` with it, then checks each
+  against `MANIFEST.md`'s size, sha256 prefix and REAL/SYNTHETIC label,
+  with a swapped-label MANIFEST that must fail. **A CI gate**.
 - `tools/differential/` — runs both backends in one process and
   compares error codes. **CI does not run it**: it takes logind session
   control, and refuses to start without `SAMVADA_DIFF_TAKES_CONTROL=1`.
@@ -243,21 +295,22 @@ guest (roadmap).
 
 ## Dependencies
 
-- stdlib (10 leaves declared): string, fmt, alloc, io, vec, str,
-  syscalls, assert, tagged, fnptr — what the tests and smoke binary
-  build against.
-- `dist/samvada.deps` — the distlib-emitted sidecar: the **4**
-  leaves the bundle itself needs (alloc, syscalls, string, fnptr),
-  compile-verified. Tracked, so a `[deps.samvada]` consumer
+- stdlib — the leaves `cyrius.cyml [deps]` declares (§ At a glance):
+  what the tests and smoke binary build against.
+- `dist/samvada.deps` — the distlib-emitted sidecar: the leaves the
+  bundle itself needs (§ At a glance), compile-verified. Tracked, so a `[deps.samvada]` consumer
   fetching the release tag gets it alongside `dist/samvada.cyr`.
 - **No non-stdlib dependencies.** samvada links nothing.
 
 ## Consumers
 
 - **mabda** — pins `[deps.samvada] tag = "1.0.1"` (on cyrius
-  6.7.5). No later release changes its API, so re-pinning is
-  optional; its `[deps] stdlib` already declares every leaf it uses,
-  so the smaller sidecar does not reach it. It calls only
+  6.7.5). No later release changes the API it calls, but 1.0.1 is
+  unsupported and carries P1-1 (HIGH) on the native backend
+  (`SECURITY.md` § Supported Versions), so re-pinning to 1.1.2 is
+  due — its 6.7.5 pin already meets the ≥ 6.6.13 floor; its
+  `[deps] stdlib` already declares every leaf it uses, so the
+  smaller sidecar does not reach it. It calls only
   `samvada_session_take_device` / `samvada_session_release_device`,
   under `-D MABDA_LOGIND` (off by default).
   - **Downstream check, 1.1.2** (compile-only, as for 1.1.1): a

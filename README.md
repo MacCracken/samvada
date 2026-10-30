@@ -68,8 +68,8 @@ preconditions, every error code, the test that pins it:
 [`docs/architecture/public-api.md`](docs/architecture/public-api.md).
 
 > **The eight above are the only fns a consumer can call.**
-> `dist/samvada.cyr` is private-by-default since 1.1.1: naming any of
-> its other 234 fns is a compile error (`'…' is private to its file`),
+> `dist/samvada.cyr` is private-by-default since 1.1.1: naming any
+> other fn in it is a compile error (`'…' is private to its file`),
 > and CI proves it for every one of them.
 
 ## What samvada does natively
@@ -111,7 +111,7 @@ kernel says it is the device asked for.
 ```sh
 cyrius deps                                  # resolve stdlib
 cyrius build src/main.cyr build/samvada      # smoke build
-cyrius test                                  # 1152 asserts
+cyrius test                                  # every suite; counts in docs/development/state.md
 ```
 
 ### Linking into a consumer
@@ -149,7 +149,7 @@ samvada/
 │   ├── lib.cyr            — include chain
 │   ├── visibility.cyr     — makes the bundle private-by-default (bundle only)
 │   ├── samvada.cyr        — public Cyrius API surface
-│   ├── samvada_ffi.cyr    — fn-table slot offsets (11 slots, 88 bytes)
+│   ├── samvada_ffi.cyr    — fn-table slot offsets
 │   ├── dbus_sys.cyr       — SCM_RIGHTS / cmsg
 │   ├── dbus_socket.cyr    — AF_UNIX transport, recv timeout
 │   ├── dbus_frame.cyr     — the receive buffer, framing, fd queue
@@ -159,14 +159,17 @@ samvada/
 │   └── dbus_session.cyr   — the logind calls, reply matching
 ├── deps/samvada_main.c    — libsystemd shim (fallback; retires at 1.2.0)
 ├── dist/                  — tracked bundle consumers resolve via [deps.samvada]
-├── tests/                 — 1152 asserts + fixtures/ (real captured wire bytes, sd-bus's errno table)
+├── tests/                 — the suites (counts in docs/development/state.md) + fixtures/ (real captured wire bytes, sd-bus's errno table)
 ├── tools/
 │   ├── cyr_scan.py        — comment/string-aware lexer the gates read code through
 │   ├── surface_check.py   — freezes the public surface (CI gate)
 │   ├── boundary_check.py  — proves a consumer reaches only that surface (CI gate)
 │   ├── security_scan.py   — no spawning, no system paths, no huge buffers (CI gate)
 │   ├── stdlib_allowed.txt — the frozen [deps].stdlib list the scan enforces
+│   ├── public_surface.txt — the frozen public-fn manifest both surface gates read
+│   ├── shim_symbols.txt   — the only symbols the shim's object may leave undefined (CI gate)
 │   ├── rxbench.cyr        — receive-path microbench (not a gate)
+│   ├── state_sync.py      — regenerates state.md's derived facts; release refuses a stale one
 │   ├── shim_slot_check.c  — every shim slot reaches the wrapper it names (CI gate)
 │   ├── sdbus_errno_probe.c — libsystemd's errno for each error name (CI gate)
 │   ├── dbus_tap.py        — AF_UNIX relay for capturing traffic
@@ -185,9 +188,10 @@ slot fns on every run.
 
 ## Security
 
-Four audit passes have shipped: the pre-1.0 pass over the native
-marshaller ([1.0.0](docs/audit/2026-09-09-native-audit.md)), the
-A-lane completion (1.0.1), its close-out
+Four audit passes have covered the native backend: the pre-1.0
+pass over the native marshaller
+([1.0.0](docs/audit/2026-09-09-native-audit.md)), the A-lane
+completion (1.0.1), its close-out
 ([1.1.1](docs/audit/2026-10-29-audit.md)), and a deep P(-1) pass
 ([1.1.2](docs/audit/2026-10-29-p1-audit.md)) that found a HIGH the
 first three missed — any local user could choose the descriptor
